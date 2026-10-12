@@ -1,0 +1,30 @@
+# Configuración local y credenciales
+.env
+.env.*
+!.env.example
+appsettings.*.local.json
+*.local.config
+ConnectionStrings.local.json
+
+# SQL Server local, respaldos y archivos temporales
+*.mdf
+*.ndf
+*.ldf
+*.bak
+*.trn
+*.tmp
+*.log
+
+# Compilación y dependencias
+bin/
+obj/
+node_modules/
+dist/
+build/
+.vs/
+.idea/
+__pycache__/
+
+# Sistema operativo
+Thumbs.db
+.DS_Store

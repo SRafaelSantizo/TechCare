@@ -1,0 +1,1895 @@
+{
+  "tables": [
+    {
+      "name": "TipoCliente",
+      "module": "Clientes",
+      "purpose": "Clasifica clientes individuales y empresariales.",
+      "cols": [
+        [
+          "TipoClienteID",
+          "tinyint NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(30) NOT NULL UNIQUE"
+        ]
+      ],
+      "pk": [
+        "TipoClienteID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "Cliente",
+      "module": "Clientes",
+      "purpose": "Identidad fiscal y contacto principal del cliente.",
+      "cols": [
+        [
+          "ClienteID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "TipoClienteID",
+          "tinyint NOT NULL"
+        ],
+        [
+          "NIT",
+          "varchar(20) NOT NULL UNIQUE"
+        ],
+        [
+          "Nombre",
+          "nvarchar(150) NOT NULL"
+        ],
+        [
+          "Email",
+          "nvarchar(254) NULL"
+        ],
+        [
+          "Telefono",
+          "varchar(25) NULL"
+        ],
+        [
+          "Direccion",
+          "nvarchar(250) NULL"
+        ],
+        [
+          "Activo",
+          "bit NOT NULL DEFAULT 1"
+        ]
+      ],
+      "pk": [
+        "ClienteID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Cliente_NIT CHECK (LEN(LTRIM(RTRIM(NIT))) > 0)",
+        "CONSTRAINT FK_Cliente_TipoClienteID FOREIGN KEY (TipoClienteID) REFERENCES dbo.TipoCliente (TipoClienteID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Empleado",
+      "module": "Seguridad",
+      "purpose": "Datos laborales independientes de la cuenta de acceso.",
+      "cols": [
+        [
+          "EmpleadoID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "Codigo",
+          "varchar(20) NOT NULL UNIQUE"
+        ],
+        [
+          "Nombres",
+          "nvarchar(80) NOT NULL"
+        ],
+        [
+          "Apellidos",
+          "nvarchar(80) NOT NULL"
+        ],
+        [
+          "Activo",
+          "bit NOT NULL DEFAULT 1"
+        ]
+      ],
+      "pk": [
+        "EmpleadoID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "Usuario",
+      "module": "Seguridad",
+      "purpose": "Cuenta vinculada de forma única con un empleado.",
+      "cols": [
+        [
+          "UsuarioID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "EmpleadoID",
+          "int NOT NULL UNIQUE"
+        ],
+        [
+          "NombreUsuario",
+          "varchar(50) NOT NULL UNIQUE"
+        ],
+        [
+          "PasswordHash",
+          "varchar(255) NOT NULL"
+        ],
+        [
+          "AlgoritmoHash",
+          "varchar(30) NOT NULL DEFAULT 'PBKDF2_SHA256'"
+        ],
+        [
+          "Activo",
+          "bit NOT NULL DEFAULT 1"
+        ],
+        [
+          "FechaCreacion",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ]
+      ],
+      "pk": [
+        "UsuarioID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Usuario_Hash CHECK (LEN(PasswordHash) >= 60)",
+        "CONSTRAINT FK_Usuario_EmpleadoID FOREIGN KEY (EmpleadoID) REFERENCES dbo.Empleado (EmpleadoID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Rol",
+      "module": "Seguridad",
+      "purpose": "Roles funcionales de la aplicación.",
+      "cols": [
+        [
+          "Codigo",
+          "varchar(20) NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(50) NOT NULL UNIQUE"
+        ]
+      ],
+      "pk": [
+        "Codigo"
+      ],
+      "extra": []
+    },
+    {
+      "name": "UsuarioRol",
+      "module": "Seguridad",
+      "purpose": "Asociación N:M de usuarios y roles.",
+      "cols": [
+        [
+          "UsuarioID",
+          "int NOT NULL"
+        ],
+        [
+          "RolCodigo",
+          "varchar(20) NOT NULL"
+        ]
+      ],
+      "pk": [
+        "UsuarioID",
+        "RolCodigo"
+      ],
+      "extra": [
+        "CONSTRAINT FK_UsuarioRol_UsuarioID FOREIGN KEY (UsuarioID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_UsuarioRol_RolCodigo FOREIGN KEY (RolCodigo) REFERENCES dbo.Rol (Codigo) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "TipoEquipo",
+      "module": "Clientes",
+      "purpose": "Categoría técnica de un modelo de equipo.",
+      "cols": [
+        [
+          "TipoEquipoID",
+          "tinyint NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(50) NOT NULL UNIQUE"
+        ]
+      ],
+      "pk": [
+        "TipoEquipoID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "Marca",
+      "module": "Clientes",
+      "purpose": "Fabricante de un modelo.",
+      "cols": [
+        [
+          "MarcaID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(60) NOT NULL UNIQUE"
+        ]
+      ],
+      "pk": [
+        "MarcaID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "ModeloEquipo",
+      "module": "Clientes",
+      "purpose": "Un modelo determina su marca y tipo; no se duplican en Equipo.",
+      "cols": [
+        [
+          "ModeloEquipoID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "MarcaID",
+          "int NOT NULL"
+        ],
+        [
+          "TipoEquipoID",
+          "tinyint NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(80) NOT NULL"
+        ]
+      ],
+      "pk": [
+        "ModeloEquipoID"
+      ],
+      "extra": [
+        "CONSTRAINT UQ_ModeloEquipo UNIQUE (MarcaID, TipoEquipoID, Nombre)",
+        "CONSTRAINT FK_ModeloEquipo_MarcaID FOREIGN KEY (MarcaID) REFERENCES dbo.Marca (MarcaID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_ModeloEquipo_TipoEquipoID FOREIGN KEY (TipoEquipoID) REFERENCES dbo.TipoEquipo (TipoEquipoID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Equipo",
+      "module": "Clientes",
+      "purpose": "Equipo de propietario fijo dentro del alcance del proyecto.",
+      "cols": [
+        [
+          "EquipoID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "ClienteID",
+          "int NOT NULL"
+        ],
+        [
+          "ModeloEquipoID",
+          "int NOT NULL"
+        ],
+        [
+          "NumeroSerie",
+          "varchar(80) NOT NULL UNIQUE"
+        ],
+        [
+          "Descripcion",
+          "nvarchar(500) NOT NULL"
+        ],
+        [
+          "Activo",
+          "bit NOT NULL DEFAULT 1"
+        ]
+      ],
+      "pk": [
+        "EquipoID"
+      ],
+      "extra": [
+        "CONSTRAINT FK_Equipo_ClienteID FOREIGN KEY (ClienteID) REFERENCES dbo.Cliente (ClienteID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Equipo_ModeloEquipoID FOREIGN KEY (ModeloEquipoID) REFERENCES dbo.ModeloEquipo (ModeloEquipoID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Prioridad",
+      "module": "Servicio",
+      "purpose": "Prioridad y orden de atención.",
+      "cols": [
+        [
+          "Codigo",
+          "varchar(10) NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(30) NOT NULL UNIQUE"
+        ],
+        [
+          "Nivel",
+          "tinyint NOT NULL UNIQUE"
+        ]
+      ],
+      "pk": [
+        "Codigo"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Prioridad_Nivel CHECK (Nivel BETWEEN 1 AND 4)"
+      ]
+    },
+    {
+      "name": "EstadoOrden",
+      "module": "Servicio",
+      "purpose": "Estados del ciclo de servicio.",
+      "cols": [
+        [
+          "Codigo",
+          "varchar(30) NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(50) NOT NULL UNIQUE"
+        ],
+        [
+          "EsFinal",
+          "bit NOT NULL DEFAULT 0"
+        ]
+      ],
+      "pk": [
+        "Codigo"
+      ],
+      "extra": []
+    },
+    {
+      "name": "TransicionEstadoOrden",
+      "module": "Servicio",
+      "purpose": "Aristas permitidas del ciclo de estados.",
+      "cols": [
+        [
+          "EstadoOrigen",
+          "varchar(30) NOT NULL"
+        ],
+        [
+          "EstadoDestino",
+          "varchar(30) NOT NULL"
+        ]
+      ],
+      "pk": [
+        "EstadoOrigen",
+        "EstadoDestino"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Transicion_Distinta CHECK (EstadoOrigen <> EstadoDestino)",
+        "CONSTRAINT FK_TransicionEstadoOrden_EstadoOrigen FOREIGN KEY (EstadoOrigen) REFERENCES dbo.EstadoOrden (Codigo) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_TransicionEstadoOrden_EstadoDestino FOREIGN KEY (EstadoDestino) REFERENCES dbo.EstadoOrden (Codigo) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "OrdenServicio",
+      "module": "Servicio",
+      "purpose": "Ingreso del equipo; el cliente se obtiene a través de Equipo.",
+      "cols": [
+        [
+          "OrdenID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "NumeroOrden",
+          "varchar(30) NOT NULL UNIQUE"
+        ],
+        [
+          "EquipoID",
+          "int NOT NULL"
+        ],
+        [
+          "UsuarioRecepcionID",
+          "int NOT NULL"
+        ],
+        [
+          "FechaIngreso",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "ProblemaReportado",
+          "nvarchar(1000) NOT NULL"
+        ],
+        [
+          "PrioridadCodigo",
+          "varchar(10) NOT NULL DEFAULT 'NORMAL'"
+        ],
+        [
+          "EstadoCodigo",
+          "varchar(30) NOT NULL DEFAULT 'RECIBIDO'"
+        ],
+        [
+          "FechaEstimada",
+          "datetime2(0) NULL"
+        ],
+        [
+          "Observaciones",
+          "nvarchar(1000) NULL"
+        ],
+        [
+          "UsuarioCambioID",
+          "int NOT NULL"
+        ],
+        [
+          "FechaCambio",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "ObservacionCambio",
+          "nvarchar(500) NULL"
+        ]
+      ],
+      "pk": [
+        "OrdenID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Orden_Fechas CHECK (FechaCambio >= FechaIngreso AND (FechaEstimada IS NULL OR FechaEstimada >= FechaIngreso))",
+        "CONSTRAINT CK_Orden_Problema CHECK (LEN(LTRIM(RTRIM(ProblemaReportado))) > 0)",
+        "CONSTRAINT FK_OrdenServicio_EquipoID FOREIGN KEY (EquipoID) REFERENCES dbo.Equipo (EquipoID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_OrdenServicio_UsuarioRecepcionID FOREIGN KEY (UsuarioRecepcionID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_OrdenServicio_UsuarioCambioID FOREIGN KEY (UsuarioCambioID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_OrdenServicio_PrioridadCodigo FOREIGN KEY (PrioridadCodigo) REFERENCES dbo.Prioridad (Codigo) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_OrdenServicio_EstadoCodigo FOREIGN KEY (EstadoCodigo) REFERENCES dbo.EstadoOrden (Codigo) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "HistorialEstadoOrden",
+      "module": "Servicio",
+      "purpose": "Eventos inmutables de cambio de estado, incluido el ingreso.",
+      "cols": [
+        [
+          "HistorialID",
+          "bigint IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "OrdenID",
+          "int NOT NULL"
+        ],
+        [
+          "EstadoAnterior",
+          "varchar(30) NULL"
+        ],
+        [
+          "EstadoNuevo",
+          "varchar(30) NOT NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "UsuarioID",
+          "int NOT NULL"
+        ],
+        [
+          "Observacion",
+          "nvarchar(500) NULL"
+        ]
+      ],
+      "pk": [
+        "HistorialID"
+      ],
+      "extra": [
+        "CONSTRAINT FK_HistorialEstadoOrden_OrdenID FOREIGN KEY (OrdenID) REFERENCES dbo.OrdenServicio (OrdenID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_HistorialEstadoOrden_EstadoAnterior FOREIGN KEY (EstadoAnterior) REFERENCES dbo.EstadoOrden (Codigo) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_HistorialEstadoOrden_EstadoNuevo FOREIGN KEY (EstadoNuevo) REFERENCES dbo.EstadoOrden (Codigo) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_HistorialEstadoOrden_UsuarioID FOREIGN KEY (UsuarioID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Diagnostico",
+      "module": "Servicio",
+      "purpose": "Un diagnóstico consolidado por orden; puede no tener reparación.",
+      "cols": [
+        [
+          "DiagnosticoID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "OrdenID",
+          "int NOT NULL UNIQUE"
+        ],
+        [
+          "UsuarioTecnicoID",
+          "int NOT NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "Descripcion",
+          "nvarchar(2000) NOT NULL"
+        ],
+        [
+          "CostoManoObraEstimado",
+          "decimal(12,2) NOT NULL"
+        ]
+      ],
+      "pk": [
+        "DiagnosticoID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Diagnostico_Costo CHECK (CostoManoObraEstimado >= 0)",
+        "CONSTRAINT FK_Diagnostico_OrdenID FOREIGN KEY (OrdenID) REFERENCES dbo.OrdenServicio (OrdenID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Diagnostico_UsuarioTecnicoID FOREIGN KEY (UsuarioTecnicoID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Reparacion",
+      "module": "Servicio",
+      "purpose": "Una reparación por diagnóstico con actividades y consumos.",
+      "cols": [
+        [
+          "ReparacionID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "DiagnosticoID",
+          "int NOT NULL UNIQUE"
+        ],
+        [
+          "UsuarioTecnicoID",
+          "int NOT NULL"
+        ],
+        [
+          "FechaInicio",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "FechaFin",
+          "datetime2(0) NULL"
+        ],
+        [
+          "DescripcionTrabajo",
+          "nvarchar(2000) NOT NULL"
+        ],
+        [
+          "CostoManoObra",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "Estado",
+          "varchar(15) NOT NULL DEFAULT 'EN_PROCESO'"
+        ]
+      ],
+      "pk": [
+        "ReparacionID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Reparacion_Estado CHECK (Estado IN ('EN_PROCESO','TERMINADA'))",
+        "CONSTRAINT CK_Reparacion_Fechas CHECK ((Estado = 'EN_PROCESO' AND FechaFin IS NULL) OR (Estado = 'TERMINADA' AND FechaFin IS NOT NULL AND FechaFin >= FechaInicio))",
+        "CONSTRAINT CK_Reparacion_Costo CHECK (CostoManoObra >= 0)",
+        "CONSTRAINT FK_Reparacion_DiagnosticoID FOREIGN KEY (DiagnosticoID) REFERENCES dbo.Diagnostico (DiagnosticoID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Reparacion_UsuarioTecnicoID FOREIGN KEY (UsuarioTecnicoID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Actividad",
+      "module": "Servicio",
+      "purpose": "Catálogo de tareas técnicas reutilizables.",
+      "cols": [
+        [
+          "ActividadID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(100) NOT NULL UNIQUE"
+        ],
+        [
+          "Activo",
+          "bit NOT NULL DEFAULT 1"
+        ]
+      ],
+      "pk": [
+        "ActividadID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "ReparacionActividad",
+      "module": "Servicio",
+      "purpose": "Asociación N:M de reparaciones y tareas efectuadas.",
+      "cols": [
+        [
+          "ReparacionID",
+          "int NOT NULL"
+        ],
+        [
+          "ActividadID",
+          "int NOT NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "Observacion",
+          "nvarchar(500) NULL"
+        ]
+      ],
+      "pk": [
+        "ReparacionID",
+        "ActividadID"
+      ],
+      "extra": [
+        "CONSTRAINT FK_ReparacionActividad_ReparacionID FOREIGN KEY (ReparacionID) REFERENCES dbo.Reparacion (ReparacionID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_ReparacionActividad_ActividadID FOREIGN KEY (ActividadID) REFERENCES dbo.Actividad (ActividadID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "CategoriaRepuesto",
+      "module": "Inventario",
+      "purpose": "Clasificación de repuestos.",
+      "cols": [
+        [
+          "CategoriaID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(80) NOT NULL UNIQUE"
+        ]
+      ],
+      "pk": [
+        "CategoriaID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "Repuesto",
+      "module": "Inventario",
+      "purpose": "Catálogo con precios actuales de referencia.",
+      "cols": [
+        [
+          "RepuestoID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "CategoriaID",
+          "int NOT NULL"
+        ],
+        [
+          "Codigo",
+          "varchar(30) NOT NULL UNIQUE"
+        ],
+        [
+          "Nombre",
+          "nvarchar(100) NOT NULL"
+        ],
+        [
+          "Descripcion",
+          "nvarchar(500) NULL"
+        ],
+        [
+          "CostoReferencia",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "PrecioVenta",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "Activo",
+          "bit NOT NULL DEFAULT 1"
+        ]
+      ],
+      "pk": [
+        "RepuestoID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Repuesto_Precios CHECK (CostoReferencia >= 0 AND PrecioVenta >= 0)",
+        "CONSTRAINT FK_Repuesto_CategoriaID FOREIGN KEY (CategoriaID) REFERENCES dbo.CategoriaRepuesto (CategoriaID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Proveedor",
+      "module": "Compras",
+      "purpose": "Identidad fiscal y contacto del proveedor.",
+      "cols": [
+        [
+          "ProveedorID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "NIT",
+          "varchar(20) NOT NULL UNIQUE"
+        ],
+        [
+          "Nombre",
+          "nvarchar(150) NOT NULL"
+        ],
+        [
+          "Email",
+          "nvarchar(254) NULL"
+        ],
+        [
+          "Telefono",
+          "varchar(25) NULL"
+        ],
+        [
+          "Direccion",
+          "nvarchar(250) NULL"
+        ],
+        [
+          "Activo",
+          "bit NOT NULL DEFAULT 1"
+        ]
+      ],
+      "pk": [
+        "ProveedorID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "ProveedorRepuesto",
+      "module": "Compras",
+      "purpose": "Asociación N:M del catálogo ofrecido por cada proveedor.",
+      "cols": [
+        [
+          "ProveedorID",
+          "int NOT NULL"
+        ],
+        [
+          "RepuestoID",
+          "int NOT NULL"
+        ],
+        [
+          "CodigoProveedor",
+          "varchar(50) NULL"
+        ]
+      ],
+      "pk": [
+        "ProveedorID",
+        "RepuestoID"
+      ],
+      "extra": [
+        "CONSTRAINT FK_ProveedorRepuesto_ProveedorID FOREIGN KEY (ProveedorID) REFERENCES dbo.Proveedor (ProveedorID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_ProveedorRepuesto_RepuestoID FOREIGN KEY (RepuestoID) REFERENCES dbo.Repuesto (RepuestoID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Bodega",
+      "module": "Inventario",
+      "purpose": "Ubicación de almacenamiento.",
+      "cols": [
+        [
+          "BodegaID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "Codigo",
+          "varchar(20) NOT NULL UNIQUE"
+        ],
+        [
+          "Nombre",
+          "nvarchar(100) NOT NULL"
+        ],
+        [
+          "Direccion",
+          "nvarchar(250) NULL"
+        ],
+        [
+          "Activo",
+          "bit NOT NULL DEFAULT 1"
+        ]
+      ],
+      "pk": [
+        "BodegaID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "Inventario",
+      "module": "Inventario",
+      "purpose": "Asociación N:M repuesto/bodega y mínimo local; stock en vInventario.",
+      "cols": [
+        [
+          "BodegaID",
+          "int NOT NULL"
+        ],
+        [
+          "RepuestoID",
+          "int NOT NULL"
+        ],
+        [
+          "StockMinimo",
+          "int NOT NULL DEFAULT 5"
+        ]
+      ],
+      "pk": [
+        "BodegaID",
+        "RepuestoID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Inventario_Minimo CHECK (StockMinimo >= 0)",
+        "CONSTRAINT FK_Inventario_BodegaID FOREIGN KEY (BodegaID) REFERENCES dbo.Bodega (BodegaID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Inventario_RepuestoID FOREIGN KEY (RepuestoID) REFERENCES dbo.Repuesto (RepuestoID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Compra",
+      "module": "Compras",
+      "purpose": "Encabezado de compra; la recepción es completa y única.",
+      "cols": [
+        [
+          "CompraID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "NumeroCompra",
+          "varchar(30) NOT NULL UNIQUE"
+        ],
+        [
+          "ProveedorID",
+          "int NOT NULL"
+        ],
+        [
+          "UsuarioRegistroID",
+          "int NOT NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "Estado",
+          "varchar(12) NOT NULL DEFAULT 'PENDIENTE'"
+        ],
+        [
+          "FechaRecepcion",
+          "datetime2(0) NULL"
+        ],
+        [
+          "Observaciones",
+          "nvarchar(1000) NULL"
+        ]
+      ],
+      "pk": [
+        "CompraID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Compra_Estado CHECK (Estado IN ('PENDIENTE','RECIBIDA','ANULADA'))",
+        "CONSTRAINT CK_Compra_Recepcion CHECK ((Estado = 'RECIBIDA' AND FechaRecepcion IS NOT NULL AND FechaRecepcion >= Fecha) OR (Estado <> 'RECIBIDA' AND FechaRecepcion IS NULL))",
+        "CONSTRAINT FK_Compra_ProveedorID FOREIGN KEY (ProveedorID) REFERENCES dbo.Proveedor (ProveedorID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Compra_UsuarioRegistroID FOREIGN KEY (UsuarioRegistroID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "DetalleCompra",
+      "module": "Compras",
+      "purpose": "Líneas con cantidad, costo histórico y bodega destino.",
+      "cols": [
+        [
+          "CompraID",
+          "int NOT NULL"
+        ],
+        [
+          "Linea",
+          "smallint NOT NULL"
+        ],
+        [
+          "BodegaID",
+          "int NOT NULL"
+        ],
+        [
+          "RepuestoID",
+          "int NOT NULL"
+        ],
+        [
+          "Cantidad",
+          "int NOT NULL"
+        ],
+        [
+          "CostoUnitario",
+          "decimal(12,2) NOT NULL"
+        ]
+      ],
+      "pk": [
+        "CompraID",
+        "Linea"
+      ],
+      "extra": [
+        "CONSTRAINT CK_DetalleCompra_Valores CHECK (Linea > 0 AND Cantidad > 0 AND CostoUnitario >= 0)",
+        "CONSTRAINT FK_DetalleCompra_CompraID FOREIGN KEY (CompraID) REFERENCES dbo.Compra (CompraID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_DetalleCompra_BodegaID_RepuestoID FOREIGN KEY (BodegaID, RepuestoID) REFERENCES dbo.Inventario (BodegaID, RepuestoID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "ReparacionRepuesto",
+      "module": "Inventario",
+      "purpose": "Consumos con cantidad y precio/costo históricos.",
+      "cols": [
+        [
+          "ReparacionID",
+          "int NOT NULL"
+        ],
+        [
+          "Linea",
+          "smallint NOT NULL"
+        ],
+        [
+          "BodegaID",
+          "int NOT NULL"
+        ],
+        [
+          "RepuestoID",
+          "int NOT NULL"
+        ],
+        [
+          "Cantidad",
+          "int NOT NULL"
+        ],
+        [
+          "CostoUnitario",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "PrecioUnitario",
+          "decimal(12,2) NOT NULL"
+        ]
+      ],
+      "pk": [
+        "ReparacionID",
+        "Linea"
+      ],
+      "extra": [
+        "CONSTRAINT CK_ReparacionRepuesto_Valores CHECK (Linea > 0 AND Cantidad > 0 AND CostoUnitario >= 0 AND PrecioUnitario >= 0)",
+        "CONSTRAINT FK_ReparacionRepuesto_ReparacionID FOREIGN KEY (ReparacionID) REFERENCES dbo.Reparacion (ReparacionID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_ReparacionRepuesto_BodegaID_RepuestoID FOREIGN KEY (BodegaID, RepuestoID) REFERENCES dbo.Inventario (BodegaID, RepuestoID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "MovimientoInventario",
+      "module": "Inventario",
+      "purpose": "Evento con FK al detalle origen; cantidad, bodega y repuesto se obtienen de ese detalle.",
+      "cols": [
+        [
+          "MovimientoID",
+          "bigint IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "CompraID",
+          "int NULL"
+        ],
+        [
+          "LineaCompra",
+          "smallint NULL"
+        ],
+        [
+          "ReparacionID",
+          "int NULL"
+        ],
+        [
+          "LineaReparacion",
+          "smallint NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "UsuarioID",
+          "int NOT NULL"
+        ],
+        [
+          "ExistenciaResultante",
+          "bigint NOT NULL"
+        ],
+        [
+          "Tipo",
+          "AS CONVERT(char(1), CASE WHEN CompraID IS NOT NULL THEN 'E' ELSE 'S' END) PERSISTED"
+        ]
+      ],
+      "pk": [
+        "MovimientoID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Movimiento_Origen CHECK ((CompraID IS NOT NULL AND LineaCompra IS NOT NULL AND ReparacionID IS NULL AND LineaReparacion IS NULL) OR (CompraID IS NULL AND LineaCompra IS NULL AND ReparacionID IS NOT NULL AND LineaReparacion IS NOT NULL))",
+        "CONSTRAINT CK_Movimiento_Existencia CHECK (ExistenciaResultante >= 0)",
+        "CONSTRAINT FK_MovimientoInventario_CompraID_LineaCompra FOREIGN KEY (CompraID, LineaCompra) REFERENCES dbo.DetalleCompra (CompraID, Linea) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_MovimientoInventario_ReparacionID_LineaReparacion FOREIGN KEY (ReparacionID, LineaReparacion) REFERENCES dbo.ReparacionRepuesto (ReparacionID, Linea) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_MovimientoInventario_UsuarioID FOREIGN KEY (UsuarioID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Factura",
+      "module": "Caja",
+      "purpose": "Documento fiscal histórico de una orden; totales calculados en vFacturaSaldo.",
+      "cols": [
+        [
+          "FacturaID",
+          "int IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "NumeroFactura",
+          "varchar(30) NOT NULL UNIQUE"
+        ],
+        [
+          "OrdenID",
+          "int NOT NULL UNIQUE"
+        ],
+        [
+          "UsuarioEmisionID",
+          "int NOT NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "NITFacturacion",
+          "varchar(20) NOT NULL"
+        ],
+        [
+          "NombreFacturacion",
+          "nvarchar(150) NOT NULL"
+        ],
+        [
+          "DireccionFacturacion",
+          "nvarchar(250) NULL"
+        ],
+        [
+          "TasaImpuesto",
+          "decimal(5,4) NOT NULL DEFAULT 0.1200"
+        ],
+        [
+          "Estado",
+          "varchar(10) NOT NULL DEFAULT 'EMITIDA'"
+        ]
+      ],
+      "pk": [
+        "FacturaID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Factura_Impuesto CHECK (TasaImpuesto BETWEEN 0 AND 1)",
+        "CONSTRAINT CK_Factura_Estado CHECK (Estado IN ('EMITIDA','ANULADA'))",
+        "CONSTRAINT FK_Factura_OrdenID FOREIGN KEY (OrdenID) REFERENCES dbo.OrdenServicio (OrdenID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Factura_UsuarioEmisionID FOREIGN KEY (UsuarioEmisionID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "FacturaDetalle",
+      "module": "Caja",
+      "purpose": "Concepto facturado y precio pactado; nunca lee el precio actual.",
+      "cols": [
+        [
+          "FacturaID",
+          "int NOT NULL"
+        ],
+        [
+          "Linea",
+          "smallint NOT NULL"
+        ],
+        [
+          "TipoConcepto",
+          "varchar(3) NOT NULL"
+        ],
+        [
+          "ReparacionID",
+          "int NOT NULL"
+        ],
+        [
+          "LineaReparacion",
+          "smallint NULL"
+        ],
+        [
+          "Concepto",
+          "nvarchar(200) NOT NULL"
+        ],
+        [
+          "Cantidad",
+          "int NOT NULL"
+        ],
+        [
+          "PrecioUnitario",
+          "decimal(12,2) NOT NULL"
+        ]
+      ],
+      "pk": [
+        "FacturaID",
+        "Linea"
+      ],
+      "extra": [
+        "CONSTRAINT CK_FacturaDetalle_Tipo CHECK ((TipoConcepto = 'MO' AND LineaReparacion IS NULL AND Cantidad = 1) OR (TipoConcepto = 'REP' AND LineaReparacion IS NOT NULL))",
+        "CONSTRAINT CK_FacturaDetalle_Valores CHECK (Linea > 0 AND Cantidad > 0 AND PrecioUnitario >= 0)",
+        "CONSTRAINT FK_FacturaDetalle_FacturaID FOREIGN KEY (FacturaID) REFERENCES dbo.Factura (FacturaID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_FacturaDetalle_ReparacionID FOREIGN KEY (ReparacionID) REFERENCES dbo.Reparacion (ReparacionID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_FacturaDetalle_ReparacionID_LineaReparacion FOREIGN KEY (ReparacionID, LineaReparacion) REFERENCES dbo.ReparacionRepuesto (ReparacionID, Linea) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "MetodoPago",
+      "module": "Caja",
+      "purpose": "Medios de pago permitidos.",
+      "cols": [
+        [
+          "MetodoPagoID",
+          "tinyint NOT NULL"
+        ],
+        [
+          "Nombre",
+          "nvarchar(40) NOT NULL UNIQUE"
+        ]
+      ],
+      "pk": [
+        "MetodoPagoID"
+      ],
+      "extra": []
+    },
+    {
+      "name": "Pago",
+      "module": "Caja",
+      "purpose": "Abono inmutable; múltiples pagos por factura.",
+      "cols": [
+        [
+          "PagoID",
+          "bigint IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "FacturaID",
+          "int NOT NULL"
+        ],
+        [
+          "MetodoPagoID",
+          "tinyint NOT NULL"
+        ],
+        [
+          "UsuarioRegistroID",
+          "int NOT NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "Monto",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "Referencia",
+          "nvarchar(100) NULL"
+        ]
+      ],
+      "pk": [
+        "PagoID"
+      ],
+      "extra": [
+        "CONSTRAINT CK_Pago_Monto CHECK (Monto > 0)",
+        "CONSTRAINT FK_Pago_FacturaID FOREIGN KEY (FacturaID) REFERENCES dbo.Factura (FacturaID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Pago_MetodoPagoID FOREIGN KEY (MetodoPagoID) REFERENCES dbo.MetodoPago (MetodoPagoID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Pago_UsuarioRegistroID FOREIGN KEY (UsuarioRegistroID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "Entrega",
+      "module": "Caja",
+      "purpose": "Cierre único con identificación de la persona que recibe.",
+      "cols": [
+        [
+          "OrdenID",
+          "int NOT NULL"
+        ],
+        [
+          "UsuarioEntregaID",
+          "int NOT NULL"
+        ],
+        [
+          "NombreRecibe",
+          "nvarchar(150) NOT NULL"
+        ],
+        [
+          "DocumentoRecibe",
+          "varchar(30) NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "Observaciones",
+          "nvarchar(1000) NULL"
+        ]
+      ],
+      "pk": [
+        "OrdenID"
+      ],
+      "extra": [
+        "CONSTRAINT FK_Entrega_OrdenID FOREIGN KEY (OrdenID) REFERENCES dbo.OrdenServicio (OrdenID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_Entrega_UsuarioEntregaID FOREIGN KEY (UsuarioEntregaID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    },
+    {
+      "name": "AuditoriaPrecioRepuesto",
+      "module": "Inventario",
+      "purpose": "Eventos de auditoría de cambio de costo/precio del catálogo.",
+      "cols": [
+        [
+          "AuditoriaID",
+          "bigint IDENTITY(1,1) NOT NULL"
+        ],
+        [
+          "RepuestoID",
+          "int NOT NULL"
+        ],
+        [
+          "CostoAnterior",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "CostoNuevo",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "PrecioAnterior",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "PrecioNuevo",
+          "decimal(12,2) NOT NULL"
+        ],
+        [
+          "Fecha",
+          "datetime2(0) NOT NULL DEFAULT SYSUTCDATETIME()"
+        ],
+        [
+          "LoginSQL",
+          "nvarchar(128) NOT NULL"
+        ],
+        [
+          "UsuarioAplicacionID",
+          "int NULL"
+        ]
+      ],
+      "pk": [
+        "AuditoriaID"
+      ],
+      "extra": [
+        "CONSTRAINT FK_AuditoriaPrecioRepuesto_RepuestoID FOREIGN KEY (RepuestoID) REFERENCES dbo.Repuesto (RepuestoID) ON DELETE NO ACTION ON UPDATE NO ACTION",
+        "CONSTRAINT FK_AuditoriaPrecioRepuesto_UsuarioAplicacionID FOREIGN KEY (UsuarioAplicacionID) REFERENCES dbo.Usuario (UsuarioID) ON DELETE NO ACTION ON UPDATE NO ACTION"
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "child": "Cliente",
+      "cols": [
+        "TipoClienteID"
+      ],
+      "parent": "TipoCliente",
+      "refs": [
+        "TipoClienteID"
+      ]
+    },
+    {
+      "child": "Usuario",
+      "cols": [
+        "EmpleadoID"
+      ],
+      "parent": "Empleado",
+      "refs": [
+        "EmpleadoID"
+      ]
+    },
+    {
+      "child": "UsuarioRol",
+      "cols": [
+        "UsuarioID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "UsuarioRol",
+      "cols": [
+        "RolCodigo"
+      ],
+      "parent": "Rol",
+      "refs": [
+        "Codigo"
+      ]
+    },
+    {
+      "child": "ModeloEquipo",
+      "cols": [
+        "MarcaID"
+      ],
+      "parent": "Marca",
+      "refs": [
+        "MarcaID"
+      ]
+    },
+    {
+      "child": "ModeloEquipo",
+      "cols": [
+        "TipoEquipoID"
+      ],
+      "parent": "TipoEquipo",
+      "refs": [
+        "TipoEquipoID"
+      ]
+    },
+    {
+      "child": "Equipo",
+      "cols": [
+        "ClienteID"
+      ],
+      "parent": "Cliente",
+      "refs": [
+        "ClienteID"
+      ]
+    },
+    {
+      "child": "Equipo",
+      "cols": [
+        "ModeloEquipoID"
+      ],
+      "parent": "ModeloEquipo",
+      "refs": [
+        "ModeloEquipoID"
+      ]
+    },
+    {
+      "child": "TransicionEstadoOrden",
+      "cols": [
+        "EstadoOrigen"
+      ],
+      "parent": "EstadoOrden",
+      "refs": [
+        "Codigo"
+      ]
+    },
+    {
+      "child": "TransicionEstadoOrden",
+      "cols": [
+        "EstadoDestino"
+      ],
+      "parent": "EstadoOrden",
+      "refs": [
+        "Codigo"
+      ]
+    },
+    {
+      "child": "OrdenServicio",
+      "cols": [
+        "EquipoID"
+      ],
+      "parent": "Equipo",
+      "refs": [
+        "EquipoID"
+      ]
+    },
+    {
+      "child": "OrdenServicio",
+      "cols": [
+        "UsuarioRecepcionID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "OrdenServicio",
+      "cols": [
+        "UsuarioCambioID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "OrdenServicio",
+      "cols": [
+        "PrioridadCodigo"
+      ],
+      "parent": "Prioridad",
+      "refs": [
+        "Codigo"
+      ]
+    },
+    {
+      "child": "OrdenServicio",
+      "cols": [
+        "EstadoCodigo"
+      ],
+      "parent": "EstadoOrden",
+      "refs": [
+        "Codigo"
+      ]
+    },
+    {
+      "child": "HistorialEstadoOrden",
+      "cols": [
+        "OrdenID"
+      ],
+      "parent": "OrdenServicio",
+      "refs": [
+        "OrdenID"
+      ]
+    },
+    {
+      "child": "HistorialEstadoOrden",
+      "cols": [
+        "EstadoAnterior"
+      ],
+      "parent": "EstadoOrden",
+      "refs": [
+        "Codigo"
+      ]
+    },
+    {
+      "child": "HistorialEstadoOrden",
+      "cols": [
+        "EstadoNuevo"
+      ],
+      "parent": "EstadoOrden",
+      "refs": [
+        "Codigo"
+      ]
+    },
+    {
+      "child": "HistorialEstadoOrden",
+      "cols": [
+        "UsuarioID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "Diagnostico",
+      "cols": [
+        "OrdenID"
+      ],
+      "parent": "OrdenServicio",
+      "refs": [
+        "OrdenID"
+      ]
+    },
+    {
+      "child": "Diagnostico",
+      "cols": [
+        "UsuarioTecnicoID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "Reparacion",
+      "cols": [
+        "DiagnosticoID"
+      ],
+      "parent": "Diagnostico",
+      "refs": [
+        "DiagnosticoID"
+      ]
+    },
+    {
+      "child": "Reparacion",
+      "cols": [
+        "UsuarioTecnicoID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "ReparacionActividad",
+      "cols": [
+        "ReparacionID"
+      ],
+      "parent": "Reparacion",
+      "refs": [
+        "ReparacionID"
+      ]
+    },
+    {
+      "child": "ReparacionActividad",
+      "cols": [
+        "ActividadID"
+      ],
+      "parent": "Actividad",
+      "refs": [
+        "ActividadID"
+      ]
+    },
+    {
+      "child": "Repuesto",
+      "cols": [
+        "CategoriaID"
+      ],
+      "parent": "CategoriaRepuesto",
+      "refs": [
+        "CategoriaID"
+      ]
+    },
+    {
+      "child": "ProveedorRepuesto",
+      "cols": [
+        "ProveedorID"
+      ],
+      "parent": "Proveedor",
+      "refs": [
+        "ProveedorID"
+      ]
+    },
+    {
+      "child": "ProveedorRepuesto",
+      "cols": [
+        "RepuestoID"
+      ],
+      "parent": "Repuesto",
+      "refs": [
+        "RepuestoID"
+      ]
+    },
+    {
+      "child": "Inventario",
+      "cols": [
+        "BodegaID"
+      ],
+      "parent": "Bodega",
+      "refs": [
+        "BodegaID"
+      ]
+    },
+    {
+      "child": "Inventario",
+      "cols": [
+        "RepuestoID"
+      ],
+      "parent": "Repuesto",
+      "refs": [
+        "RepuestoID"
+      ]
+    },
+    {
+      "child": "Compra",
+      "cols": [
+        "ProveedorID"
+      ],
+      "parent": "Proveedor",
+      "refs": [
+        "ProveedorID"
+      ]
+    },
+    {
+      "child": "Compra",
+      "cols": [
+        "UsuarioRegistroID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "DetalleCompra",
+      "cols": [
+        "CompraID"
+      ],
+      "parent": "Compra",
+      "refs": [
+        "CompraID"
+      ]
+    },
+    {
+      "child": "DetalleCompra",
+      "cols": [
+        "BodegaID",
+        "RepuestoID"
+      ],
+      "parent": "Inventario",
+      "refs": [
+        "BodegaID",
+        "RepuestoID"
+      ]
+    },
+    {
+      "child": "ReparacionRepuesto",
+      "cols": [
+        "ReparacionID"
+      ],
+      "parent": "Reparacion",
+      "refs": [
+        "ReparacionID"
+      ]
+    },
+    {
+      "child": "ReparacionRepuesto",
+      "cols": [
+        "BodegaID",
+        "RepuestoID"
+      ],
+      "parent": "Inventario",
+      "refs": [
+        "BodegaID",
+        "RepuestoID"
+      ]
+    },
+    {
+      "child": "MovimientoInventario",
+      "cols": [
+        "CompraID",
+        "LineaCompra"
+      ],
+      "parent": "DetalleCompra",
+      "refs": [
+        "CompraID",
+        "Linea"
+      ]
+    },
+    {
+      "child": "MovimientoInventario",
+      "cols": [
+        "ReparacionID",
+        "LineaReparacion"
+      ],
+      "parent": "ReparacionRepuesto",
+      "refs": [
+        "ReparacionID",
+        "Linea"
+      ]
+    },
+    {
+      "child": "MovimientoInventario",
+      "cols": [
+        "UsuarioID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "Factura",
+      "cols": [
+        "OrdenID"
+      ],
+      "parent": "OrdenServicio",
+      "refs": [
+        "OrdenID"
+      ]
+    },
+    {
+      "child": "Factura",
+      "cols": [
+        "UsuarioEmisionID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "FacturaDetalle",
+      "cols": [
+        "FacturaID"
+      ],
+      "parent": "Factura",
+      "refs": [
+        "FacturaID"
+      ]
+    },
+    {
+      "child": "FacturaDetalle",
+      "cols": [
+        "ReparacionID"
+      ],
+      "parent": "Reparacion",
+      "refs": [
+        "ReparacionID"
+      ]
+    },
+    {
+      "child": "FacturaDetalle",
+      "cols": [
+        "ReparacionID",
+        "LineaReparacion"
+      ],
+      "parent": "ReparacionRepuesto",
+      "refs": [
+        "ReparacionID",
+        "Linea"
+      ]
+    },
+    {
+      "child": "Pago",
+      "cols": [
+        "FacturaID"
+      ],
+      "parent": "Factura",
+      "refs": [
+        "FacturaID"
+      ]
+    },
+    {
+      "child": "Pago",
+      "cols": [
+        "MetodoPagoID"
+      ],
+      "parent": "MetodoPago",
+      "refs": [
+        "MetodoPagoID"
+      ]
+    },
+    {
+      "child": "Pago",
+      "cols": [
+        "UsuarioRegistroID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "Entrega",
+      "cols": [
+        "OrdenID"
+      ],
+      "parent": "OrdenServicio",
+      "refs": [
+        "OrdenID"
+      ]
+    },
+    {
+      "child": "Entrega",
+      "cols": [
+        "UsuarioEntregaID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    },
+    {
+      "child": "AuditoriaPrecioRepuesto",
+      "cols": [
+        "RepuestoID"
+      ],
+      "parent": "Repuesto",
+      "refs": [
+        "RepuestoID"
+      ]
+    },
+    {
+      "child": "AuditoriaPrecioRepuesto",
+      "cols": [
+        "UsuarioAplicacionID"
+      ],
+      "parent": "Usuario",
+      "refs": [
+        "UsuarioID"
+      ]
+    }
+  ],
+  "indexes": [
+    [
+      "UX_Movimiento_Compra",
+      "MovimientoInventario",
+      "CompraID, LineaCompra",
+      "UNIQUE",
+      "CompraID IS NOT NULL"
+    ],
+    [
+      "UX_Movimiento_Reparacion",
+      "MovimientoInventario",
+      "ReparacionID, LineaReparacion",
+      "UNIQUE",
+      "ReparacionID IS NOT NULL"
+    ],
+    [
+      "UX_FacturaDetalle_ManoObra",
+      "FacturaDetalle",
+      "FacturaID",
+      "UNIQUE",
+      "TipoConcepto = 'MO'"
+    ],
+    [
+      "UX_FacturaDetalle_Consumo",
+      "FacturaDetalle",
+      "ReparacionID, LineaReparacion",
+      "UNIQUE",
+      "LineaReparacion IS NOT NULL"
+    ],
+    [
+      "IX_Equipo_Cliente",
+      "Equipo",
+      "ClienteID",
+      "",
+      ""
+    ],
+    [
+      "IX_Orden_Estado_Fecha",
+      "OrdenServicio",
+      "EstadoCodigo, FechaIngreso",
+      "",
+      ""
+    ],
+    [
+      "IX_Orden_Equipo_Fecha",
+      "OrdenServicio",
+      "EquipoID, FechaIngreso",
+      "",
+      ""
+    ],
+    [
+      "IX_Historial_Orden",
+      "HistorialEstadoOrden",
+      "OrdenID, HistorialID",
+      "",
+      ""
+    ],
+    [
+      "IX_Diagnostico_Tecnico_Fecha",
+      "Diagnostico",
+      "UsuarioTecnicoID, Fecha",
+      "",
+      ""
+    ],
+    [
+      "IX_Reparacion_Tecnico_Fecha",
+      "Reparacion",
+      "UsuarioTecnicoID, FechaInicio",
+      "",
+      ""
+    ],
+    [
+      "IX_DetalleCompra_Inventario",
+      "DetalleCompra",
+      "BodegaID, RepuestoID",
+      "",
+      ""
+    ],
+    [
+      "IX_Consumo_Inventario",
+      "ReparacionRepuesto",
+      "BodegaID, RepuestoID",
+      "",
+      ""
+    ],
+    [
+      "IX_Compra_Proveedor_Fecha",
+      "Compra",
+      "ProveedorID, Fecha",
+      "",
+      ""
+    ],
+    [
+      "IX_Movimiento_Fecha",
+      "MovimientoInventario",
+      "Fecha",
+      "",
+      ""
+    ],
+    [
+      "IX_Factura_Fecha",
+      "Factura",
+      "Fecha",
+      "",
+      ""
+    ],
+    [
+      "IX_Pago_Factura_Fecha",
+      "Pago",
+      "FacturaID, Fecha",
+      "",
+      ""
+    ],
+    [
+      "IX_Inventario_Repuesto",
+      "Inventario",
+      "RepuestoID, BodegaID",
+      "",
+      ""
+    ]
+  ]
+}

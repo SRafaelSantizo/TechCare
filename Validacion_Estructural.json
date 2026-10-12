@@ -1,0 +1,42 @@
+{
+  "status": "Revisión estática tras consolidar triggers; ejecución real de SQL Server pendiente.",
+  "counts": {
+    "tablas": 35,
+    "vistas": 7,
+    "funciones": 4,
+    "procedimientos": 14,
+    "triggers": 16,
+    "indices_no_agrupados": 17,
+    "FK": 51,
+    "CHECK": 23,
+    "DEFAULT": 30
+  },
+  "checks": [
+    "35 tablas, todas las PK/FK existen y los tipos de las FK coinciden.",
+    "Fixture: 118 movimientos, stock no negativo y 30 facturas con importes coherentes.",
+    "12 reportes sin SELECT * ni DISTINCT; 9 reportes recorren 6 o más objetos.",
+    "Se consolidaron 12 pares de triggers conservando sus validaciones y protecciones.",
+    "Las tablas, columnas, claves, procedimientos, vistas, funciones e índices no se modificaron.",
+    "Los 16 triggers conservan el cuerpo original de sus validaciones; únicamente se agregan las protecciones fusionadas.",
+    "El script 05 contiene exactamente las mismas 16 definiciones que el maestro.",
+    "Se verificaron literales y paréntesis de los scripts modificados; no equivale a compilarlos en SQL Server.",
+    "Datos de prueba, reportes, modelo, diagramas y PDF original permanecen idénticos."
+  ],
+  "report_join_counts": [
+    9,
+    7,
+    10,
+    7,
+    8,
+    4,
+    4,
+    6,
+    9,
+    8,
+    5,
+    15
+  ],
+  "sql_server_execution": "Pendiente: ejecutar 01 a 04 en una base nueva, o 05 y 04 en la base existente.",
+  "syntax_validation": "No se ejecutó un parser T-SQL ni SQL Server en esta actualización.",
+  "additional_sql_tests": 6
+}
