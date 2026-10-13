@@ -28,3 +28,10 @@ __pycache__/
 # Sistema operativo
 Thumbs.db
 .DS_Store
+
+**/target/
+**/.idea/
+*.iml
+.env
+.env.*
+!.env.example
