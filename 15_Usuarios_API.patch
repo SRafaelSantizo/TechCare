@@ -1,0 +1,1269 @@
+diff --git a/13_Usuarios_Procedimientos.sql b/13_Usuarios_Procedimientos.sql
+new file mode 100644
+index 0000000..5aaead0
+--- /dev/null
++++ b/13_Usuarios_Procedimientos.sql
+@@ -0,0 +1,186 @@
++-- Ejecutar una vez sobre la base TechCare existente. Puede repetirse.
++-- Agrega el alta de cuentas para ADMIN; conserva las tablas y los datos actuales.
++USE [TechCare];
++GO
++SET ANSI_NULLS ON;
++SET QUOTED_IDENTIFIER ON;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spListarUsuarios
++    @UsuarioActorID int,
++    @UsuarioID int = NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    IF ISNULL(dbo.fnTieneRol(@UsuarioActorID, 'ADMIN'), 0) <> 1
++        THROW 51504, N'La operación requiere un administrador activo.', 1;
++    IF @UsuarioID IS NOT NULL AND @UsuarioID <= 0
++        THROW 51500, N'El identificador de usuario debe ser positivo.', 1;
++    IF @UsuarioID IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.Usuario WHERE UsuarioID = @UsuarioID)
++        THROW 51502, N'El usuario no existe.', 1;
++
++    SELECT u.UsuarioID, u.EmpleadoID, e.Codigo AS EmpleadoCodigo,
++           e.Nombres, e.Apellidos, u.NombreUsuario,
++           u.Activo AS UsuarioActivo, e.Activo AS EmpleadoActivo, u.FechaCreacion,
++           ISNULL((SELECT STRING_AGG(CONVERT(varchar(max), ur.RolCodigo), ',')
++                          WITHIN GROUP (ORDER BY ur.RolCodigo)
++                   FROM dbo.UsuarioRol ur WHERE ur.UsuarioID = u.UsuarioID), '') AS Roles
++    FROM dbo.Usuario u
++    INNER JOIN dbo.Empleado e ON e.EmpleadoID = u.EmpleadoID
++    WHERE @UsuarioID IS NULL OR u.UsuarioID = @UsuarioID
++    ORDER BY u.NombreUsuario, u.UsuarioID;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spListarRolesAcceso
++    @UsuarioActorID int
++AS
++BEGIN
++    SET NOCOUNT ON;
++    IF ISNULL(dbo.fnTieneRol(@UsuarioActorID, 'ADMIN'), 0) <> 1
++        THROW 51504, N'La operación requiere un administrador activo.', 1;
++    SELECT Codigo, Nombre FROM dbo.Rol ORDER BY Nombre;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spListarEmpleadosDisponibles
++    @UsuarioActorID int
++AS
++BEGIN
++    SET NOCOUNT ON;
++    IF ISNULL(dbo.fnTieneRol(@UsuarioActorID, 'ADMIN'), 0) <> 1
++        THROW 51504, N'La operación requiere un administrador activo.', 1;
++    SELECT e.EmpleadoID, e.Codigo, e.Nombres, e.Apellidos
++    FROM dbo.Empleado e
++    WHERE e.Activo = 1
++      AND NOT EXISTS (SELECT 1 FROM dbo.Usuario u WHERE u.EmpleadoID = e.EmpleadoID)
++    ORDER BY e.Nombres, e.Apellidos, e.Codigo;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spRegistrarUsuario
++    @UsuarioActorID int,
++    @EmpleadoID int,
++    @CodigoEmpleado nvarchar(max),
++    @Nombres nvarchar(max),
++    @Apellidos nvarchar(max),
++    @NombreUsuario nvarchar(max),
++    @PasswordHash nvarchar(max),
++    @Roles nvarchar(max)
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++
++    SET @NombreUsuario = NULLIF(LTRIM(RTRIM(@NombreUsuario)), N'');
++    SET @CodigoEmpleado = NULLIF(LTRIM(RTRIM(@CodigoEmpleado)), N'');
++    SET @Nombres = NULLIF(LTRIM(RTRIM(@Nombres)), N'');
++    SET @Apellidos = NULLIF(LTRIM(RTRIM(@Apellidos)), N'');
++
++    IF ISNULL(dbo.fnTieneRol(@UsuarioActorID, 'ADMIN'), 0) <> 1
++        THROW 51504, N'La operación requiere un administrador activo.', 1;
++    IF @NombreUsuario IS NULL OR LEN(@NombreUsuario) NOT BETWEEN 3 AND 50
++       OR @NombreUsuario COLLATE Latin1_General_100_BIN2 LIKE N'%[^A-Za-z0-9._-]%'
++        THROW 51500, N'El usuario admite de 3 a 50 letras sin tildes, números, puntos, guiones o guiones bajos.', 1;
++    IF @EmpleadoID IS NULL AND
++       (@CodigoEmpleado IS NULL OR LEN(@CodigoEmpleado) > 20
++        OR @CodigoEmpleado COLLATE Latin1_General_100_BIN2 LIKE N'%[^A-Za-z0-9._-]%'
++        OR @Nombres IS NULL OR DATALENGTH(@Nombres) > 160
++        OR @Apellidos IS NULL OR DATALENGTH(@Apellidos) > 160)
++        THROW 51500, N'Completá código, nombres y apellidos del empleado dentro de sus límites.', 1;
++    IF @EmpleadoID IS NOT NULL AND
++       (@EmpleadoID <= 0 OR @CodigoEmpleado IS NOT NULL OR @Nombres IS NOT NULL OR @Apellidos IS NOT NULL)
++        THROW 51500, N'Elegí un empleado existente o ingresá uno nuevo, usando una sola opción.', 1;
++
++    -- Java genera este hash con una sal aleatoria. SQL nunca recibe la contraseña.
++    IF @PasswordHash IS NULL OR DATALENGTH(@PasswordHash) <> 182
++       OR LEFT(@PasswordHash, 22) COLLATE Latin1_General_100_BIN2 <> N'$pbkdf2-sha256$600000$'
++       OR SUBSTRING(@PasswordHash, 45, 3) <> N'==$'
++       OR RIGHT(@PasswordHash, 1) <> N'='
++       OR SUBSTRING(@PasswordHash, 23, 22) COLLATE Latin1_General_100_BIN2 LIKE N'%[^A-Za-z0-9+/]%'
++       OR SUBSTRING(@PasswordHash, 48, 43) COLLATE Latin1_General_100_BIN2 LIKE N'%[^A-Za-z0-9+/]%'
++        THROW 51500, N'El formato del hash de contraseña no es válido.', 1;
++
++    IF @Roles IS NULL OR DATALENGTH(@Roles) > 208
++        THROW 51500, N'Seleccioná entre uno y cinco roles válidos.', 1;
++    IF EXISTS (SELECT 1 FROM STRING_SPLIT(@Roles, N',')
++               WHERE LEN(value) NOT BETWEEN 1 AND 20
++                  OR value COLLATE Latin1_General_100_BIN2 LIKE N'%[^A-Z0-9_]%')
++       OR EXISTS (SELECT value FROM STRING_SPLIT(@Roles, N',') GROUP BY value HAVING COUNT(*) > 1)
++        THROW 51500, N'Los roles deben ser válidos y no pueden repetirse.', 1;
++
++    DECLARE @RolesElegidos TABLE (Codigo varchar(20) NOT NULL PRIMARY KEY);
++    INSERT INTO @RolesElegidos (Codigo) SELECT CONVERT(varchar(20), value) FROM STRING_SPLIT(@Roles, N',');
++    IF (SELECT COUNT(*) FROM @RolesElegidos) NOT BETWEEN 1 AND 5
++        THROW 51500, N'Seleccioná entre uno y cinco roles.', 1;
++
++    DECLARE @TransaccionPropia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @UsuarioNuevoID int;
++    DECLARE @Resultado TABLE (
++        UsuarioID int, EmpleadoID int, EmpleadoCodigo varchar(20),
++        Nombres nvarchar(80), Apellidos nvarchar(80), NombreUsuario varchar(50),
++        UsuarioActivo bit, EmpleadoActivo bit, FechaCreacion datetime2(0), Roles varchar(max)
++    );
++
++    BEGIN TRY
++        IF @TransaccionPropia = 1 BEGIN TRANSACTION;
++        ELSE SAVE TRANSACTION AltaUsuario;
++
++        IF EXISTS (SELECT 1 FROM @RolesElegidos r
++                   WHERE NOT EXISTS (SELECT 1 FROM dbo.Rol c WHERE c.Codigo = r.Codigo))
++            THROW 51501, N'Uno de los roles seleccionados no existe.', 1;
++
++        IF EXISTS (SELECT 1 FROM dbo.Usuario WITH (UPDLOCK, HOLDLOCK)
++                   WHERE NombreUsuario = CONVERT(varchar(50), @NombreUsuario))
++            THROW 51503, N'El nombre de usuario ya está registrado.', 1;
++
++        IF @EmpleadoID IS NULL
++        BEGIN
++            IF EXISTS (SELECT 1 FROM dbo.Empleado WITH (UPDLOCK, HOLDLOCK)
++                       WHERE Codigo = CONVERT(varchar(20), @CodigoEmpleado))
++                THROW 51503, N'El código del empleado ya existe. Seleccioná el empleado existente si aún no tiene cuenta.', 1;
++            INSERT INTO dbo.Empleado (Codigo, Nombres, Apellidos, Activo)
++            VALUES (CONVERT(varchar(20), @CodigoEmpleado), @Nombres, @Apellidos, 1);
++            SET @EmpleadoID = CONVERT(int, SCOPE_IDENTITY());
++        END
++        ELSE
++        BEGIN
++            IF NOT EXISTS (SELECT 1 FROM dbo.Empleado WITH (UPDLOCK, HOLDLOCK)
++                           WHERE EmpleadoID = @EmpleadoID AND Activo = 1)
++                THROW 51501, N'El empleado no existe o está inactivo.', 1;
++            IF EXISTS (SELECT 1 FROM dbo.Usuario WITH (UPDLOCK, HOLDLOCK) WHERE EmpleadoID = @EmpleadoID)
++                THROW 51503, N'El empleado ya tiene una cuenta de usuario.', 1;
++        END;
++
++        INSERT INTO dbo.Usuario (EmpleadoID, NombreUsuario, PasswordHash, AlgoritmoHash, Activo)
++        VALUES (@EmpleadoID, CONVERT(varchar(50), @NombreUsuario),
++                CONVERT(varchar(255), @PasswordHash), 'PBKDF2_SHA256', 1);
++        SET @UsuarioNuevoID = CONVERT(int, SCOPE_IDENTITY());
++        INSERT INTO dbo.UsuarioRol (UsuarioID, RolCodigo)
++        SELECT @UsuarioNuevoID, Codigo FROM @RolesElegidos;
++
++        INSERT INTO @Resultado
++        SELECT u.UsuarioID, u.EmpleadoID, e.Codigo, e.Nombres, e.Apellidos,
++               u.NombreUsuario, u.Activo, e.Activo, u.FechaCreacion,
++               (SELECT STRING_AGG(CONVERT(varchar(max), r.Codigo), ',')
++                       WITHIN GROUP (ORDER BY r.Codigo) FROM @RolesElegidos r)
++        FROM dbo.Usuario u INNER JOIN dbo.Empleado e ON e.EmpleadoID = u.EmpleadoID
++        WHERE u.UsuarioID = @UsuarioNuevoID;
++
++        IF @TransaccionPropia = 1 COMMIT TRANSACTION;
++        SELECT * FROM @Resultado;
++    END TRY
++    BEGIN CATCH
++        IF XACT_STATE() <> 0 AND @TransaccionPropia = 1 ROLLBACK TRANSACTION;
++        ELSE IF XACT_STATE() = 1 ROLLBACK TRANSACTION AltaUsuario;
++        IF ERROR_NUMBER() IN (2601, 2627)
++            THROW 51503, N'El usuario, el código del empleado o su cuenta ya están registrados.', 1;
++        THROW;
++    END CATCH;
++END;
++GO
++GRANT EXECUTE ON OBJECT::dbo.spListarUsuarios TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spListarRolesAcceso TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spListarEmpleadosDisponibles TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spRegistrarUsuario TO techcare_app;
++GO
+diff --git a/14_Pruebas_Usuarios.sql b/14_Pruebas_Usuarios.sql
+new file mode 100644
+index 0000000..fe686d3
+--- /dev/null
++++ b/14_Pruebas_Usuarios.sql
+@@ -0,0 +1,126 @@
++-- Pruebas opcionales del alta de usuarios. Ejecutar después del script 13.
++-- Cada caso revierte sus empleados, cuentas y roles de prueba.
++USE [TechCare];
++GO
++SET NOCOUNT ON;
++SET XACT_ABORT ON;
++IF @@TRANCOUNT <> 0 THROW 51990, N'Ejecutá estas pruebas sin una transacción abierta.', 1;
++IF OBJECT_ID(N'dbo.spRegistrarUsuario', N'P') IS NULL
++    THROW 51990, N'Ejecutá primero 13_Usuarios_Procedimientos.sql.', 1;
++
++DECLARE @Admin int = (SELECT TOP (1) UsuarioID FROM dbo.Usuario
++                     WHERE dbo.fnTieneRol(UsuarioID, 'ADMIN') = 1 ORDER BY UsuarioID);
++IF @Admin IS NULL OR NOT EXISTS (SELECT 1 FROM dbo.Rol WHERE Codigo = 'TECNICO')
++                  OR NOT EXISTS (SELECT 1 FROM dbo.Rol WHERE Codigo = 'CAJA')
++    THROW 51990, N'Las pruebas requieren un ADMIN activo y los roles TECNICO y CAJA.', 1;
++
++DECLARE @UsuariosIniciales bigint = (SELECT COUNT_BIG(*) FROM dbo.Usuario);
++DECLARE @EmpleadosIniciales bigint = (SELECT COUNT_BIG(*) FROM dbo.Empleado);
++DECLARE @RolesIniciales bigint = (SELECT COUNT_BIG(*) FROM dbo.UsuarioRol);
++DECLARE @Casos TABLE (ID int PRIMARY KEY, Caso nvarchar(180), ErrorEsperado int);
++INSERT INTO @Casos VALUES
++(1, N'Crear empleado y cuenta con Unicode y varios roles', 0),
++(2, N'Crear cuenta para un empleado existente sin duplicarlo', 0),
++(3, N'Rechazar actor sin rol ADMIN', 51504),
++(4, N'Rechazar nombre de usuario duplicado', 51503),
++(5, N'Rechazar código de empleado duplicado', 51503),
++(6, N'Rechazar empleado inactivo', 51501),
++(7, N'Rechazar segunda cuenta para el mismo empleado', 51503),
++(8, N'Rechazar rol inexistente', 51501),
++(9, N'Rechazar roles repetidos', 51500),
++(10, N'Rechazar contraseña en texto plano en lugar de hash', 51500),
++(11, N'Usuario largo no se trunca silenciosamente', 51500),
++(12, N'Nombres largos no se truncan silenciosamente', 51500),
++(13, N'Exigir al menos un rol', 51500),
++(14, N'Exigir empleado nuevo o existente', 51500),
++(15, N'Rechazar ambas opciones de empleado al mismo tiempo', 51500),
++(16, N'Código largo no se trunca silenciosamente', 51500);
++DECLARE @Resultados TABLE (ID int, Caso nvarchar(180), Resultado varchar(4), Detalle nvarchar(4000));
++DECLARE @Caso int = 1, @Esperado int, @NombreCaso nvarchar(180);
++DECLARE @Actor int, @Empleado int, @Disponible int, @Inactivo int;
++DECLARE @Codigo nvarchar(max), @CodigoDisponible varchar(20), @Nombre nvarchar(max);
++DECLARE @Nombres nvarchar(max), @Apellidos nvarchar(max), @Roles nvarchar(max), @Hash nvarchar(max);
++DECLARE @ClaveHash nvarchar(255) = N'$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
++DECLARE @Sufijo varchar(8), @Actual int, @Detalle nvarchar(4000), @Resultado varchar(4), @Nuevo int;
++
++WHILE @Caso <= 16
++BEGIN
++    SELECT @Esperado = ErrorEsperado, @NombreCaso = Caso FROM @Casos WHERE ID = @Caso;
++    SET @Sufijo = LEFT(REPLACE(CONVERT(varchar(36), NEWID()), '-', ''), 8);
++    SET @Actor = @Admin;
++    SET @Empleado = NULL;
++    SET @Codigo = N'TCUN-' + @Sufijo;
++    SET @CodigoDisponible = 'TCUD-' + @Sufijo;
++    SET @Nombre = N'tc_prueba_' + @Sufijo;
++    SET @Nombres = N'María José'; SET @Apellidos = N'Pérez López';
++    SET @Roles = N'TECNICO,CAJA'; SET @Hash = @ClaveHash;
++    SET @Actual = 0; SET @Detalle = N''; SET @Resultado = 'PASS'; SET @Nuevo = NULL;
++    BEGIN TRY
++        BEGIN TRANSACTION;
++        INSERT INTO dbo.Empleado (Codigo, Nombres, Apellidos, Activo)
++        VALUES (@CodigoDisponible, N'Empleado', N'Disponible', 1);
++        SET @Disponible = CONVERT(int, SCOPE_IDENTITY());
++        INSERT INTO dbo.Empleado (Codigo, Nombres, Apellidos, Activo)
++        VALUES ('TCUI-' + @Sufijo, N'Empleado', N'Inactivo', 0);
++        SET @Inactivo = CONVERT(int, SCOPE_IDENTITY());
++
++        IF @Caso = 2 BEGIN SET @Empleado = @Disponible; SET @Codigo = NULL; SET @Nombres = NULL; SET @Apellidos = NULL; END;
++        IF @Caso = 3 SET @Actor = 0;
++        IF @Caso = 4 SELECT @Nombre = NombreUsuario FROM dbo.Usuario WHERE UsuarioID = @Admin;
++        IF @Caso = 5 SET @Codigo = @CodigoDisponible;
++        IF @Caso = 6 BEGIN SET @Empleado = @Inactivo; SET @Codigo = NULL; SET @Nombres = NULL; SET @Apellidos = NULL; END;
++        IF @Caso = 7 BEGIN
++            SELECT @Empleado = EmpleadoID FROM dbo.Usuario WHERE UsuarioID = @Admin;
++            SET @Codigo = NULL; SET @Nombres = NULL; SET @Apellidos = NULL;
++        END;
++        IF @Caso = 8 SET @Roles = N'ROL_NO_EXISTE';
++        IF @Caso = 9 SET @Roles = N'TECNICO,TECNICO';
++        IF @Caso = 10 SET @Hash = N'TextoPlanoNoPermitido';
++        IF @Caso = 11 SET @Nombre = REPLICATE(N'x', 51);
++        IF @Caso = 12 SET @Nombres = REPLICATE(N'á', 81);
++        IF @Caso = 13 SET @Roles = N'';
++        IF @Caso = 14 BEGIN SET @Codigo = NULL; SET @Nombres = NULL; SET @Apellidos = NULL; END;
++        IF @Caso = 15 SET @Empleado = @Disponible;
++        IF @Caso = 16 SET @Codigo = REPLICATE(N'x', 21);
++
++        EXEC dbo.spRegistrarUsuario @Actor, @Empleado, @Codigo, @Nombres, @Apellidos, @Nombre, @Hash, @Roles;
++        IF @Esperado <> 0 THROW 51991, N'El procedimiento aceptó una entrada que debía rechazar.', 1;
++
++        SELECT @Nuevo = UsuarioID FROM dbo.Usuario WHERE NombreUsuario = @Nombre;
++        IF @Nuevo IS NULL OR NOT EXISTS (
++            SELECT 1 FROM dbo.Usuario WHERE UsuarioID = @Nuevo
++            AND PasswordHash = CONVERT(varchar(255), @ClaveHash) AND AlgoritmoHash = 'PBKDF2_SHA256' AND Activo = 1)
++            THROW 51991, N'La cuenta no conserva el hash y el algoritmo esperados.', 1;
++        IF (SELECT COUNT(*) FROM dbo.UsuarioRol WHERE UsuarioID = @Nuevo) <> 2
++            THROW 51991, N'La cuenta no conserva los dos roles.', 1;
++        IF dbo.fnTieneRol(@Nuevo, 'TECNICO') <> 1 OR dbo.fnTieneRol(@Nuevo, 'ADMIN') <> 0
++            THROW 51991, N'Los permisos no coinciden con los roles asignados.', 1;
++        IF @Caso = 1 AND NOT EXISTS (SELECT 1 FROM dbo.Empleado e INNER JOIN dbo.Usuario u ON u.EmpleadoID = e.EmpleadoID
++                                     WHERE u.UsuarioID = @Nuevo AND e.Nombres = N'María José' AND e.Apellidos = N'Pérez López')
++            THROW 51991, N'Los datos Unicode no se conservaron.', 1;
++        IF @Caso = 2 AND ((SELECT EmpleadoID FROM dbo.Usuario WHERE UsuarioID = @Nuevo) <> @Disponible
++                         OR (SELECT COUNT_BIG(*) FROM dbo.Empleado) <> @EmpleadosIniciales + 2)
++            THROW 51991, N'Se duplicó el empleado existente.', 1;
++        EXEC dbo.spListarUsuarios @Admin, @Nuevo;
++        ROLLBACK TRANSACTION;
++    END TRY
++    BEGIN CATCH
++        SET @Actual = ERROR_NUMBER(); SET @Detalle = ERROR_MESSAGE();
++        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
++        IF @Actual <> @Esperado SET @Resultado = 'FAIL';
++    END CATCH;
++
++    IF (SELECT COUNT_BIG(*) FROM dbo.Usuario) <> @UsuariosIniciales
++       OR (SELECT COUNT_BIG(*) FROM dbo.Empleado) <> @EmpleadosIniciales
++       OR (SELECT COUNT_BIG(*) FROM dbo.UsuarioRol) <> @RolesIniciales
++    BEGIN
++        SET @Resultado = 'FAIL';
++        SET @Detalle = N'Quedaron filas adicionales después de revertir el caso.';
++    END;
++    INSERT INTO @Resultados VALUES (@Caso, @NombreCaso, @Resultado, @Detalle);
++    SET @Caso += 1;
++END;
++SELECT Caso, Resultado, NULLIF(Detalle, N'') AS Detalle FROM @Resultados ORDER BY ID;
++IF EXISTS (SELECT 1 FROM @Resultados WHERE Resultado = 'FAIL')
++    THROW 51992, N'Una o más pruebas no pasaron. Revisá la tabla de resultados.', 1;
++GO
+diff --git a/INTEGRACION_USUARIOS.md b/INTEGRACION_USUARIOS.md
+new file mode 100644
+index 0000000..7dc77fb
+--- /dev/null
++++ b/INTEGRACION_USUARIOS.md
+@@ -0,0 +1,86 @@
++# Registro de usuarios desde Administración
++
++Actualización sobre el commit `4cafbf7`, que ya contiene el login y el ajuste
++`optimizedLaunch=false`. Se conserva la rama actual y el maestro 01.
++
++## Instalación
++
++1. Guardar `15_Usuarios_API.patch` en la carpeta TechCare que contiene `backend`
++   y `frontend`. En la terminal de IntelliJ, situada en esa carpeta, ejecutar:
++
++   ```powershell
++   git apply 15_Usuarios_API.patch
++   ```
++
++2. El parche crea `13_Usuarios_Procedimientos.sql`. Abrirlo en SSMS y ejecutarlo
++   completo una vez sobre la base TechCare existente. Agrega cuatro procedimientos
++   y sus permisos; no recrea la base ni modifica las cuentas existentes.
++3. Reiniciar el backend y recargar el frontend. Entrar con una cuenta ADMIN,
++   como `demo01` si conserva su rol, y abrir **Administración → Nuevo usuario**.
++
++El parche también incluye `14_Pruebas_Usuarios.sql`, una comprobación opcional
++para ejecutar en SSMS después del 13. Cada caso revierte sus filas de prueba.
++No hace falta ejecutarlo para usar la pantalla.
++
++Después puede eliminarse el archivo `.patch`; conservar el código y los scripts
++SQL. El commit y push se hacen como de costumbre en la misma rama.
++
++## Crear una cuenta
++
++- Elegir **Registrar empleado nuevo** y completar su código, nombres y apellidos,
++  o **Usar empleado existente** para una persona activa que todavía no tenga cuenta.
++- Elegir nombre de usuario, contraseña de 12 a 256 caracteres y su confirmación.
++- Seleccionar uno o varios roles y pulsar **Registrar usuario**.
++- La cuenta y el empleado quedan activos. La nueva persona ya puede ingresar
++  desde la pantalla de login con las credenciales que se le asignaron.
++
++Cada empleado admite una cuenta. El nombre de usuario y el código del empleado
++son únicos. El nombre de usuario admite letras sin tildes, números, puntos,
++guiones y guiones bajos; los nombres y las contraseñas conservan Unicode.
++El registro no cambia la cuenta ni la sesión del administrador que lo realiza.
++
++## Seguridad y guardado
++
++La API recibe la contraseña para calcular PBKDF2-HMAC-SHA256 en Java con 600,000
++iteraciones y una sal aleatoria de 16 bytes. SQL recibe únicamente el hash.
++Los DTO de respuesta tienen campos explícitos y excluyen contraseña y hash.
++El frontend no guarda la contraseña en storage ni en la caché de React Query.
++
++Spring Security exige ADMIN y CSRF para el alta. El actor se toma de la sesión;
++un `usuarioActorID` enviado en el formulario no cambia esa identidad. Los SP también
++comprueban que el actor siga siendo un ADMIN activo mediante `fnTieneRol`.
++Las llamadas a SQL usan parámetros. La operación registra empleado, cuenta y
++roles en una transacción con reversión ante errores y restricciones de unicidad.
++
++Esta entrega incluye alta y consulta de usuarios. La edición de roles, desactivación
++y restablecimiento de contraseñas requieren operaciones adicionales; no se añaden
++acciones incompletas a la pantalla.
++
++## Endpoints
++
++Todos requieren ADMIN. POST requiere además el token CSRF que el cliente ya gestiona.
++
++| Método | Ruta | Procedimiento |
++|---|---|---|
++| GET | `/api/admin/usuarios` | `spListarUsuarios` |
++| GET | `/api/admin/usuarios/{id}` | `spListarUsuarios` |
++| POST | `/api/admin/usuarios` | `spRegistrarUsuario` |
++| GET | `/api/admin/roles` | `spListarRolesAcceso` |
++| GET | `/api/admin/empleados-disponibles` | `spListarEmpleadosDisponibles` |
++
++POST recibe `nombreUsuario`, `contrasena`, `roles[]` y exactamente una opción:
++`empleadoId` o `empleadoNuevo: {codigo, nombres, apellidos}`. Devuelve 201 con
++la cuenta registrada y un Location que puede consultarse mediante GET.
++
++400: datos o relaciones inválidos; 401: sin sesión; 403: permiso o CSRF;
++404: usuario inexistente; 409: usuario, código o cuenta de empleado duplicados;
++503: error del servicio de datos.
++
++## Verificación
++
++Las pruebas Java usan JDBC simulado para comprobar permisos, actor, validación,
++hash real con sales distintas, respuestas sin secretos y compatibilidad con el login.
++Pasaron 70 pruebas Java: 25 de Administración y las 45 existentes.
++El frontend se comprueba mediante compilación y navegador con HTTP simulado.
++Los scripts SQL se revisan sintácticamente; la ejecución en SQL Server debe
++comprobarse en la instancia del proyecto mediante los scripts 13 y 14.
+diff --git a/README.md b/README.md
+index 7b2b8bb..6e14225 100644
+--- a/README.md
++++ b/README.md
+@@ -10,7 +10,11 @@ Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACIO
+ La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
+ las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
+ Una instalación nueva con un maestro anterior debe incluir también las
+-actualizaciones 06 (Clientes), 08 (Equipos) y 11 (Acceso).
++actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso) y 13 (Usuarios).
++
++Administración permite consultar y registrar cuentas, empleados y roles desde
++una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
++En una base existente se ejecuta `13_Usuarios_Procedimientos.sql` una vez.
+ 
+ ## Ejecución desde cero
+ 
+diff --git a/backend/src/main/java/com/techcare/backend/administracion/RegistroUsuario.java b/backend/src/main/java/com/techcare/backend/administracion/RegistroUsuario.java
+new file mode 100644
+index 0000000..10024fc
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/administracion/RegistroUsuario.java
+@@ -0,0 +1,51 @@
++package com.techcare.backend.administracion;
++
++import jakarta.validation.Valid;
++import jakarta.validation.constraints.AssertTrue;
++import jakarta.validation.constraints.Min;
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.NotEmpty;
++import jakarta.validation.constraints.Pattern;
++import jakarta.validation.constraints.Size;
++
++import java.util.HashSet;
++import java.util.List;
++
++public record RegistroUsuario(
++        @NotBlank(message = "El usuario es obligatorio.")
++        @Pattern(regexp = "[A-Za-z0-9._-]{3,50}", message = "Usá de 3 a 50 letras sin tildes, números, puntos o guiones.")
++        String nombreUsuario,
++        @NotBlank(message = "La contraseña es obligatoria.")
++        @Size(min = 12, max = 256, message = "La contraseña debe tener entre 12 y 256 caracteres.")
++        String contrasena,
++        @NotEmpty(message = "Seleccioná al menos un rol.") @Size(max = 5, message = "Seleccioná hasta cinco roles.")
++        List<@NotBlank(message = "El rol es obligatorio.")
++                @Pattern(regexp = "[A-Z][A-Z0-9_]{0,19}", message = "El código de rol no es válido.") String> roles,
++        @Min(value = 1, message = "Elegí un empleado válido.") Integer empleadoId,
++        @Valid EmpleadoNuevo empleadoNuevo) {
++
++    public RegistroUsuario {
++        nombreUsuario = nombreUsuario == null ? null : nombreUsuario.strip();
++        // La contraseña conserva todos sus caracteres, incluidos los espacios.
++    }
++
++    @AssertTrue(message = "Elegí un empleado existente o ingresá uno nuevo, usando una sola opción.")
++    public boolean isEmpleadoSeleccionado() { return (empleadoId != null) != (empleadoNuevo != null); }
++
++    @AssertTrue(message = "Los roles no pueden repetirse.")
++    public boolean isRolesSinDuplicados() { return roles == null || new HashSet<>(roles).size() == roles.size(); }
++
++    @Override public String toString() { return "RegistroUsuario[contraseña protegida]"; }
++
++    public record EmpleadoNuevo(
++            @NotBlank(message = "El código es obligatorio.")
++            @Pattern(regexp = "[A-Za-z0-9._-]{1,20}", message = "El código admite hasta 20 letras sin tildes, números, puntos o guiones.") String codigo,
++            @NotBlank(message = "Los nombres son obligatorios.") @Size(max = 80, message = "Los nombres admiten hasta 80 caracteres.") String nombres,
++            @NotBlank(message = "Los apellidos son obligatorios.") @Size(max = 80, message = "Los apellidos admiten hasta 80 caracteres.") String apellidos) {
++        public EmpleadoNuevo {
++            codigo = codigo == null ? null : codigo.strip();
++            nombres = nombres == null ? null : nombres.strip();
++            apellidos = apellidos == null ? null : apellidos.strip();
++        }
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/administracion/UsuarioAdminController.java b/backend/src/main/java/com/techcare/backend/administracion/UsuarioAdminController.java
+new file mode 100644
+index 0000000..257a46d
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/administracion/UsuarioAdminController.java
+@@ -0,0 +1,53 @@
++package com.techcare.backend.administracion;
++
++import com.techcare.backend.administracion.UsuariosAdministracion.EmpleadoDisponible;
++import com.techcare.backend.administracion.UsuariosAdministracion.RolAcceso;
++import com.techcare.backend.administracion.UsuariosAdministracion.UsuarioResumen;
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import jakarta.validation.Valid;
++import org.springframework.http.ResponseEntity;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.web.bind.annotation.*;
++import org.springframework.web.server.ResponseStatusException;
++import org.springframework.http.HttpStatus;
++
++import java.net.URI;
++import java.util.List;
++
++@RestController
++@RequestMapping("/api/admin")
++public class UsuarioAdminController {
++    private final UsuariosAdministracion usuarios;
++
++    public UsuarioAdminController(UsuariosAdministracion usuarios) { this.usuarios = usuarios; }
++
++    @GetMapping("/usuarios")
++    public List<UsuarioResumen> listar(@AuthenticationPrincipal UsuarioAutenticado actor) {
++        return usuarios.listar(actor.getUsuarioId(), null);
++    }
++
++    @GetMapping("/usuarios/{id}")
++    public UsuarioResumen consultar(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable("id") int id) {
++        if (id <= 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El identificador debe ser positivo.");
++        List<UsuarioResumen> filas = usuarios.listar(actor.getUsuarioId(), id);
++        if (filas.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "El usuario no existe.");
++        return filas.get(0);
++    }
++
++    @PostMapping("/usuarios")
++    public ResponseEntity<UsuarioResumen> registrar(@AuthenticationPrincipal UsuarioAutenticado actor,
++            @Valid @RequestBody RegistroUsuario datos) {
++        UsuarioResumen usuario = usuarios.registrar(actor.getUsuarioId(), datos);
++        return ResponseEntity.created(URI.create("/api/admin/usuarios/" + usuario.usuarioId())).body(usuario);
++    }
++
++    @GetMapping("/roles")
++    public List<RolAcceso> roles(@AuthenticationPrincipal UsuarioAutenticado actor) {
++        return usuarios.roles(actor.getUsuarioId());
++    }
++
++    @GetMapping("/empleados-disponibles")
++    public List<EmpleadoDisponible> empleados(@AuthenticationPrincipal UsuarioAutenticado actor) {
++        return usuarios.empleados(actor.getUsuarioId());
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/administracion/UsuarioAdminErrores.java b/backend/src/main/java/com/techcare/backend/administracion/UsuarioAdminErrores.java
+new file mode 100644
+index 0000000..90e3e13
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/administracion/UsuarioAdminErrores.java
+@@ -0,0 +1,60 @@
++package com.techcare.backend.administracion;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.dao.DataAccessException;
++import org.springframework.http.ResponseEntity;
++import org.springframework.http.converter.HttpMessageNotReadableException;
++import org.springframework.web.bind.MethodArgumentNotValidException;
++import org.springframework.web.bind.annotation.ExceptionHandler;
++import org.springframework.web.bind.annotation.RestControllerAdvice;
++import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.sql.SQLException;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++@RestControllerAdvice(assignableTypes = UsuarioAdminController.class)
++public class UsuarioAdminErrores {
++    private static final Logger LOG = LoggerFactory.getLogger(UsuarioAdminErrores.class);
++
++    @ExceptionHandler(MethodArgumentNotValidException.class)
++    public ResponseEntity<Map<String, Object>> validacion(MethodArgumentNotValidException ex) {
++        Map<String, String> errores = new LinkedHashMap<>();
++        ex.getBindingResult().getFieldErrors().forEach(e -> errores.putIfAbsent(e.getField(), e.getDefaultMessage()));
++        return ResponseEntity.badRequest().body(Map.of("estado", 400, "mensaje", "Revisá los datos del usuario.", "errores", errores));
++    }
++
++    @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
++    public ResponseEntity<Map<String, Object>> entrada(Exception ex) { return error(400, "La solicitud contiene datos inválidos."); }
++
++    @ExceptionHandler(ResponseStatusException.class)
++    public ResponseEntity<Map<String, Object>> estado(ResponseStatusException ex) {
++        return error(ex.getStatusCode().value(), ex.getReason());
++    }
++
++    @ExceptionHandler(DataAccessException.class)
++    public ResponseEntity<Map<String, Object>> sql(DataAccessException ex) {
++        for (Throwable causa = ex; causa != null; causa = causa.getCause()) {
++            if (!(causa instanceof SQLException sql)) continue;
++            for (SQLException actual = sql; actual != null; actual = actual.getNextException()) {
++                switch (actual.getErrorCode()) {
++                    case 51500, 51501: return error(400, actual.getMessage());
++                    case 51502: return error(404, "El usuario no existe.");
++                    case 51503: return error(409, actual.getMessage());
++                    case 2601, 2627: return error(409, "El usuario o el empleado ya están registrados.");
++                    case 51504: return error(403, "La operación requiere un administrador activo.");
++                    case 547: return error(409, "El empleado o los roles cambiaron. Actualizá y volvé a intentar.");
++                    default: break;
++                }
++            }
++        }
++        LOG.error("No se pudo completar una operación de administración de usuarios.", ex);
++        return error(503, "No se pudo completar la operación. Revisá el backend e intentá nuevamente.");
++    }
++
++    private ResponseEntity<Map<String, Object>> error(int estado, String mensaje) {
++        return ResponseEntity.status(estado).body(Map.of("estado", estado, "mensaje", mensaje));
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/administracion/UsuariosAdministracion.java b/backend/src/main/java/com/techcare/backend/administracion/UsuariosAdministracion.java
+new file mode 100644
+index 0000000..c545c54
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/administracion/UsuariosAdministracion.java
+@@ -0,0 +1,70 @@
++package com.techcare.backend.administracion;
++
++import org.springframework.dao.DataRetrievalFailureException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.crypto.password.PasswordEncoder;
++import org.springframework.stereotype.Service;
++
++import java.sql.Timestamp;
++import java.time.LocalDateTime;
++import java.util.Arrays;
++import java.util.List;
++import java.util.Map;
++
++@Service
++public class UsuariosAdministracion {
++    private final JdbcTemplate jdbc;
++    private final PasswordEncoder encoder;
++
++    public UsuariosAdministracion(JdbcTemplate jdbc, PasswordEncoder encoder) {
++        this.jdbc = jdbc;
++        this.encoder = encoder;
++    }
++
++    public List<UsuarioResumen> listar(int actor, Integer id) {
++        return jdbc.queryForList("EXEC dbo.spListarUsuarios ?, ?", actor, id).stream().map(this::resumen).toList();
++    }
++
++    public UsuarioResumen registrar(int actor, RegistroUsuario datos) {
++        RegistroUsuario.EmpleadoNuevo empleado = datos.empleadoNuevo();
++        String hash = encoder.encode(datos.contrasena());
++        List<Map<String, Object>> filas = jdbc.queryForList("EXEC dbo.spRegistrarUsuario ?, ?, ?, ?, ?, ?, ?, ?",
++                actor, datos.empleadoId(), empleado == null ? null : empleado.codigo(),
++                empleado == null ? null : empleado.nombres(), empleado == null ? null : empleado.apellidos(),
++                datos.nombreUsuario(), hash, String.join(",", datos.roles()));
++        if (filas.size() != 1) throw new DataRetrievalFailureException("El procedimiento no devolvió el usuario registrado.");
++        return resumen(filas.get(0));
++    }
++
++    public List<RolAcceso> roles(int actor) {
++        return jdbc.queryForList("EXEC dbo.spListarRolesAcceso ?", actor).stream()
++                .map(r -> new RolAcceso((String) r.get("Codigo"), (String) r.get("Nombre"))).toList();
++    }
++
++    public List<EmpleadoDisponible> empleados(int actor) {
++        return jdbc.queryForList("EXEC dbo.spListarEmpleadosDisponibles ?", actor).stream()
++                .map(e -> new EmpleadoDisponible(((Number) e.get("EmpleadoID")).intValue(),
++                        (String) e.get("Codigo"), (String) e.get("Nombres"), (String) e.get("Apellidos"))).toList();
++    }
++
++    private UsuarioResumen resumen(Map<String, Object> fila) {
++        if (!(fila.get("UsuarioID") instanceof Number id) || !(fila.get("EmpleadoID") instanceof Number empleado))
++            throw new DataRetrievalFailureException("El procedimiento devolvió un usuario incompleto.");
++        Object fecha = fila.get("FechaCreacion");
++        LocalDateTime creacion = fecha instanceof Timestamp timestamp ? timestamp.toLocalDateTime()
++                : fecha instanceof LocalDateTime local ? local : null;
++        List<String> roles = fila.get("Roles") instanceof String texto && !texto.isBlank()
++                ? Arrays.stream(texto.split(",")).distinct().sorted().toList() : List.of();
++        // DTO explícito: jamás serializar PasswordHash, AlgoritmoHash ni una fila JDBC completa.
++        return new UsuarioResumen(id.intValue(), empleado.intValue(), (String) fila.get("EmpleadoCodigo"),
++                (String) fila.get("Nombres"), (String) fila.get("Apellidos"), (String) fila.get("NombreUsuario"),
++                Boolean.TRUE.equals(fila.get("UsuarioActivo")), Boolean.TRUE.equals(fila.get("EmpleadoActivo")),
++                creacion, roles);
++    }
++
++    public record UsuarioResumen(int usuarioId, int empleadoId, String empleadoCodigo, String nombres,
++            String apellidos, String nombreUsuario, boolean usuarioActivo, boolean empleadoActivo,
++            LocalDateTime fechaCreacion, List<String> roles) {}
++    public record RolAcceso(String codigo, String nombre) {}
++    public record EmpleadoDisponible(int empleadoId, String codigo, String nombres, String apellidos) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+index d64c81e..a60f471 100644
+--- a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
++++ b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+@@ -55,6 +55,9 @@ public class SeguridadConfig {
+                         .requestMatchers(HttpMethod.GET,"/api/auth/csrf").permitAll()
+                         .requestMatchers(HttpMethod.POST,"/api/auth/login").permitAll()
+                         .requestMatchers(HttpMethod.GET,"/api/auth/sesion").authenticated()
++                        .requestMatchers(HttpMethod.GET,"/api/admin/usuarios","/api/admin/usuarios/*",
++                                "/api/admin/roles","/api/admin/empleados-disponibles").hasRole("ADMIN")
++                        .requestMatchers(HttpMethod.POST,"/api/admin/usuarios").hasRole("ADMIN")
+                         .requestMatchers(HttpMethod.GET,"/api/clientes","/api/clientes/**")
+                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
+                         .requestMatchers(HttpMethod.POST,"/api/clientes").hasAnyRole("ADMIN","RECEPCION")
+diff --git a/backend/src/test/java/com/techcare/backend/administracion/UsuarioAdminTests.java b/backend/src/test/java/com/techcare/backend/administracion/UsuarioAdminTests.java
+new file mode 100644
+index 0000000..56cad8e
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/administracion/UsuarioAdminTests.java
+@@ -0,0 +1,237 @@
++package com.techcare.backend.administracion;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.junit.jupiter.params.provider.ValueSource;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.jdbc.UncategorizedSQLException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.security.crypto.password.PasswordEncoder;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.request.RequestPostProcessor;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.web.context.WebApplicationContext;
++
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.time.LocalDateTime;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import static org.hamcrest.Matchers.contains;
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.not;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
++import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
++import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(properties = "spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class UsuarioAdminTests {
++    private static final String SQL_ALTA = "EXEC dbo.spRegistrarUsuario ?, ?, ?, ?, ?, ?, ?, ?";
++    private static final String CLAVE = "  Contraseña ágil 2026!  ";
++    private static final String DATOS = """
++            {"nombreUsuario":"  nueva.cuenta  ","contrasena":"  Contraseña ágil 2026!  ",
++             "roles":["TECNICO","CAJA"],"empleadoId":null,
++             "empleadoNuevo":{"codigo":" EMP-011 ","nombres":" María José ","apellidos":" Pérez López "},
++             "usuarioActorID":999,"passwordHash":"valor enviado por el cliente"}
++            """;
++
++    @Autowired WebApplicationContext context;
++    @Autowired PasswordEncoder encoder;
++    @MockitoBean JdbcTemplate jdbc;
++    private MockMvc mvc;
++    private final List<Object[]> altas = new ArrayList<>();
++
++    @BeforeEach void preparar() {
++        reset(jdbc);
++        altas.clear();
++        mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
++        when(jdbc.queryForList(anyString(), any(Object[].class))).thenAnswer(inv -> {
++            String sql = inv.getArgument(0);
++            Object[] args = (Object[]) inv.getRawArguments()[1];
++            if (sql.equals(SQL_ALTA)) {
++                altas.add(args.clone());
++                return List.of(fila(args[1] == null ? 77 : ((Number) args[1]).intValue(), (String) args[6]));
++            }
++            if (sql.equals("EXEC dbo.spListarUsuarios ?, ?")) return List.of(fila(77, "HASH_PRIVADO"));
++            if (sql.equals("EXEC dbo.spListarRolesAcceso ?"))
++                return List.of(Map.of("Codigo", "TECNICO", "Nombre", "Técnico"));
++            if (sql.equals("EXEC dbo.spListarEmpleadosDisponibles ?"))
++                return List.of(Map.of("EmpleadoID", 38, "Codigo", "EMP-038", "Nombres", "José", "Apellidos", "Pérez"));
++            if (sql.equals("EXEC dbo.spConsultarAcceso ?") && !altas.isEmpty()) {
++                Map<String, Object> login = new HashMap<>(fila(77, (String) altas.get(0)[6]));
++                login.put("RolCodigo", "TECNICO");
++                login.put("AlgoritmoHash", "PBKDF2_SHA256");
++                return List.of(login);
++            }
++            return List.of();
++        });
++    }
++
++    private Map<String, Object> fila(int empleado, String hash) {
++        Map<String, Object> fila = new HashMap<>();
++        fila.put("UsuarioID", 21); fila.put("EmpleadoID", empleado); fila.put("EmpleadoCodigo", "EMP-011");
++        fila.put("Nombres", "María José"); fila.put("Apellidos", "Pérez López"); fila.put("NombreUsuario", "nueva.cuenta");
++        fila.put("UsuarioActivo", true); fila.put("EmpleadoActivo", true);
++        fila.put("FechaCreacion", Timestamp.valueOf(LocalDateTime.of(2026, 10, 20, 12, 0)));
++        fila.put("Roles", "CAJA,TECNICO"); fila.put("PasswordHash", hash); fila.put("AlgoritmoHash", "PBKDF2_SHA256");
++        return fila;
++    }
++
++    private RequestPostProcessor actor(String rol) {
++        var usuario = new UsuarioAutenticado(42, "administrador", "Admin", "EMP-042", List.of(rol), true, null);
++        return authentication(UsernamePasswordAuthenticationToken.authenticated(usuario, null, usuario.getAuthorities()));
++    }
++
++    @Test void anonimoNoPuedeConsultarNiCrearCuentas() throws Exception {
++        mvc.perform(get("/api/admin/usuarios")).andExpect(status().isUnauthorized());
++        mvc.perform(post("/api/admin/usuarios").with(csrf()).contentType("application/json").content(DATOS))
++                .andExpect(status().isUnauthorized());
++        verifyNoInteractions(jdbc);
++    }
++
++    @ParameterizedTest @ValueSource(strings = {"RECEPCION", "TECNICO", "CAJA", "BODEGA"})
++    void soloAdminPuedeUsarTodosLosEndpoints(String rol) throws Exception {
++        for (String ruta : List.of("/api/admin/usuarios", "/api/admin/usuarios/21", "/api/admin/roles", "/api/admin/empleados-disponibles"))
++            mvc.perform(get(ruta).with(actor(rol))).andExpect(status().isForbidden());
++        mvc.perform(post("/api/admin/usuarios").with(actor(rol)).with(csrf()).contentType("application/json").content(DATOS))
++                .andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test void altaRequiereCsrfInclusoSiEsAdmin() throws Exception {
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).contentType("application/json").content(DATOS))
++                .andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test void creaEmpleadoYCuentaConHashRealSalAleatoriaYActorDeLaSesion() throws Exception {
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json").content(DATOS))
++                .andExpect(status().isCreated()).andExpect(header().string("Location", "/api/admin/usuarios/21"))
++                .andExpect(jsonPath("$.nombreUsuario").value("nueva.cuenta"))
++                .andExpect(jsonPath("$.nombres").value("María José"))
++                .andExpect(jsonPath("$.roles", contains("CAJA", "TECNICO")))
++                .andExpect(content().string(not(containsString("PasswordHash"))))
++                .andExpect(content().string(not(containsString("pbkdf2"))))
++                .andExpect(content().string(not(containsString(CLAVE))));
++        assertEquals(1, altas.size());
++        Object[] args = altas.get(0);
++        assertEquals(42, args[0]); assertNull(args[1]);
++        assertEquals("EMP-011", args[2]); assertEquals("María José", args[3]); assertEquals("Pérez López", args[4]);
++        assertEquals("nueva.cuenta", args[5]); assertEquals("TECNICO,CAJA", args[7]);
++        String hash = (String) args[6];
++        assertTrue(hash.startsWith("$pbkdf2-sha256$600000$"));
++        assertTrue(encoder.matches(CLAVE, hash));
++        assertFalse(encoder.matches(CLAVE.strip(), hash));
++        for (Object arg : args) assertNotEquals(CLAVE, arg);
++
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json").content(DATOS))
++                .andExpect(status().isCreated());
++        assertNotEquals(hash, altas.get(1)[6]);
++    }
++
++    @Test void cuentaRegistradaPuedeIngresarConElEncoderExistente() throws Exception {
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json").content(DATOS))
++                .andExpect(status().isCreated());
++        mvc.perform(post("/api/auth/login").with(csrf()).contentType("application/json")
++                .content("{\"nombreUsuario\":\"nueva.cuenta\",\"contrasena\":\"" + CLAVE + "\"}"))
++                .andExpect(status().isOk()).andExpect(jsonPath("$.roles[0]").value("TECNICO"))
++                .andExpect(jsonPath("$.usuario.usuarioId").value(21))
++                .andExpect(content().string(not(containsString("pbkdf2"))));
++        mvc.perform(post("/api/auth/login").with(csrf()).contentType("application/json")
++                .content("{\"nombreUsuario\":\"nueva.cuenta\",\"contrasena\":\"incorrecta\"}"))
++                .andExpect(status().isUnauthorized());
++    }
++
++    @Test void permiteVincularUnEmpleadoExistenteSinCrearOtro() throws Exception {
++        String datos = """
++                {"nombreUsuario":"empleado38","contrasena":"Clave segura 2026!","roles":["RECEPCION"],"empleadoId":38}
++                """;
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json").content(datos))
++                .andExpect(status().isCreated()).andExpect(jsonPath("$.empleadoId").value(38));
++        assertEquals(38, altas.get(0)[1]);
++        assertNull(altas.get(0)[2]); assertNull(altas.get(0)[3]); assertNull(altas.get(0)[4]);
++    }
++
++    @Test void consultaYCatalogosNoExponenHashes() throws Exception {
++        mvc.perform(get("/api/admin/usuarios").with(actor("ADMIN"))).andExpect(status().isOk())
++                .andExpect(jsonPath("$[0].nombreUsuario").value("nueva.cuenta"))
++                .andExpect(content().string(not(containsString("HASH_PRIVADO"))))
++                .andExpect(content().string(not(containsString("PasswordHash"))));
++        mvc.perform(get("/api/admin/usuarios/21").with(actor("ADMIN"))).andExpect(status().isOk());
++        mvc.perform(get("/api/admin/roles").with(actor("ADMIN"))).andExpect(status().isOk())
++                .andExpect(jsonPath("$[0].codigo").value("TECNICO"));
++        mvc.perform(get("/api/admin/empleados-disponibles").with(actor("ADMIN"))).andExpect(status().isOk())
++                .andExpect(jsonPath("$[0].empleadoId").value(38));
++        verify(jdbc).queryForList("EXEC dbo.spListarUsuarios ?, ?", 42, null);
++        verify(jdbc).queryForList("EXEC dbo.spListarRolesAcceso ?", 42);
++        verify(jdbc).queryForList("EXEC dbo.spListarEmpleadosDisponibles ?", 42);
++    }
++
++    @ParameterizedTest @ValueSource(strings = {"corta", "            ", "EXCESIVA"})
++    void rechazaContrasenasInvalidasSinEscribir(String clave) throws Exception {
++        String valor = clave.equals("EXCESIVA") ? "x".repeat(257) : clave;
++        String datos = DATOS.replace(CLAVE, valor);
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json").content(datos))
++                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.errores.contrasena").exists());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test void rechazaRolesVaciosRepetidosYCodigosManipulados() throws Exception {
++        for (String roles : List.of("[]", "[\"TECNICO\",\"TECNICO\"]", "[\"ADMIN,TECNICO\"]", "[null]")) {
++            mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json")
++                    .content(DATOS.replace("[\"TECNICO\",\"CAJA\"]", roles))).andExpect(status().isBadRequest());
++        }
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test void exigeExactamenteUnaOpcionDeEmpleadoYValidaLosNombres() throws Exception {
++        List<String> invalidos = List.of(DATOS.replace("\"empleadoId\":null", "\"empleadoId\":38"),
++                "{\"nombreUsuario\":\"nuevo\",\"contrasena\":\"Clave segura 2026!\",\"roles\":[\"TECNICO\"]}",
++                DATOS.replace(" María José ", " "), DATOS.replace(" Pérez López ", "x".repeat(81)),
++                DATOS.replace(" EMP-011 ", "CODIGO".repeat(4)), DATOS.replace("  nueva.cuenta  ", "nombre con espacios"));
++        for (String datos : invalidos)
++            mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json").content(datos))
++                    .andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test void nombresConTextoSqlViajanComoParametros() throws Exception {
++        String nombres = "María'; DROP TABLE Usuario;--";
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json")
++                .content(DATOS.replace(" María José ", nombres))).andExpect(status().isCreated());
++        assertEquals(nombres, altas.get(0)[3]);
++        verify(jdbc).queryForList(eq(SQL_ALTA), any(Object[].class));
++    }
++
++    @ParameterizedTest @CsvSource({"51500,400", "51501,400", "51502,404", "51503,409", "51504,403", "547,409", "2601,409", "50000,503"})
++    void traduceErroresSqlSinDevolverLaConsultaNiElHash(int codigo, int esperado) throws Exception {
++        when(jdbc.queryForList(eq(SQL_ALTA), any(Object[].class))).thenThrow(new UncategorizedSQLException(
++                "alta", "EXEC dbo.spRegistrarUsuario", new SQLException("Error de prueba", "S0001", codigo)));
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json").content(DATOS))
++                .andExpect(status().is(esperado)).andExpect(content().string(not(containsString("pbkdf2"))))
++                .andExpect(content().string(not(containsString("EXEC"))));
++    }
++
++    @Test void erroresDeIdYJsonSon400YCuentaAusenteEs404() throws Exception {
++        mvc.perform(get("/api/admin/usuarios/0").with(actor("ADMIN"))).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/admin/usuarios/abc").with(actor("ADMIN"))).andExpect(status().isBadRequest());
++        mvc.perform(post("/api/admin/usuarios").with(actor("ADMIN")).with(csrf()).contentType("application/json").content("{"))
++                .andExpect(status().isBadRequest());
++        when(jdbc.queryForList("EXEC dbo.spListarUsuarios ?, ?", 42, 99)).thenReturn(List.of());
++        mvc.perform(get("/api/admin/usuarios/99").with(actor("ADMIN"))).andExpect(status().isNotFound());
++    }
++}
+diff --git a/frontend/README.md b/frontend/README.md
+index 7e202fa..9b503fc 100644
+--- a/frontend/README.md
++++ b/frontend/README.md
+@@ -18,6 +18,8 @@ Se conserva la configuración local existente de `VITE_PROXY_TARGET` y
+ - Acceso: login, sesión al recargar, cierre de sesión y permisos por rol.
+ - Clientes: listado, consulta, registro, edición, activación/desactivación.
+ - Equipos: listado, registro, edición, historial y catálogos de tipos, marcas y modelos.
++- Administración (ADMIN): consulta y registro de cuentas con varios roles, para
++  un empleado nuevo o un empleado activo que todavía no tenga cuenta.
+ - Nueva orden: selección de cliente y equipo; la confirmación requiere la API de órdenes.
+ 
+ Los demás módulos conservan sus pantallas pendientes de integración. El mapa
+@@ -35,8 +37,10 @@ Las rutas protegidas redirigen al login cuando no hay sesión. El menú y las
+ acciones se ajustan a los roles; el servidor comprueba los mismos permisos.
+ Al salir o vencer la sesión se limpia la caché de consultas para el siguiente usuario.
+ 
+-Las respuestas de Clientes y Equipos conservan PascalCase. Las de acceso usan los
+-DTO camelCase de `src/services/auth.ts`. Los errores mantienen `{estado,mensaje,errores?}`.
++Las respuestas de Clientes y Equipos conservan PascalCase. Las de acceso y usuarios
++usan DTO camelCase en `src/services/auth.ts` y `src/services/usuarios.ts`.
++Los errores mantienen `{estado,mensaje,errores?}`. El alta usa una solicitud directa
++y no guarda la contraseña en la caché de consultas o de mutaciones.
+ 
+ ## Verificación
+ 
+@@ -45,3 +49,4 @@ npm run build
+ ```
+ 
+ La instalación y las cuentas de demostración se describen en `../INTEGRACION_LOGIN.md`.
++El alta de usuarios se describe en `../INTEGRACION_USUARIOS.md`.
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index 37b0108..55bc08b 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -572,14 +572,36 @@ export const OPERACIONES: OperacionApi[] = [
+   {
+     id: "admin.usuarios",
+     modulo: "Administracion",
+-    operacion: "Usuarios, empleados y roles",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/admin/usuarios)",
+-    entrada: "NombreUsuario, Activo, roles[]",
+-    respuesta: "Usuarios[]",
++    operacion: "Consultar cuentas y sus roles",
++    metodo: "GET",
++    ruta: "/api/admin/usuarios",
++    entrada: "Sesión ADMIN",
++    respuesta: "UsuarioResumen[]",
+     roles: "ADMIN",
+-    estado: "ausente",
+-    nota: "PasswordHash y AlgoritmoHash nunca se consultan ni se muestran como datos.",
++    estado: "disponible",
++    procedimiento: "spListarUsuarios",
++    nota: "La respuesta usa un DTO sin contraseñas ni hashes.",
++  },
++  {
++    id: "admin.usuario.crear", modulo: "Administracion", operacion: "Registrar usuario y asignar roles",
++    metodo: "POST", ruta: "/api/admin/usuarios", entrada: "nombreUsuario, contrasena, roles[], empleadoId o empleadoNuevo",
++    respuesta: "UsuarioResumen", roles: "ADMIN", estado: "disponible", procedimiento: "spRegistrarUsuario",
++    nota: "Java genera PBKDF2 con sal aleatoria. SQL registra empleado, cuenta y roles en una transacción.",
++  },
++  {
++    id: "admin.usuario.consultar", modulo: "Administracion", operacion: "Consultar una cuenta",
++    metodo: "GET", ruta: "/api/admin/usuarios/{id}", entrada: "ID", respuesta: "UsuarioResumen",
++    roles: "ADMIN", estado: "disponible", procedimiento: "spListarUsuarios",
++  },
++  {
++    id: "admin.roles", modulo: "Administracion", operacion: "Consultar roles disponibles",
++    metodo: "GET", ruta: "/api/admin/roles", entrada: "-", respuesta: "RolAcceso[]",
++    roles: "ADMIN", estado: "disponible", procedimiento: "spListarRolesAcceso",
++  },
++  {
++    id: "admin.empleados", modulo: "Administracion", operacion: "Consultar empleados activos sin cuenta",
++    metodo: "GET", ruta: "/api/admin/empleados-disponibles", entrada: "-", respuesta: "EmpleadoDisponible[]",
++    roles: "ADMIN", estado: "disponible", procedimiento: "spListarEmpleadosDisponibles",
+   },
+   {
+     id: "admin.catalogos",
+diff --git a/frontend/src/features/administracion/AdministracionPage.tsx b/frontend/src/features/administracion/AdministracionPage.tsx
+index 6169cda..bf6562e 100644
+--- a/frontend/src/features/administracion/AdministracionPage.tsx
++++ b/frontend/src/features/administracion/AdministracionPage.tsx
+@@ -1,11 +1,79 @@
+-﻿import { PendingModule } from "../../components/ui/PendingModule";
++import { useMemo, useState } from "react";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import { UserPlus } from "lucide-react";
++import { Alert } from "../../components/ui/Alert";
++import { Badge } from "../../components/ui/Badge";
++import { Button } from "../../components/ui/Button";
++import { Card, PageHeader } from "../../components/ui/Card";
++import { DataTable, Paginacion, type Columna } from "../../components/ui/DataTable";
++import { Dialog } from "../../components/ui/Dialog";
++import { Field, SearchInput, SelectInput } from "../../components/ui/inputs";
++import { ErrorState, LoadingState } from "../../components/ui/StateView";
++import { mensajeDeError } from "../../services/errors";
++import { usuariosApi, type RegistroUsuario, type UsuarioAdministracion } from "../../services/usuarios";
++import { normalizar } from "../../utils/format";
++import { UsuarioForm } from "./UsuarioForm";
++
++const POR_PAGINA = 10;
+ 
+ export function AdministracionPage() {
+-  return (
+-    <PendingModule
+-      modulo="Administracion"
+-      titulo="Administracion"
+-      descripcion="Usuarios, empleados, roles, bodegas y catalogos del sistema en un solo lugar. Cada cuenta puede tener mas de un rol."
+-    />
+-  );
++  const [abierto, setAbierto] = useState(false);
++  const [busqueda, setBusqueda] = useState("");
++  const [rol, setRol] = useState("");
++  const [pagina, setPagina] = useState(1);
++  const [mensaje, setMensaje] = useState("");
++  const [guardando, setGuardando] = useState(false);
++  const qc = useQueryClient();
++  const usuarios = useQuery({ queryKey: ["admin", "usuarios"], queryFn: ({ signal }) => usuariosApi.listar(signal) });
++  const roles = useQuery({ queryKey: ["admin", "roles"], queryFn: ({ signal }) => usuariosApi.roles(signal) });
++  const empleados = useQuery({ queryKey: ["admin", "empleados"], queryFn: ({ signal }) => usuariosApi.empleados(signal), enabled: abierto });
++  async function guardar(datos: RegistroUsuario) {
++    if (guardando) return;
++    setGuardando(true);
++    try {
++      const usuario = await usuariosApi.registrar(datos);
++      setMensaje(`Se creó la cuenta «${usuario.nombreUsuario}». Ya puede iniciar sesión con los roles asignados.`);
++      setAbierto(false);
++      await Promise.all([qc.invalidateQueries({ queryKey: ["admin", "usuarios"] }), qc.invalidateQueries({ queryKey: ["admin", "empleados"] })]);
++    } finally { setGuardando(false); }
++  }
++  const filtrados = useMemo(() => {
++    const texto = normalizar(busqueda);
++    return (usuarios.data ?? []).filter(u => (!rol || u.roles.includes(rol)) && (!texto || normalizar(`${u.nombreUsuario} ${u.empleadoCodigo} ${u.nombres} ${u.apellidos}`).includes(texto)));
++  }, [usuarios.data, busqueda, rol]);
++  const paginas = Math.max(1, Math.ceil(filtrados.length / POR_PAGINA));
++  const actual = Math.min(pagina, paginas);
++  const nombresRoles = new Map((roles.data ?? []).map(r => [r.codigo, r.nombre]));
++  const columnas: Columna<UsuarioAdministracion>[] = [
++    { clave: "usuario", encabezado: "Usuario", render: u => <strong>{u.nombreUsuario}</strong> },
++    { clave: "empleado", encabezado: "Empleado", render: u => <><div>{u.nombres} {u.apellidos}</div><div className="tc-field__hint">{u.empleadoCodigo}</div></> },
++    { clave: "roles", encabezado: "Roles", render: u => <div className="tc-row">{u.roles.map(r => <Badge key={r}>{nombresRoles.get(r) ?? r}</Badge>)}</div> },
++    { clave: "estado", encabezado: "Estado", render: u => <Badge tono={u.usuarioActivo && u.empleadoActivo ? "ok" : "neutral"}>{u.usuarioActivo && u.empleadoActivo ? "Activo" : "Inactivo"}</Badge> },
++  ];
++  const cerrar = () => { if (!guardando) setAbierto(false); };
++
++  return <>
++    <PageHeader eyebrow="Personal del taller" titulo="Administración" descripcion="Cuentas de acceso del personal y sus roles."
++      acciones={<Button variante="primario" icono={<UserPlus size={16} />} disabled={guardando || !roles.data?.length} onClick={() => { setMensaje(""); setAbierto(true); }}>Nuevo usuario</Button>} />
++    <div className="tc-stack">
++      {mensaje ? <Alert tono="ok">{mensaje}</Alert> : null}
++      {roles.isError ? <Alert tono="danger" accion={<Button onClick={() => roles.refetch()}>Reintentar</Button>}>{mensajeDeError(roles.error, "los roles")}</Alert> : null}
++      <Card>
++        <div className="tc-grid tc-grid--2">
++          <Field label="Buscar usuario o empleado" htmlFor="usuarios-busqueda"><SearchInput id="usuarios-busqueda" value={busqueda} onChange={e => { setBusqueda(e.target.value); setPagina(1); }} placeholder="Nombre, usuario o código" /></Field>
++          <Field label="Rol" htmlFor="usuarios-rol"><SelectInput id="usuarios-rol" value={rol} onChange={e => { setRol(e.target.value); setPagina(1); }}><option value="">Todos los roles</option>{(roles.data ?? []).map(r => <option key={r.codigo} value={r.codigo}>{r.nombre}</option>)}</SelectInput></Field>
++        </div>
++      </Card>
++      <Card>
++        {usuarios.isPending ? <LoadingState titulo="Cargando usuarios…" /> : usuarios.isError ? <ErrorState mensaje={mensajeDeError(usuarios.error, "los usuarios")} onRetry={() => usuarios.refetch()} /> : <>
++          <DataTable columnas={columnas} filas={filtrados.slice((actual - 1) * POR_PAGINA, actual * POR_PAGINA)} claveFila={u => u.usuarioId} vacio="No hay usuarios para esta búsqueda." />
++          <Paginacion pagina={actual} totalPaginas={paginas} total={filtrados.length} onCambiar={setPagina} />
++        </>}
++      </Card>
++    </div>
++    <Dialog abierto={abierto} titulo="Nuevo usuario" descripcion="Registrá la cuenta y asigná sus roles." onCerrar={cerrar} ancho={640}>
++      {empleados.isPending ? <LoadingState titulo="Cargando empleados…" /> : empleados.isError ? <ErrorState mensaje={mensajeDeError(empleados.error, "los empleados")} onRetry={() => empleados.refetch()} /> : abierto && roles.data ?
++        <UsuarioForm empleados={empleados.data ?? []} rolesDisponibles={roles.data} guardando={guardando} onGuardar={guardar} onCancelar={cerrar} /> : null}
++    </Dialog>
++  </>;
+ }
+diff --git a/frontend/src/features/administracion/UsuarioForm.tsx b/frontend/src/features/administracion/UsuarioForm.tsx
+new file mode 100644
+index 0000000..7761e79
+--- /dev/null
++++ b/frontend/src/features/administracion/UsuarioForm.tsx
+@@ -0,0 +1,109 @@
++import { useState, type FormEvent } from "react";
++import { Eye, EyeOff } from "lucide-react";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { Field, SelectInput, Switch, TextInput } from "../../components/ui/inputs";
++import { esApiError, mensajeDeError } from "../../services/errors";
++import type { EmpleadoDisponible, RegistroUsuario, RolAcceso } from "../../services/usuarios";
++
++export function UsuarioForm({ empleados, rolesDisponibles, guardando, onGuardar, onCancelar }: {
++  empleados: EmpleadoDisponible[];
++  rolesDisponibles: RolAcceso[];
++  guardando: boolean;
++  onGuardar: (datos: RegistroUsuario) => Promise<void>;
++  onCancelar: () => void;
++}) {
++  const [tipoEmpleado, setTipoEmpleado] = useState("nuevo");
++  const [empleadoId, setEmpleadoId] = useState("");
++  const [codigo, setCodigo] = useState("");
++  const [nombres, setNombres] = useState("");
++  const [apellidos, setApellidos] = useState("");
++  const [usuario, setUsuario] = useState("");
++  const [contrasena, setContrasena] = useState("");
++  const [confirmacion, setConfirmacion] = useState("");
++  const [ver, setVer] = useState(false);
++  const [roles, setRoles] = useState<string[]>([]);
++  const [errores, setErrores] = useState<Record<string, string>>({});
++  const [mensaje, setMensaje] = useState("");
++
++  async function guardar(e: FormEvent) {
++    e.preventDefault();
++    if (guardando) return;
++    const invalidos: Record<string, string> = {};
++    if (!/^[A-Za-z0-9._-]{3,50}$/.test(usuario.trim())) invalidos.nombreUsuario = "Usá de 3 a 50 letras sin tildes, números, puntos o guiones.";
++    if (!contrasena.trim() || contrasena.length < 12 || contrasena.length > 256) invalidos.contrasena = "La contraseña debe tener entre 12 y 256 caracteres.";
++    if (contrasena !== confirmacion) invalidos.confirmacion = "Las contraseñas no coinciden.";
++    if (!roles.length) invalidos.roles = "Seleccioná al menos un rol.";
++    if (tipoEmpleado === "existente") {
++      if (!empleados.some(e => e.empleadoId === Number(empleadoId))) invalidos.empleadoId = "Elegí un empleado disponible.";
++    } else {
++      if (!/^[A-Za-z0-9._-]{1,20}$/.test(codigo.trim())) invalidos["empleadoNuevo.codigo"] = "Ingresá un código de hasta 20 letras sin tildes, números, puntos o guiones.";
++      if (!nombres.trim() || nombres.trim().length > 80) invalidos["empleadoNuevo.nombres"] = "Ingresá nombres de hasta 80 caracteres.";
++      if (!apellidos.trim() || apellidos.trim().length > 80) invalidos["empleadoNuevo.apellidos"] = "Ingresá apellidos de hasta 80 caracteres.";
++    }
++    setErrores(invalidos);
++    setMensaje("");
++    if (Object.keys(invalidos).length) { setMensaje("Revisá los campos indicados antes de guardar."); return; }
++    try {
++      await onGuardar({ nombreUsuario: usuario.trim(), contrasena, roles,
++        empleadoId: tipoEmpleado === "existente" ? Number(empleadoId) : null,
++        empleadoNuevo: tipoEmpleado === "nuevo" ? { codigo: codigo.trim(), nombres: nombres.trim(), apellidos: apellidos.trim() } : null });
++    } catch (error) {
++      if (esApiError(error)) setErrores(error.fieldErrors);
++      setMensaje(mensajeDeError(error, "el registro del usuario"));
++    }
++  }
++
++  return <form className="tc-stack" onSubmit={guardar} noValidate>
++    {mensaje ? <Alert tono="danger" titulo="No se pudo registrar">{mensaje}</Alert> : null}
++    <Field label="Empleado" htmlFor="usuario-tipo-empleado" requerido>
++      <SelectInput id="usuario-tipo-empleado" value={tipoEmpleado} disabled={guardando} onChange={e => setTipoEmpleado(e.target.value)}>
++        <option value="nuevo">Registrar empleado nuevo</option>
++        <option value="existente">Usar empleado existente</option>
++      </SelectInput>
++    </Field>
++    {tipoEmpleado === "existente" ? <Field label="Empleado disponible" htmlFor="usuario-empleado" requerido error={errores.empleadoId}
++      hint={empleados.length ? "Empleados activos que todavía no tienen una cuenta." : "No hay empleados activos sin cuenta. Podés registrar uno nuevo."}>
++      <SelectInput id="usuario-empleado" value={empleadoId} disabled={guardando} onChange={e => setEmpleadoId(e.target.value)}>
++        <option value="">Elegir empleado</option>
++        {empleados.map(e => <option key={e.empleadoId} value={e.empleadoId}>{e.nombres} {e.apellidos} · {e.codigo}</option>)}
++      </SelectInput>
++    </Field> : <>
++      <Field label="Código de empleado" htmlFor="usuario-codigo" requerido error={errores["empleadoNuevo.codigo"]} hint="Usá un código único, por ejemplo EMP-011.">
++        <TextInput id="usuario-codigo" value={codigo} maxLength={20} disabled={guardando} onChange={e => setCodigo(e.target.value)} autoComplete="off" />
++      </Field>
++      <div className="tc-grid tc-grid--2">
++        <Field label="Nombres" htmlFor="usuario-nombres" requerido error={errores["empleadoNuevo.nombres"]}>
++          <TextInput id="usuario-nombres" value={nombres} maxLength={80} disabled={guardando} onChange={e => setNombres(e.target.value)} autoComplete="off" />
++        </Field>
++        <Field label="Apellidos" htmlFor="usuario-apellidos" requerido error={errores["empleadoNuevo.apellidos"]}>
++          <TextInput id="usuario-apellidos" value={apellidos} maxLength={80} disabled={guardando} onChange={e => setApellidos(e.target.value)} autoComplete="off" />
++        </Field>
++      </div>
++    </>}
++    <Field label="Nombre de usuario" htmlFor="usuario-nombre" requerido error={errores.nombreUsuario} hint="Será el nombre que esta persona usará para ingresar.">
++      <TextInput id="usuario-nombre" value={usuario} maxLength={50} disabled={guardando} onChange={e => setUsuario(e.target.value)} autoComplete="off" autoCapitalize="none" spellCheck={false} />
++    </Field>
++    <Field label="Contraseña" htmlFor="usuario-contrasena" requerido error={errores.contrasena} hint="De 12 a 256 caracteres; podés usar espacios y letras con tildes.">
++      <div className="tc-input-group">
++        <TextInput id="usuario-contrasena" type={ver ? "text" : "password"} value={contrasena} maxLength={256} disabled={guardando} onChange={e => setContrasena(e.target.value)} autoComplete="new-password" />
++        <Button variante="fantasma" disabled={guardando} onClick={() => setVer(v => !v)} aria-label={ver ? "Ocultar contraseña" : "Mostrar contraseña"} icono={ver ? <EyeOff size={16} /> : <Eye size={16} />} />
++      </div>
++    </Field>
++    <Field label="Confirmar contraseña" htmlFor="usuario-confirmacion" requerido error={errores.confirmacion}>
++      <TextInput id="usuario-confirmacion" type={ver ? "text" : "password"} value={confirmacion} maxLength={256} disabled={guardando} onChange={e => setConfirmacion(e.target.value)} autoComplete="new-password" />
++    </Field>
++    <fieldset className="tc-stack" disabled={guardando} style={{ border: 0, padding: 0, margin: 0 }}>
++      <legend className="tc-field__label">Roles <span className="tc-field__req">*</span></legend>
++      <div className="tc-grid tc-grid--2">
++        {rolesDisponibles.map(r => <Switch key={r.codigo} id={`usuario-rol-${r.codigo}`} etiqueta={r.nombre} checked={roles.includes(r.codigo)}
++          onChange={seleccionado => setRoles(actuales => seleccionado ? [...actuales, r.codigo] : actuales.filter(rol => rol !== r.codigo))} />)}
++      </div>
++      {errores.roles ? <span className="tc-field__error" role="alert">{errores.roles}</span> : <span className="tc-field__hint">Seleccioná uno o varios según las funciones de la persona.</span>}
++    </fieldset>
++    <div className="tc-row tc-row--end">
++      <Button disabled={guardando} onClick={onCancelar}>Cancelar</Button>
++      <Button variante="primario" type="submit" disabled={guardando}>{guardando ? "Registrando…" : "Registrar usuario"}</Button>
++    </div>
++  </form>;
++}
+diff --git a/frontend/src/services/usuarios.ts b/frontend/src/services/usuarios.ts
+new file mode 100644
+index 0000000..d7253b8
+--- /dev/null
++++ b/frontend/src/services/usuarios.ts
+@@ -0,0 +1,29 @@
++import { http } from "./http";
++
++export interface UsuarioAdministracion {
++  usuarioId: number;
++  empleadoId: number;
++  empleadoCodigo: string;
++  nombres: string;
++  apellidos: string;
++  nombreUsuario: string;
++  usuarioActivo: boolean;
++  empleadoActivo: boolean;
++  fechaCreacion: string;
++  roles: string[];
++}
++export interface RolAcceso { codigo: string; nombre: string }
++export interface EmpleadoDisponible { empleadoId: number; codigo: string; nombres: string; apellidos: string }
++export interface RegistroUsuario {
++  nombreUsuario: string;
++  contrasena: string;
++  roles: string[];
++  empleadoId: number | null;
++  empleadoNuevo: { codigo: string; nombres: string; apellidos: string } | null;
++}
++export const usuariosApi = {
++  listar: (signal?: AbortSignal) => http.get<UsuarioAdministracion[]>("/admin/usuarios", signal),
++  roles: (signal?: AbortSignal) => http.get<RolAcceso[]>("/admin/roles", signal),
++  empleados: (signal?: AbortSignal) => http.get<EmpleadoDisponible[]>("/admin/empleados-disponibles", signal),
++  registrar: (datos: RegistroUsuario) => http.post<UsuarioAdministracion>("/admin/usuarios", datos),
++};

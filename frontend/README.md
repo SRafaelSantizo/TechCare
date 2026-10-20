@@ -18,6 +18,8 @@ Se conserva la configuración local existente de `VITE_PROXY_TARGET` y
 - Acceso: login, sesión al recargar, cierre de sesión y permisos por rol.
 - Clientes: listado, consulta, registro, edición, activación/desactivación.
 - Equipos: listado, registro, edición, historial y catálogos de tipos, marcas y modelos.
+- Administración (ADMIN): consulta y registro de cuentas con varios roles, para
+  un empleado nuevo o un empleado activo que todavía no tenga cuenta.
 - Nueva orden: selección de cliente y equipo; la confirmación requiere la API de órdenes.
 
 Los demás módulos conservan sus pantallas pendientes de integración. El mapa
@@ -35,8 +37,10 @@ Las rutas protegidas redirigen al login cuando no hay sesión. El menú y las
 acciones se ajustan a los roles; el servidor comprueba los mismos permisos.
 Al salir o vencer la sesión se limpia la caché de consultas para el siguiente usuario.
 
-Las respuestas de Clientes y Equipos conservan PascalCase. Las de acceso usan los
-DTO camelCase de `src/services/auth.ts`. Los errores mantienen `{estado,mensaje,errores?}`.
+Las respuestas de Clientes y Equipos conservan PascalCase. Las de acceso y usuarios
+usan DTO camelCase en `src/services/auth.ts` y `src/services/usuarios.ts`.
+Los errores mantienen `{estado,mensaje,errores?}`. El alta usa una solicitud directa
+y no guarda la contraseña en la caché de consultas o de mutaciones.
 
 ## Verificación
 
@@ -45,3 +49,4 @@ npm run build
 ```
 
 La instalación y las cuentas de demostración se describen en `../INTEGRACION_LOGIN.md`.
+El alta de usuarios se describe en `../INTEGRACION_USUARIOS.md`.

@@ -10,7 +10,11 @@ Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACIO
 La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
 las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
 Una instalación nueva con un maestro anterior debe incluir también las
-actualizaciones 06 (Clientes), 08 (Equipos) y 11 (Acceso).
+actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso) y 13 (Usuarios).
+
+Administración permite consultar y registrar cuentas, empleados y roles desde
+una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
+En una base existente se ejecuta `13_Usuarios_Procedimientos.sql` una vez.
 
 ## Ejecución desde cero
 

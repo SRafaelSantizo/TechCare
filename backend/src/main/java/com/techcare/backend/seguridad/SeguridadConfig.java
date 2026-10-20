@@ -55,6 +55,9 @@ public class SeguridadConfig {
                         .requestMatchers(HttpMethod.GET,"/api/auth/csrf").permitAll()
                         .requestMatchers(HttpMethod.POST,"/api/auth/login").permitAll()
                         .requestMatchers(HttpMethod.GET,"/api/auth/sesion").authenticated()
+                        .requestMatchers(HttpMethod.GET,"/api/admin/usuarios","/api/admin/usuarios/*",
+                                "/api/admin/roles","/api/admin/empleados-disponibles").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.POST,"/api/admin/usuarios").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.GET,"/api/clientes","/api/clientes/**")
                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
                         .requestMatchers(HttpMethod.POST,"/api/clientes").hasAnyRole("ADMIN","RECEPCION")
