@@ -43,8 +43,8 @@ export const NAVEGACION: NavGrupo[] = [
     items: [
       { etiqueta: "Ordenes", ruta: "/ordenes", icono: ClipboardList },
       { etiqueta: "Nueva orden", ruta: "/ordenes/nueva", icono: Wrench, roles: ["RECEPCION", "ADMIN"] },
-      { etiqueta: "Clientes", ruta: "/clientes", icono: Users },
-      { etiqueta: "Equipos", ruta: "/equipos", icono: LayoutGrid },
+      { etiqueta: "Clientes", ruta: "/clientes", icono: Users, roles: ["RECEPCION", "TECNICO", "CAJA", "ADMIN"] },
+      { etiqueta: "Equipos", ruta: "/equipos", icono: LayoutGrid, roles: ["RECEPCION", "TECNICO", "ADMIN"] },
     ],
   },
   {
@@ -68,7 +68,7 @@ export const NAVEGACION: NavGrupo[] = [
     etiqueta: "Administracion",
     items: [
       { etiqueta: "Administracion", ruta: "/administracion", icono: Settings, roles: ["ADMIN"] },
-      { etiqueta: "Integracion", ruta: "/integracion", icono: PackageSearch },
+      { etiqueta: "Integracion", ruta: "/integracion", icono: PackageSearch, roles: ["ADMIN"] },
     ],
   },
 ];

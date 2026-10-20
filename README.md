@@ -2,7 +2,15 @@
 
 Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional,
 normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
-La aplicación, los manuales con capturas y la integración frontend/backend aún deben desarrollarse.
+Clientes y Equipos tienen API e interfaz conectadas. El acceso usa las cuentas y
+roles de la BD, con login, sesión y cierre de sesión. Los demás módulos y manuales
+con capturas aún deben completarse.
+
+Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
+La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
+las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
+Una instalación nueva con un maestro anterior debe incluir también las
+actualizaciones 06 (Clientes), 08 (Equipos) y 11 (Acceso).
 
 ## Ejecución desde cero
 

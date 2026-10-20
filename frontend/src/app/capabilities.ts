@@ -1,6 +1,6 @@
 /**
  * Capacidades verificadas en los controladores de Clientes, Equipos y catálogos.
- * Una ruta disponible no implica autenticación: la sesión sigue pendiente.
+ * Las rutas disponibles requieren sesión y permisos del servidor.
  * Los procesos de órdenes, inventario y caja conservan su estado pendiente.
  */
 
@@ -19,7 +19,7 @@ export interface OperacionApi {
   entrada: string;
   /** DTO de respuesta real. */
   respuesta: string;
-  /** Roles que la consigna asigna; autorizacion del servidor no implementada aun. */
+  /** Roles autorizados para la operación. */
   roles: string;
   estado: EstadoCapacidad;
   /** Proceso SQL de referencia cuando no hay endpoint. */
@@ -28,30 +28,54 @@ export interface OperacionApi {
 }
 
 export const OPERACIONES: OperacionApi[] = [
-  // ---- Sesion / autenticacion ----
+  // ---- Sesión y autenticación ----
   {
-    id: "auth.login",
-    modulo: "Acceso",
-    operacion: "Iniciar sesion del personal",
-    metodo: "Sin endpoint",
-    ruta: "(requiere /api/auth/login)",
-    entrada: "nombreUsuario, contrasena",
-    respuesta: "identidad + roles",
-    roles: "Todos",
-    estado: "ausente",
-    nota: "No existe controlador de autenticacion. Verificar PasswordHash (PBKDF2-HMAC-SHA256) es responsabilidad del servidor; el frontend nunca recibe hashes.",
+    "id": "auth.login",
+    "modulo": "Acceso",
+    "operacion": "Iniciar sesión del personal",
+    "metodo": "POST",
+    "ruta": "/api/auth/login",
+    "entrada": "nombreUsuario, contrasena",
+    "respuesta": "usuario + roles[]",
+    "roles": "Todos",
+    "estado": "disponible",
+    "procedimiento": "spConsultarAcceso",
+    "nota": "Contraseña verificada con PBKDF2-HMAC-SHA256 en el servidor; el hash no se devuelve."
   },
   {
-    id: "auth.sesion",
-    modulo: "Acceso",
-    operacion: "Sesion actual y roles",
-    metodo: "Sin endpoint",
-    ruta: "(requiere /api/auth/sesion)",
-    entrada: "-",
-    respuesta: "usuario, empleado, roles[]",
-    roles: "Todos",
-    estado: "ausente",
-    nota: "UsuarioRol es N:M: la respuesta debe devolver una coleccion de roles, no un campo unico.",
+    "id": "auth.sesion",
+    "modulo": "Acceso",
+    "operacion": "Consultar sesión actual",
+    "metodo": "GET",
+    "ruta": "/api/auth/sesion",
+    "entrada": "Cookie de sesión",
+    "respuesta": "usuario + roles[]",
+    "roles": "Todos",
+    "estado": "disponible",
+    "nota": "La sesión se recupera al recargar; sin sesión válida responde 401."
+  },
+  {
+    "id": "auth.logout",
+    "modulo": "Acceso",
+    "operacion": "Cerrar sesión",
+    "metodo": "POST",
+    "ruta": "/api/auth/logout",
+    "entrada": "Cookie + CSRF",
+    "respuesta": "Sesión cerrada",
+    "roles": "Todos",
+    "estado": "disponible",
+    "nota": "Invalida la sesión del servidor y elimina la cookie."
+  },
+  {
+    "id": "auth.csrf",
+    "modulo": "Acceso",
+    "operacion": "Preparar protección de solicitudes",
+    "metodo": "GET",
+    "ruta": "/api/auth/csrf",
+    "entrada": "-",
+    "respuesta": "headerName, token",
+    "roles": "Todos",
+    "estado": "disponible"
   },
 
   // ---- Dashboard ----
@@ -90,7 +114,7 @@ export const OPERACIONES: OperacionApi[] = [
     ruta: "/api/clientes",
     entrada: "-",
     respuesta: "Cliente[]",
-    roles: "RECEPCION, ADMIN",
+    roles: "RECEPCION, TECNICO, CAJA, ADMIN",
     estado: "incompleta",
     nota: "Devuelve el conjunto completo sin paginacion ni filtros de servidor; el frontend pagina/filtra en cliente sobre ese conjunto.",
   },
@@ -102,7 +126,7 @@ export const OPERACIONES: OperacionApi[] = [
     ruta: "/api/clientes/{id}",
     entrada: "id",
     respuesta: "Cliente",
-    roles: "RECEPCION, ADMIN",
+    roles: "RECEPCION, TECNICO, CAJA, ADMIN",
     estado: "disponible",
   },
   {
@@ -163,7 +187,7 @@ export const OPERACIONES: OperacionApi[] = [
     "ruta": "/api/equipos",
     "entrada": "EquipoDatos",
     "respuesta": "Equipo (201)",
-    "roles": "RECEPCION, TECNICO, ADMIN",
+    "roles": "RECEPCION, ADMIN",
     "estado": "disponible",
     "procedimiento": "spRegistrarEquipo"
   },
@@ -175,7 +199,7 @@ export const OPERACIONES: OperacionApi[] = [
     "ruta": "/api/equipos/{id}",
     "entrada": "id, EquipoDatos",
     "respuesta": "Equipo",
-    "roles": "RECEPCION, TECNICO, ADMIN",
+    "roles": "RECEPCION, ADMIN",
     "estado": "disponible",
     "procedimiento": "spActualizarEquipo",
     "nota": "Con órdenes se conserva propietario, serie y modelo; descripción y Activo pueden actualizarse."

@@ -21,7 +21,7 @@ const PASOS = ["Cliente", "Equipo", "Problema", "Confirmar"] as const;
  * Flujo guiado de recepcion de un equipo.
  *
  * Cliente y Equipo consultan sus APIs reales. Confirmar el ingreso requiere
- * autenticacion y POST /api/ordenes; permanece deshabilitado hasta integrarlos.
+ * POST /api/ordenes; permanece deshabilitado hasta integrar ese endpoint.
  */
 export function OrdenNuevaPage() {
   const [paso, setPaso] = useState(0);
@@ -185,7 +185,7 @@ export function OrdenNuevaPage() {
                 Revisar
               </Button>
             </div>
-            <PendingState titulo="Creación de la orden pendiente" descripcion="La selección del cliente y del equipo está disponible. Confirmar el ingreso requiere integrar el registro de órdenes y la sesión del personal." />
+            <PendingState titulo="Creación de la orden pendiente" descripcion="La selección del cliente y del equipo está disponible. Falta conectar la confirmación del ingreso con el registro de órdenes." />
           </Card>
         ) : null}
 

@@ -16,8 +16,10 @@ import { nombreEstado } from "../../services/catalogos";
 import { fechaHora, moneda, normalizar } from "../../utils/format";
 import { useClientes } from "../clientes/hooks";
 import { EquipoForm } from "./EquipoForm";
+import { puedeAcceder, useSession } from "../../app/session";
 
 export function EquiposPage() {
+  const puedeEditar = puedeAcceder(useSession(), ["ADMIN", "RECEPCION"]);
   const [params] = useSearchParams();
   const [clienteFiltro, setClienteFiltro] = useState(params.get("clienteId") ?? "");
   const [busqueda, setBusqueda] = useState("");
@@ -63,7 +65,7 @@ export function EquiposPage() {
     { clave: "modelo", encabezado: "Equipo", render: e => <>{e.Marca} · {e.Modelo}<div className="tc-field__hint">{e.TipoEquipo}</div></> },
     { clave: "estado", encabezado: "Estado", render: e => <Badge tono={e.Activo ? "ok" : "neutral"}>{e.Activo ? "Activo" : "Inactivo"}</Badge> },
     { clave: "acciones", encabezado: "Acciones", render: e => <div className="tc-row">
-      <IconButton etiqueta={`Editar ${e.NumeroSerie}`} disabled={!catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: e })}><Pencil size={16} /></IconButton>
+      <IconButton etiqueta={`Editar ${e.NumeroSerie}`} disabled={!puedeEditar || !catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: e })}><Pencil size={16} /></IconButton>
       <IconButton etiqueta={`Historial de ${e.NumeroSerie}`} onClick={() => setHistorial(e)}><History size={16} /></IconButton>
     </div> },
   ];
@@ -79,7 +81,7 @@ export function EquiposPage() {
   }
   return <>
     <PageHeader eyebrow="Servicio" titulo="Equipos" descripcion="Equipos de los clientes y su historial de ingresos al taller."
-      acciones={<Button variante="primario" icono={<Plus size={16} />} disabled={!catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: null })}>Nuevo equipo</Button>} />
+      acciones={<Button variante="primario" icono={<Plus size={16} />} disabled={!puedeEditar || !catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: null })}>Nuevo equipo</Button>} />
     <div className="tc-stack">
       {ok ? <Alert tono="ok">{ok}</Alert> : null}
       {catalogos.isError || clientes.isError ? <Alert tono="danger" accion={<Button onClick={() => { catalogos.refetch(); clientes.refetch(); }}>Reintentar</Button>}>No se pudieron cargar los clientes o catálogos. {mensajeDeError(catalogos.error ?? clientes.error)}</Alert> : null}

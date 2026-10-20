@@ -1,0 +1,2178 @@
+diff --git a/11_Login_Procedimiento.sql b/11_Login_Procedimiento.sql
+new file mode 100644
+index 0000000..6dc5a86
+--- /dev/null
++++ b/11_Login_Procedimiento.sql
+@@ -0,0 +1,31 @@
++-- Ejecutar una vez en la base TechCare existente. Puede repetirse.
++-- Agrega la consulta de acceso; no modifica usuarios, contraseñas, roles ni tablas.
++USE [TechCare];
++GO
++SET ANSI_NULLS ON;
++SET QUOTED_IDENTIFIER ON;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spConsultarAcceso
++    @NombreUsuario nvarchar(max)
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET @NombreUsuario=NULLIF(LTRIM(RTRIM(@NombreUsuario)),N'');
++    IF @NombreUsuario IS NULL OR DATALENGTH(CONVERT(varchar(max),@NombreUsuario))>50
++        THROW 51400,N'El usuario es obligatorio y admite hasta 50 caracteres.',1;
++
++    -- Solo el backend consume el hash. Nunca debe enviarlo en una respuesta HTTP.
++    -- LEFT JOIN conserva usuarios sin roles para rechazarlos de manera uniforme.
++    SELECT u.UsuarioID, u.EmpleadoID, u.NombreUsuario, u.PasswordHash, u.AlgoritmoHash,
++           u.Activo AS UsuarioActivo, e.Activo AS EmpleadoActivo,
++           e.Codigo AS EmpleadoCodigo, e.Nombres, e.Apellidos, ur.RolCodigo
++    FROM dbo.Usuario u
++    INNER JOIN dbo.Empleado e ON e.EmpleadoID=u.EmpleadoID
++    LEFT JOIN dbo.UsuarioRol ur ON ur.UsuarioID=u.UsuarioID
++    WHERE u.NombreUsuario=@NombreUsuario
++    ORDER BY ur.RolCodigo;
++END;
++GO
++GRANT EXECUTE ON OBJECT::dbo.spConsultarAcceso TO techcare_app;
++GO
+diff --git a/INTEGRACION_LOGIN.md b/INTEGRACION_LOGIN.md
+new file mode 100644
+index 0000000..1a3d218
+--- /dev/null
++++ b/INTEGRACION_LOGIN.md
+@@ -0,0 +1,130 @@
++# Login, sesión y permisos
++
++Actualización preparada sobre el commit `8ae69b4` de TechCare, después de integrar
++Equipos. Usa las tablas y contraseñas existentes; no modifica el maestro 01.
++
++## Instalar en tu proyecto actual
++
++1. Guardar `12_Login.patch` en la carpeta TechCare que contiene `backend`,
++   `frontend` y los scripts SQL.
++2. Desde la terminal de IntelliJ, en esa carpeta, ejecutar:
++
++   ```bash
++   git apply 12_Login.patch
++   ```
++
++   El parche coloca los archivos del login y crea `11_Login_Procedimiento.sql`.
++   Trabaja en la rama actual; el commit y push se hacen después, como de costumbre.
++3. En SSMS, abrir y ejecutar completo `11_Login_Procedimiento.sql` una vez en la
++   base existente. Agrega `spConsultarAcceso` y su permiso de ejecución; conserva
++   las tablas, usuarios, contraseñas y roles actuales. No ejecutar el maestro ni
++   volver a cargar los datos de prueba.
++4. En IntelliJ, recargar el proyecto Maven para descargar Spring Security.
++   Reiniciar el backend con la misma configuración `DB_URL` y la DLL de JDBC
++   que ya funcionaban. No agregar credenciales al código.
++5. Ejecutar el frontend como hasta ahora. Si estaba abierto, recargar la página.
++   Las rutas del taller pedirán iniciar sesión.
++
++Después de aplicar el parche puede eliminarse `12_Login.patch`. Conservar el
++script 11 y los archivos de código. En una instalación nueva, aplicar también
++el 11 después del maestro y de los datos/catálogos que correspondan.
++
++## Cuentas de prueba existentes
++
++Si la base conserva los datos de `02_Datos_Prueba.sql`, todas estas cuentas
++usan la contraseña de demostración `TechCare2026!`:
++
++| Cuenta | Rol |
++|---|---|
++| `demo01` | ADMIN |
++| `demo02`, `demo03` | RECEPCION |
++| `demo04`, `demo05`, `demo06` | TECNICO |
++| `demo07`, `demo08` | BODEGA |
++| `demo09`, `demo10` | CAJA |
++
++Probar primero `demo01`. Si las cuentas se modificaron en la base, usar sus
++credenciales vigentes. El login no crea ni restablece usuarios automáticamente.
++
++## Comportamiento
++
++- Login con usuario y contraseña; un error conserva el nombre de usuario.
++- Recuperación de la sesión al recargar. Se usa una cookie HttpOnly y SameSite=Lax.
++- Cierre de sesión en el servidor; al salir se limpia la caché del frontend.
++- Sesión vencida: vuelve a la pantalla de acceso. Expira tras 30 minutos de
++  inactividad y también se pierde al reiniciar el backend, porque reside en memoria.
++- Cuentas o empleados inactivos, o cuentas sin roles, no ingresan. La respuesta
++  es la misma que para una contraseña incorrecta.
++- La contraseña se verifica con PBKDF2-HMAC-SHA256, compatible con los hashes ya
++  almacenados. Ni el hash ni la contraseña se devuelven en la respuesta de acceso.
++- El identificador de sesión rota al ingresar. POST y PUT requieren token CSRF.
++  La capa HTTP del frontend obtiene y renueva ese token automáticamente.
++- Diez intentos fallidos bloquean nuevos intentos de esa combinación usuario/IP
++  hasta completar una ventana de cinco minutos. Un acceso correcto limpia su contador.
++- Los roles de una sesión reflejan los asignados al ingresar. Si cambian en la BD,
++  cerrar sesión y volver a ingresar para cargar los nuevos permisos.
++
++No se usan tokens de autenticación en localStorage ni un modo de acceso sin autenticar.
++Para servir el backend con HTTPS, configurar `SESSION_COOKIE_SECURE=true`.
++
++## Permisos de las APIs actuales
++
++| Operación | ADMIN | RECEPCION | TECNICO | CAJA | BODEGA |
++|---|---|---|---|---|---|
++| Ingresar, consultar sesión y salir | Sí | Sí | Sí | Sí | Sí |
++| Consultar clientes | Sí | Sí | Sí | Sí | No |
++| Crear/editar/activar/desactivar clientes | Sí | Sí | No | No | No |
++| Consultar equipos, historial y catálogos | Sí | Sí | Sí | No | No |
++| Crear/editar/activar/desactivar equipos | Sí | Sí | No | No | No |
++
++El menú y los botones reflejan estos permisos. Las rutas y operaciones también
++se validan en el servidor, aunque alguien intente llamar a la API directamente.
++Una cuenta puede tener varios roles. El mapa de integración queda visible para ADMIN.
++
++Órdenes, inventario, compras y caja todavía necesitan sus controladores de negocio.
++Las futuras operaciones deben tomar el actor desde `@AuthenticationPrincipal
++UsuarioAutenticado`, usando `getUsuarioId()`, y declarar sus permisos en
++`SeguridadConfig`. No deben aceptar un UsuarioID arbitrario del formulario.
++
++## Endpoints de acceso
++
++| Método | Ruta | Entrada | Resultado |
++|---|---|---|---|
++| GET | `/api/auth/csrf` | — | Cookie de sesión y `{headerName, token}` |
++| POST | `/api/auth/login` | `{nombreUsuario, contrasena}` + CSRF | `{autenticado, usuario, roles}` |
++| GET | `/api/auth/sesion` | Cookie de sesión | Identidad y roles actuales |
++| POST | `/api/auth/logout` | Cookie + CSRF | Sesión invalidada |
++
++Para un cliente HTTP distinto del frontend: obtener primero `/api/auth/csrf`,
++conservar su cookie y enviar el token en `X-CSRF-TOKEN`. Después de ingresar o
++salir, obtener un token nuevo antes de otra escritura. La pantalla ya realiza
++estos pasos. Un rechazo explícito `CSRF_INVALIDO` puede renovarse y repetirse
++una vez: el filtro lo rechazó antes de ejecutar la operación. Los demás errores
++no repiten escrituras automáticamente.
++
++HTTP 400: entrada inválida; 401: credenciales o sesión inválidas; 403: permisos
++o CSRF; 429: límite de intentos; 503: no se pudo consultar el acceso en la BD.
++
++## Comprobación y alcance
++
++- 45 pruebas Java aprobadas: 27 nuevas de acceso, contraseña y sesión, más las
++  18 existentes. Se comprobaron permisos de los cinco roles, cuenta inactiva,
++  roles múltiples, CSRF, errores, cierre de sesión y rotación del identificador.
++- La prueba HTTP arranca Tomcat y comprueba cookies reales HttpOnly/SameSite,
++  persistencia entre solicitudes y rechazo de cookies antiguas tras login/logout.
++- Las pruebas Java sustituyen JDBC por un doble de pruebas: no ejecutan SQL Server.
++- Los diez hashes del archivo de datos se verificaron contra la contraseña documentada.
++- El script 11 pasó el análisis sintáctico T-SQL. Su ejecución real queda pendiente
++  en la instancia del equipo; el paso 3 es necesario antes de usar el login allí.
++- Frontend: TypeScript y Vite aprobados. Navegador con HTTP simulado: redirección,
++  credenciales incorrectas, recarga, CSRF sin duplicar escrituras, logout, permisos
++  y vencimiento de sesión. También se revisó el ancho móvil de la pantalla.
++
++Prueba manual sugerida: ingresar con `demo02`, registrar un cliente, recargar y
++salir. Luego ingresar con `demo04`: Clientes/Equipos deben poder consultarse,
++pero sus botones de registro y edición estarán deshabilitados. `demo07` no debe
++tener acceso a esos módulos aunque se escriba su URL directamente.
++
++Documentación de referencia:
++[persistencia de sesión](https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html),
++[protección CSRF](https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html)
++y [validación de credenciales](https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/dao-authentication-provider.html).
+diff --git a/README.md b/README.md
+index 7326ccc..7b2b8bb 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,15 @@
+ 
+ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional,
+ normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
+-La aplicación, los manuales con capturas y la integración frontend/backend aún deben desarrollarse.
++Clientes y Equipos tienen API e interfaz conectadas. El acceso usa las cuentas y
++roles de la BD, con login, sesión y cierre de sesión. Los demás módulos y manuales
++con capturas aún deben completarse.
++
++Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
++La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
++las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
++Una instalación nueva con un maestro anterior debe incluir también las
++actualizaciones 06 (Clientes), 08 (Equipos) y 11 (Acceso).
+ 
+ ## Ejecución desde cero
+ 
+diff --git a/backend/pom.xml b/backend/pom.xml
+index 0994dad..10439e2 100644
+--- a/backend/pom.xml
++++ b/backend/pom.xml
+@@ -24,6 +24,17 @@
+ 
+ 	<dependencies>
+ 
++		<dependency>
++			<groupId>org.springframework.boot</groupId>
++			<artifactId>spring-boot-starter-security</artifactId>
++		</dependency>
++
++		<dependency>
++			<groupId>org.springframework.security</groupId>
++			<artifactId>spring-security-test</artifactId>
++			<scope>test</scope>
++		</dependency>
++
+ 		<dependency>
+ 			<groupId>org.springframework.boot</groupId>
+ 			<artifactId>spring-boot-starter-validation</artifactId>
+@@ -68,4 +79,4 @@
+ 		</plugins>
+ 	</build>
+ 
+-</project>
+\ No newline at end of file
++</project>
+diff --git a/backend/src/main/java/com/techcare/backend/AuthController.java b/backend/src/main/java/com/techcare/backend/AuthController.java
+new file mode 100644
+index 0000000..394d55e
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/AuthController.java
+@@ -0,0 +1,77 @@
++package com.techcare.backend;
++
++import com.techcare.backend.seguridad.IntentosLogin;
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import jakarta.servlet.http.HttpServletRequest;
++import jakarta.servlet.http.HttpServletResponse;
++import jakarta.validation.Valid;
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.Size;
++import org.springframework.security.authentication.AuthenticationManager;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.security.core.Authentication;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.security.core.context.SecurityContext;
++import org.springframework.security.core.context.SecurityContextHolder;
++import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
++import org.springframework.security.web.context.SecurityContextRepository;
++import org.springframework.security.web.csrf.CsrfToken;
++import org.springframework.web.bind.annotation.*;
++import org.springframework.web.server.ResponseStatusException;
++import org.springframework.http.HttpStatus;
++
++import java.util.List;
++
++@RestController
++@RequestMapping("/api/auth")
++public class AuthController {
++    private final AuthenticationManager manager;
++    private final SecurityContextRepository contextRepository;
++    private final SessionAuthenticationStrategy sesiones;
++    private final IntentosLogin intentos;
++
++    public AuthController(AuthenticationManager manager,SecurityContextRepository contextRepository,
++            SessionAuthenticationStrategy sesiones,IntentosLogin intentos) {
++        this.manager=manager;
++        this.contextRepository=contextRepository;
++        this.sesiones=sesiones;
++        this.intentos=intentos;
++    }
++
++    @GetMapping("/csrf")
++    public TokenCsrf csrf(CsrfToken token) { return new TokenCsrf(token.getHeaderName(),token.getToken()); }
++
++    @PostMapping("/login")
++    public Sesion login(@Valid @RequestBody LoginDatos datos,HttpServletRequest request,HttpServletResponse response) {
++        String direccion=request.getRemoteAddr();
++        if (!intentos.permitir(datos.nombreUsuario(),direccion))
++            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
++                    "Demasiados intentos. Esperá cinco minutos y volvé a intentar.");
++        Authentication auth=manager.authenticate(UsernamePasswordAuthenticationToken.unauthenticated(
++                datos.nombreUsuario(),datos.contrasena()));
++        sesiones.onAuthentication(auth,request,response);
++        SecurityContext context=SecurityContextHolder.createEmptyContext();
++        context.setAuthentication(auth);
++        SecurityContextHolder.setContext(context);
++        contextRepository.saveContext(context,request,response);
++        intentos.exito(datos.nombreUsuario(),direccion);
++        return respuesta((UsuarioAutenticado)auth.getPrincipal());
++    }
++
++    @GetMapping("/sesion")
++    public Sesion sesion(@AuthenticationPrincipal UsuarioAutenticado usuario) { return respuesta(usuario); }
++
++    private Sesion respuesta(UsuarioAutenticado u) {
++        return new Sesion(true,new UsuarioSesion(u.getUsuarioId(),u.getUsername(),
++                u.getNombreCompleto(),u.getEmpleadoCodigo()),u.getRoles());
++    }
++
++    public record LoginDatos(
++            @NotBlank(message="El usuario es obligatorio.") @Size(max=50,message="El usuario admite hasta 50 caracteres.") String nombreUsuario,
++            @NotBlank(message="La contraseña es obligatoria.") @Size(max=256,message="La contraseña es demasiado larga.") String contrasena) {
++        public LoginDatos { nombreUsuario=nombreUsuario==null ? null : nombreUsuario.strip(); }
++    }
++    public record TokenCsrf(String headerName,String token) {}
++    public record UsuarioSesion(int usuarioId,String nombreUsuario,String nombreCompleto,String empleadoCodigo) {}
++    public record Sesion(boolean autenticado,UsuarioSesion usuario,List<String> roles) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/AuthErrores.java b/backend/src/main/java/com/techcare/backend/AuthErrores.java
+new file mode 100644
+index 0000000..1952d3a
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/AuthErrores.java
+@@ -0,0 +1,50 @@
++package com.techcare.backend;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.dao.DataAccessException;
++import org.springframework.http.ResponseEntity;
++import org.springframework.http.converter.HttpMessageNotReadableException;
++import org.springframework.security.authentication.InternalAuthenticationServiceException;
++import org.springframework.security.core.AuthenticationException;
++import org.springframework.web.bind.MethodArgumentNotValidException;
++import org.springframework.web.bind.annotation.ExceptionHandler;
++import org.springframework.web.bind.annotation.RestControllerAdvice;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++@RestControllerAdvice(assignableTypes=AuthController.class)
++public class AuthErrores {
++    private static final Logger LOG=LoggerFactory.getLogger(AuthErrores.class);
++
++    @ExceptionHandler(AuthenticationException.class)
++    public ResponseEntity<Map<String,Object>> acceso(AuthenticationException ex) {
++        if (ex instanceof InternalAuthenticationServiceException) return servicio(ex);
++        return ResponseEntity.status(401).body(Map.of("estado",401,"mensaje","Usuario o contraseña incorrectos."));
++    }
++
++    @ExceptionHandler(DataAccessException.class)
++    public ResponseEntity<Map<String,Object>> servicio(Exception ex) {
++        LOG.error("No se pudo consultar el servicio de acceso.",ex);
++        return ResponseEntity.status(503).body(Map.of("estado",503,"mensaje","No se pudo validar el acceso. Revisá el backend e intentá nuevamente."));
++    }
++
++    @ExceptionHandler(MethodArgumentNotValidException.class)
++    public ResponseEntity<Map<String,Object>> datos(MethodArgumentNotValidException ex) {
++        Map<String,String> errores=new LinkedHashMap<>();
++        ex.getBindingResult().getFieldErrors().forEach(e -> errores.putIfAbsent(e.getField(),e.getDefaultMessage()));
++        return ResponseEntity.badRequest().body(Map.of("estado",400,"mensaje","Revisá los datos de acceso.","errores",errores));
++    }
++
++    @ExceptionHandler(HttpMessageNotReadableException.class)
++    public ResponseEntity<Map<String,Object>> json(HttpMessageNotReadableException ex) {
++        return ResponseEntity.badRequest().body(Map.of("estado",400,"mensaje","La solicitud de acceso no tiene un formato válido."));
++    }
++
++    @ExceptionHandler(ResponseStatusException.class)
++    public ResponseEntity<Map<String,Object>> estado(ResponseStatusException ex) {
++        return ResponseEntity.status(ex.getStatusCode()).body(Map.of("estado",ex.getStatusCode().value(),"mensaje",ex.getReason()));
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/IntentosLogin.java b/backend/src/main/java/com/techcare/backend/seguridad/IntentosLogin.java
+new file mode 100644
+index 0000000..510146d
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/seguridad/IntentosLogin.java
+@@ -0,0 +1,33 @@
++package com.techcare.backend.seguridad;
++
++import org.springframework.stereotype.Component;
++
++import java.time.Clock;
++import java.time.Duration;
++import java.util.HashMap;
++import java.util.Locale;
++import java.util.Map;
++
++@Component
++public class IntentosLogin {
++    private static final long VENTANA=Duration.ofMinutes(5).toMillis();
++    private final Map<String,Ventana> intentos=new HashMap<>();
++    private final Clock clock;
++    public IntentosLogin() { this(Clock.systemUTC()); }
++    IntentosLogin(Clock clock) { this.clock=clock; }
++
++    public synchronized boolean permitir(String usuario,String direccion) {
++        long ahora=clock.millis();
++        intentos.entrySet().removeIf(e -> ahora-e.getValue().inicio()>=VENTANA);
++        String clave=clave(usuario,direccion);
++        Ventana anterior=intentos.get(clave);
++        if (anterior==null && intentos.size()>=10_000) return false;
++        int cantidad=anterior==null ? 0 : anterior.cantidad();
++        if (cantidad>=10) return false;
++        intentos.put(clave,new Ventana(anterior==null ? ahora : anterior.inicio(),cantidad+1));
++        return true;
++    }
++    public synchronized void exito(String usuario,String direccion) { intentos.remove(clave(usuario,direccion)); }
++    private String clave(String usuario,String direccion) { return direccion+"|"+usuario.toLowerCase(Locale.ROOT); }
++    private record Ventana(long inicio,int cantidad) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+new file mode 100644
+index 0000000..d64c81e
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+@@ -0,0 +1,86 @@
++package com.techcare.backend.seguridad;
++
++import jakarta.servlet.DispatcherType;
++import jakarta.servlet.http.HttpServletResponse;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.http.HttpMethod;
++import org.springframework.security.authentication.AuthenticationManager;
++import org.springframework.security.authentication.ProviderManager;
++import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
++import org.springframework.security.config.annotation.web.builders.HttpSecurity;
++import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
++import org.springframework.security.crypto.password.PasswordEncoder;
++import org.springframework.security.web.SecurityFilterChain;
++import org.springframework.security.web.authentication.session.ChangeSessionIdAuthenticationStrategy;
++import org.springframework.security.web.authentication.session.CompositeSessionAuthenticationStrategy;
++import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
++import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
++import org.springframework.security.web.context.SecurityContextRepository;
++import org.springframework.security.web.csrf.CsrfAuthenticationStrategy;
++import org.springframework.security.web.csrf.CsrfException;
++import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
++
++import java.io.IOException;
++import java.util.List;
++
++@Configuration
++public class SeguridadConfig {
++    @Bean PasswordEncoder passwordEncoder() { return new TechCarePasswordEncoder(); }
++
++    @Bean AuthenticationManager authenticationManager(UsuariosAcceso usuarios,PasswordEncoder encoder) {
++        DaoAuthenticationProvider provider=new DaoAuthenticationProvider(usuarios);
++        provider.setPasswordEncoder(encoder);
++        return new ProviderManager(provider);
++    }
++
++    @Bean SecurityContextRepository contextRepository() { return new HttpSessionSecurityContextRepository(); }
++    @Bean HttpSessionCsrfTokenRepository csrfRepository() { return new HttpSessionCsrfTokenRepository(); }
++
++    @Bean SessionAuthenticationStrategy estrategiaSesion(HttpSessionCsrfTokenRepository csrf) {
++        return new CompositeSessionAuthenticationStrategy(List.of(
++                new ChangeSessionIdAuthenticationStrategy(),new CsrfAuthenticationStrategy(csrf)));
++    }
++
++    @Bean SecurityFilterChain seguridad(HttpSecurity http,AuthenticationManager manager,
++            SecurityContextRepository context,HttpSessionCsrfTokenRepository csrf) throws Exception {
++        return http.authenticationManager(manager)
++                .formLogin(AbstractHttpConfigurer::disable)
++                .httpBasic(AbstractHttpConfigurer::disable)
++                .requestCache(AbstractHttpConfigurer::disable)
++                .securityContext(c -> c.securityContextRepository(context).requireExplicitSave(true))
++                .csrf(c -> c.csrfTokenRepository(csrf))
++                .authorizeHttpRequests(a -> a
++                        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
++                        .requestMatchers(HttpMethod.GET,"/api/auth/csrf").permitAll()
++                        .requestMatchers(HttpMethod.POST,"/api/auth/login").permitAll()
++                        .requestMatchers(HttpMethod.GET,"/api/auth/sesion").authenticated()
++                        .requestMatchers(HttpMethod.GET,"/api/clientes","/api/clientes/**")
++                            .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
++                        .requestMatchers(HttpMethod.POST,"/api/clientes").hasAnyRole("ADMIN","RECEPCION")
++                        .requestMatchers(HttpMethod.PUT,"/api/clientes/*").hasAnyRole("ADMIN","RECEPCION")
++                        .requestMatchers(HttpMethod.GET,"/api/equipos","/api/equipos/**","/api/catalogos/**")
++                            .hasAnyRole("ADMIN","RECEPCION","TECNICO")
++                        .requestMatchers(HttpMethod.POST,"/api/equipos").hasAnyRole("ADMIN","RECEPCION")
++                        .requestMatchers(HttpMethod.PUT,"/api/equipos/*").hasAnyRole("ADMIN","RECEPCION")
++                        .anyRequest().denyAll())
++                .exceptionHandling(e -> e
++                        .authenticationEntryPoint((req,res,ex) -> json(res,401,
++                                "{\"estado\":401,\"mensaje\":\"Iniciá sesión para continuar.\"}"))
++                        .accessDeniedHandler((req,res,ex) -> json(res,403,ex instanceof CsrfException
++                                ? "{\"estado\":403,\"codigo\":\"CSRF_INVALIDO\",\"mensaje\":\"La sesión de seguridad venció. Volvé a intentar.\"}"
++                                : "{\"estado\":403,\"mensaje\":\"Tu usuario no tiene permiso para esta operación.\"}")))
++                .logout(l -> l.logoutUrl("/api/auth/logout").invalidateHttpSession(true)
++                        .clearAuthentication(true).deleteCookies("JSESSIONID")
++                        .logoutSuccessHandler((req,res,auth) -> json(res,200,
++                                "{\"autenticado\":false,\"usuario\":null,\"roles\":[]}")).permitAll())
++                .build();
++    }
++
++    private static void json(HttpServletResponse response,int status,String body) throws IOException {
++        response.setStatus(status);
++        response.setCharacterEncoding("UTF-8");
++        response.setContentType("application/json");
++        response.getWriter().write(body);
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/TechCarePasswordEncoder.java b/backend/src/main/java/com/techcare/backend/seguridad/TechCarePasswordEncoder.java
+new file mode 100644
+index 0000000..8281d88
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/seguridad/TechCarePasswordEncoder.java
+@@ -0,0 +1,51 @@
++package com.techcare.backend.seguridad;
++
++import org.springframework.security.crypto.password.PasswordEncoder;
++
++import javax.crypto.SecretKeyFactory;
++import javax.crypto.spec.PBEKeySpec;
++import java.security.GeneralSecurityException;
++import java.security.MessageDigest;
++import java.security.SecureRandom;
++import java.util.Base64;
++
++/** Compatible con los hashes PBKDF2-HMAC-SHA256 existentes en 02_Datos_Prueba.sql. */
++public final class TechCarePasswordEncoder implements PasswordEncoder {
++    private static final int ITERACIONES=600_000;
++    private final SecureRandom random=new SecureRandom();
++
++    @Override public String encode(CharSequence rawPassword) {
++        byte[] salt=new byte[16];
++        random.nextBytes(salt);
++        byte[] hash=derivar(rawPassword,salt,ITERACIONES);
++        return "$pbkdf2-sha256$"+ITERACIONES+"$"+Base64.getEncoder().encodeToString(salt)
++                +"$"+Base64.getEncoder().encodeToString(hash);
++    }
++
++    @Override public boolean matches(CharSequence rawPassword, String encodedPassword) {
++        if (rawPassword==null || encodedPassword==null || rawPassword.length()>256) return false;
++        try {
++            String[] partes=encodedPassword.split("\\$",-1);
++            if (partes.length!=5 || !partes[0].isEmpty() || !partes[1].equals("pbkdf2-sha256")) return false;
++            int iteraciones=Integer.parseInt(partes[2]);
++            if (iteraciones<100_000 || iteraciones>2_000_000) return false;
++            byte[] salt=Base64.getDecoder().decode(partes[3]);
++            byte[] esperado=Base64.getDecoder().decode(partes[4]);
++            if (salt.length<16 || salt.length>64 || esperado.length!=32) return false;
++            return MessageDigest.isEqual(esperado,derivar(rawPassword,salt,iteraciones));
++        } catch (IllegalArgumentException ex) {
++            return false;
++        }
++    }
++
++    private byte[] derivar(CharSequence password, byte[] salt, int iteraciones) {
++        PBEKeySpec spec=new PBEKeySpec(password.toString().toCharArray(),salt,iteraciones,256);
++        try {
++            return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
++        } catch (GeneralSecurityException ex) {
++            throw new IllegalStateException("El entorno no permite verificar PBKDF2-HMAC-SHA256.",ex);
++        } finally {
++            spec.clearPassword();
++        }
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/UsuarioAutenticado.java b/backend/src/main/java/com/techcare/backend/seguridad/UsuarioAutenticado.java
+new file mode 100644
+index 0000000..0418e86
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/seguridad/UsuarioAutenticado.java
+@@ -0,0 +1,44 @@
++package com.techcare.backend.seguridad;
++
++import org.springframework.security.core.CredentialsContainer;
++import org.springframework.security.core.GrantedAuthority;
++import org.springframework.security.core.authority.SimpleGrantedAuthority;
++import org.springframework.security.core.userdetails.UserDetails;
++
++import java.io.Serial;
++import java.util.Collection;
++import java.util.List;
++
++public final class UsuarioAutenticado implements UserDetails, CredentialsContainer {
++    @Serial private static final long serialVersionUID = 1L;
++    private final int usuarioId;
++    private final String nombreUsuario;
++    private final String nombreCompleto;
++    private final String empleadoCodigo;
++    private final List<String> roles;
++    private final boolean habilitado;
++    private transient String password;
++
++    public UsuarioAutenticado(int usuarioId, String nombreUsuario, String nombreCompleto,
++                              String empleadoCodigo, List<String> roles, boolean habilitado, String password) {
++        this.usuarioId=usuarioId;
++        this.nombreUsuario=nombreUsuario;
++        this.nombreCompleto=nombreCompleto;
++        this.empleadoCodigo=empleadoCodigo;
++        this.roles=List.copyOf(roles);
++        this.habilitado=habilitado;
++        this.password=password;
++    }
++
++    public int getUsuarioId() { return usuarioId; }
++    public String getNombreCompleto() { return nombreCompleto; }
++    public String getEmpleadoCodigo() { return empleadoCodigo; }
++    public List<String> getRoles() { return roles; }
++    @Override public String getUsername() { return nombreUsuario; }
++    @Override public String getPassword() { return password; }
++    @Override public boolean isEnabled() { return habilitado && !roles.isEmpty(); }
++    @Override public Collection<? extends GrantedAuthority> getAuthorities() {
++        return roles.stream().map(rol -> new SimpleGrantedAuthority("ROLE_"+rol)).toList();
++    }
++    @Override public void eraseCredentials() { password=null; }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/UsuariosAcceso.java b/backend/src/main/java/com/techcare/backend/seguridad/UsuariosAcceso.java
+new file mode 100644
+index 0000000..bca17f9
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/seguridad/UsuariosAcceso.java
+@@ -0,0 +1,31 @@
++package com.techcare.backend.seguridad;
++
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.core.userdetails.UserDetails;
++import org.springframework.security.core.userdetails.UserDetailsService;
++import org.springframework.security.core.userdetails.UsernameNotFoundException;
++import org.springframework.stereotype.Service;
++
++import java.util.List;
++import java.util.Map;
++
++@Service
++public class UsuariosAcceso implements UserDetailsService {
++    private final JdbcTemplate jdbc;
++    public UsuariosAcceso(JdbcTemplate jdbc) { this.jdbc=jdbc; }
++
++    @Override public UserDetails loadUserByUsername(String nombre) {
++        List<Map<String,Object>> filas=jdbc.queryForList("EXEC dbo.spConsultarAcceso ?",nombre);
++        if (filas.isEmpty()) throw new UsernameNotFoundException("Acceso no válido.");
++        Map<String,Object> u=filas.get(0);
++        if (!"PBKDF2_SHA256".equals(u.get("AlgoritmoHash")))
++            throw new UsernameNotFoundException("Acceso no válido.");
++        List<String> roles=filas.stream().map(f -> (String) f.get("RolCodigo"))
++                .filter(r -> r!=null && !r.isBlank()).distinct().sorted().toList();
++        return new UsuarioAutenticado(((Number)u.get("UsuarioID")).intValue(),
++                (String)u.get("NombreUsuario"),u.get("Nombres")+" "+u.get("Apellidos"),
++                (String)u.get("EmpleadoCodigo"),roles,
++                Boolean.TRUE.equals(u.get("UsuarioActivo")) && Boolean.TRUE.equals(u.get("EmpleadoActivo")),
++                (String)u.get("PasswordHash"));
++    }
++}
+diff --git a/backend/src/main/resources/application.properties b/backend/src/main/resources/application.properties
+index 234eb46..5928640 100644
+--- a/backend/src/main/resources/application.properties
++++ b/backend/src/main/resources/application.properties
+@@ -2,4 +2,10 @@ spring.application.name=techcare-backend
+ server.port=8080
+ 
+ spring.datasource.url=${DB_URL}
+-spring.datasource.driver-class-name=com.microsoft.sqlserver.jdbc.SQLServerDriver
+\ No newline at end of file
++spring.datasource.driver-class-name=com.microsoft.sqlserver.jdbc.SQLServerDriver
++
++server.servlet.session.timeout=30m
++server.servlet.session.tracking-modes=cookie
++server.servlet.session.cookie.http-only=true
++server.servlet.session.cookie.same-site=lax
++server.servlet.session.cookie.secure=${SESSION_COOKIE_SECURE:false}
+diff --git a/backend/src/test/java/com/techcare/backend/AuthHttpTests.java b/backend/src/test/java/com/techcare/backend/AuthHttpTests.java
+new file mode 100644
+index 0000000..a201a3f
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/AuthHttpTests.java
+@@ -0,0 +1,60 @@
++package com.techcare.backend;
++
++import com.jayway.jsonpath.JsonPath;
++import org.junit.jupiter.api.Test;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.boot.test.web.server.LocalServerPort;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++
++import java.net.CookieManager;
++import java.net.CookiePolicy;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.util.List;
++import java.util.Map;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.when;
++
++@SpringBootTest(webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT,
++        properties="spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class AuthHttpTests {
++    @LocalServerPort int port;
++    @MockitoBean JdbcTemplate jdbc;
++
++    @Test void cookieRealEsHttpOnlyRotaAlIngresarYNoSePuedeReutilizarTrasSalir() throws Exception {
++        when(jdbc.queryForList(anyString(),any(Object[].class))).thenReturn(List.of(Map.ofEntries(
++                Map.entry("UsuarioID",2),Map.entry("NombreUsuario","demo02"),Map.entry("EmpleadoID",2),
++                Map.entry("PasswordHash","$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik="),
++                Map.entry("AlgoritmoHash","PBKDF2_SHA256"),Map.entry("UsuarioActivo",true),Map.entry("EmpleadoActivo",true),
++                Map.entry("Nombres","Usuario"),Map.entry("Apellidos","Prueba"),Map.entry("EmpleadoCodigo","EMP-002"),Map.entry("RolCodigo","RECEPCION"))));
++        CookieManager cookies=new CookieManager(null,CookiePolicy.ACCEPT_ALL);
++        HttpClient client=HttpClient.newBuilder().cookieHandler(cookies).build();
++        HttpResponse<String> csrf=client.send(get("/api/auth/csrf"),HttpResponse.BodyHandlers.ofString());
++        String setCookie=csrf.headers().firstValue("set-cookie").orElseThrow();
++        assertTrue(setCookie.contains("HttpOnly"));
++        assertTrue(setCookie.contains("SameSite=Lax"));
++        String anterior=cookies.getCookieStore().getCookies().get(0).getValue();
++        String token=JsonPath.read(csrf.body(),"$.token");
++        HttpRequest entrar=HttpRequest.newBuilder(uri("/api/auth/login")).header("Content-Type","application/json")
++                .header("X-CSRF-TOKEN",token).POST(HttpRequest.BodyPublishers.ofString("{\"nombreUsuario\":\"demo02\",\"contrasena\":\"TechCare2026!\"}")).build();
++        assertEquals(200,client.send(entrar,HttpResponse.BodyHandlers.ofString()).statusCode());
++        String autenticada=cookies.getCookieStore().getCookies().get(0).getValue();
++        assertNotEquals(anterior,autenticada);
++        assertEquals(200,client.send(get("/api/auth/sesion"),HttpResponse.BodyHandlers.ofString()).statusCode());
++        HttpClient externo=HttpClient.newHttpClient();
++        HttpRequest vieja=HttpRequest.newBuilder(uri("/api/auth/sesion")).header("Cookie","JSESSIONID="+anterior).GET().build();
++        assertEquals(401,externo.send(vieja,HttpResponse.BodyHandlers.ofString()).statusCode());
++        csrf=client.send(get("/api/auth/csrf"),HttpResponse.BodyHandlers.ofString());
++        token=JsonPath.read(csrf.body(),"$.token");
++        HttpRequest salir=HttpRequest.newBuilder(uri("/api/auth/logout")).header("X-CSRF-TOKEN",token).POST(HttpRequest.BodyPublishers.noBody()).build();
++        assertEquals(200,client.send(salir,HttpResponse.BodyHandlers.ofString()).statusCode());
++        HttpRequest reusar=HttpRequest.newBuilder(uri("/api/auth/sesion")).header("Cookie","JSESSIONID="+autenticada).GET().build();
++        assertEquals(401,externo.send(reusar,HttpResponse.BodyHandlers.ofString()).statusCode());
++    }
++    private URI uri(String path) { return URI.create("http://127.0.0.1:"+port+path); }
++    private HttpRequest get(String path) { return HttpRequest.newBuilder(uri(path)).GET().build(); }
++}
+diff --git a/backend/src/test/java/com/techcare/backend/AuthSecurityTests.java b/backend/src/test/java/com/techcare/backend/AuthSecurityTests.java
+new file mode 100644
+index 0000000..e693e02
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/AuthSecurityTests.java
+@@ -0,0 +1,211 @@
++package com.techcare.backend;
++
++import com.jayway.jsonpath.JsonPath;
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import jakarta.servlet.http.Cookie;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.dao.DataAccessResourceFailureException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.mock.web.MockHttpSession;
++import org.springframework.security.core.context.SecurityContext;
++import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.MvcResult;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.web.context.WebApplicationContext;
++
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(properties="spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class AuthSecurityTests {
++    private static final String HASH="$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=";
++    @Autowired WebApplicationContext context;
++    @MockitoBean JdbcTemplate jdbc;
++    private MockMvc mvc;
++
++    @BeforeEach void preparar() {
++        reset(jdbc);
++        mvc=MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
++        when(jdbc.queryForList(anyString(),any(Object[].class))).thenAnswer(inv -> {
++            String sql=inv.getArgument(0);
++            Object[] args=(Object[])inv.getRawArguments()[1];
++            if (sql.equals("EXEC dbo.spConsultarAcceso ?")) {
++                String usuario=(String)args[0];
++                if (usuario.equals("errorBD")) throw new DataAccessResourceFailureException("Detalle interno no público");
++                if (usuario.startsWith("inexistente")) return List.of();
++                Map<String,Object> u=usuario(usuario);
++                if (usuario.equals("multirrol")) {
++                    Map<String,Object> segundo=new HashMap<>(u);segundo.put("RolCodigo","CAJA");
++                    return List.of(u,segundo,u);
++                }
++                return List.of(u);
++            }
++            if (sql.contains("spRegistrarCliente") || sql.contains("spActualizarCliente") || sql.contains("spConsultarCliente"))
++                return List.of(Map.of("ClienteID",7,"Nombre","Prueba","Activo",true));
++            if (sql.contains("spRegistrarEquipo") || sql.contains("spActualizarEquipo") || sql.contains("spConsultarEquipo"))
++                return List.of(Map.of("EquipoID",7,"Activo",true));
++            return List.of();
++        });
++        when(jdbc.queryForList(anyString())).thenReturn(List.of());
++    }
++
++    private Map<String,Object> usuario(String nombre) {
++        Map<String,Object> u=new HashMap<>();
++        u.put("UsuarioID",2);u.put("EmpleadoID",2);u.put("NombreUsuario",nombre);
++        u.put("PasswordHash",HASH);u.put("AlgoritmoHash","PBKDF2_SHA256");
++        u.put("UsuarioActivo",!nombre.equals("inactivo"));u.put("EmpleadoActivo",!nombre.equals("empleadoInactivo"));
++        u.put("EmpleadoCodigo","EMP-002");u.put("Nombres","Usuario");u.put("Apellidos","Prueba");
++        u.put("RolCodigo",nombre.equals("sinRol") ? null : switch(nombre) {
++            case "ADMIN","TECNICO","BODEGA","CAJA" -> nombre;
++            default -> "RECEPCION";
++        });
++        return u;
++    }
++
++    private record Token(MockHttpSession sesion,String valor) {}
++    private Token csrf(MockHttpSession sesion) throws Exception {
++        var request=get("/api/auth/csrf");
++        if (sesion!=null) request.session(sesion);
++        MvcResult r=mvc.perform(request).andExpect(status().isOk()).andReturn();
++        return new Token((MockHttpSession)r.getRequest().getSession(false),JsonPath.read(r.getResponse().getContentAsString(),"$.token"));
++    }
++    private MockHttpSession login(String usuario) throws Exception {
++        Token t=csrf(null);
++        mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor)
++                .contentType("application/json").content("{\"nombreUsuario\":\""+usuario+"\",\"contrasena\":\"TechCare2026!\"}"))
++                .andExpect(status().isOk());
++        return t.sesion;
++    }
++
++    @Test void sinSesionResponde401JsonYNoRedirecciona() throws Exception {
++        mvc.perform(get("/api/clientes")).andExpect(status().isUnauthorized()).andExpect(jsonPath("$.estado").value(401))
++                .andExpect(header().doesNotExist("Location"));
++        mvc.perform(get("/api/auth/sesion")).andExpect(status().isUnauthorized());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test void loginRotaLaSesionYDevuelveSoloIdentidadYRoles() throws Exception {
++        Token t=csrf(null);String anterior=t.sesion.getId();
++        mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor).contentType("application/json")
++                .content("{\"nombreUsuario\":\"  demo02  \",\"contrasena\":\"TechCare2026!\",\"roles\":[\"ADMIN\"],\"usuarioId\":1}"))
++                .andExpect(status().isOk()).andExpect(jsonPath("$.usuario.usuarioId").value(2))
++                .andExpect(jsonPath("$.roles[0]").value("RECEPCION"))
++                .andExpect(jsonPath("$.PasswordHash").doesNotExist()).andExpect(jsonPath("$.contrasena").doesNotExist())
++                .andExpect(header().string("Cache-Control",org.hamcrest.Matchers.containsString("no-store")));
++        assertNotEquals(anterior,t.sesion.getId());
++        SecurityContext c=(SecurityContext)t.sesion.getAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY);
++        assertNull(((UsuarioAutenticado)c.getAuthentication().getPrincipal()).getPassword());
++        verify(jdbc).queryForList("EXEC dbo.spConsultarAcceso ?","demo02");
++        verifyNoMoreInteractions(jdbc);
++    }
++
++    @Test void restauraSesionYConservaTodosLosRolesSinReenviarCredenciales() throws Exception {
++        MockHttpSession s=login("multirrol");
++        clearInvocations(jdbc);
++        mvc.perform(get("/api/auth/sesion").session(s)).andExpect(status().isOk())
++                .andExpect(jsonPath("$.autenticado").value(true)).andExpect(jsonPath("$.roles.length()").value(2));
++        verifyNoInteractions(jdbc);
++    }
++
++    @ParameterizedTest @ValueSource(strings={"inexistente01","inactivo","empleadoInactivo","sinRol"})
++    void noRevelaSiLaCuentaExisteOEstaInactiva(String nombre) throws Exception {
++        Token t=csrf(null);
++        mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor).contentType("application/json")
++                .content("{\"nombreUsuario\":\""+nombre+"\",\"contrasena\":\"TechCare2026!\"}"))
++                .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.mensaje").value("Usuario o contraseña incorrectos."));
++        assertNull(t.sesion.getAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY));
++    }
++
++    @Test void contrasenaIncorrectaNoCreaUnaSesionAutenticada() throws Exception {
++        Token t=csrf(null);
++        mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor).contentType("application/json")
++                .content("{\"nombreUsuario\":\"demo02\",\"contrasena\":\"incorrecta\"}"))
++                .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.mensaje").value("Usuario o contraseña incorrectos."));
++        mvc.perform(get("/api/auth/sesion").session(t.sesion)).andExpect(status().isUnauthorized());
++    }
++
++    @Test void loginSinCsrfSeRechazaAntesDeConsultarLaBD() throws Exception {
++        mvc.perform(post("/api/auth/login").contentType("application/json").content("{\"nombreUsuario\":\"demo02\",\"contrasena\":\"TechCare2026!\"}"))
++                .andExpect(status().isForbidden()).andExpect(jsonPath("$.codigo").value("CSRF_INVALIDO"));
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test void datosInvalidosSeRechazanSinConsultarLaBD() throws Exception {
++        Token t=csrf(null);
++        mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor).contentType("application/json").content("{}"))
++                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.errores.nombreUsuario").exists());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test void errorDeBDNoSeConfundeConContrasenaIncorrectaNiExponeDetalle() throws Exception {
++        Token t=csrf(null);
++        mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor).contentType("application/json")
++                .content("{\"nombreUsuario\":\"errorBD\",\"contrasena\":\"TechCare2026!\"}"))
++                .andExpect(status().isServiceUnavailable()).andExpect(content().string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("Detalle interno"))));
++    }
++
++    @ParameterizedTest @ValueSource(strings={"ADMIN","RECEPCION","TECNICO","CAJA","BODEGA"})
++    void permisosSeCompruebanEnElServidor(String rol) throws Exception {
++        MockHttpSession s=login(rol);
++        boolean escribe=rol.equals("ADMIN") || rol.equals("RECEPCION");
++        boolean leeClientes=!rol.equals("BODEGA");
++        boolean leeEquipos=escribe || rol.equals("TECNICO");
++        mvc.perform(get("/api/clientes").session(s)).andExpect(status().is(leeClientes ? 200 : 403));
++        mvc.perform(get("/api/equipos").session(s)).andExpect(status().is(leeEquipos ? 200 : 403));
++        Token t=csrf(s);
++        String cliente="{\"tipoClienteId\":1,\"nit\":\"TEST\",\"nombre\":\"Cliente\",\"activo\":true}";
++        String equipo="{\"clienteId\":1,\"modeloEquipoId\":1,\"numeroSerie\":\"TEST\",\"descripcion\":\"Prueba\",\"activo\":true}";
++        mvc.perform(post("/api/clientes").session(s).header("X-CSRF-TOKEN",t.valor).contentType("application/json").content(cliente))
++                .andExpect(status().is(escribe ? 201 : 403));
++        mvc.perform(put("/api/clientes/7").session(s).header("X-CSRF-TOKEN",t.valor).contentType("application/json").content(cliente))
++                .andExpect(status().is(escribe ? 200 : 403));
++        mvc.perform(post("/api/equipos").session(s).header("X-CSRF-TOKEN",t.valor).contentType("application/json").content(equipo))
++                .andExpect(status().is(escribe ? 201 : 403));
++        mvc.perform(put("/api/equipos/7").session(s).header("X-CSRF-TOKEN",t.valor).contentType("application/json").content(equipo))
++                .andExpect(status().is(escribe ? 200 : 403));
++    }
++
++    @Test void csrfAnteriorNoSirveDespuesDeIniciarSesion() throws Exception {
++        Token t=csrf(null);
++        mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor).contentType("application/json")
++                .content("{\"nombreUsuario\":\"demo02\",\"contrasena\":\"TechCare2026!\"}")).andExpect(status().isOk());
++        mvc.perform(post("/api/clientes").session(t.sesion).header("X-CSRF-TOKEN",t.valor).contentType("application/json").content("{}"))
++                .andExpect(status().isForbidden()).andExpect(jsonPath("$.codigo").value("CSRF_INVALIDO"));
++    }
++
++    @Test void logoutInvalidaLaSesionYExigeCsrf() throws Exception {
++        MockHttpSession s=login("demo02");
++        mvc.perform(post("/api/auth/logout").session(s)).andExpect(status().isForbidden());
++        Token t=csrf(s);
++        mvc.perform(post("/api/auth/logout").session(s).header("X-CSRF-TOKEN",t.valor)).andExpect(status().isOk())
++                .andExpect(jsonPath("$.autenticado").value(false)).andExpect(cookie().maxAge("JSESSIONID",0));
++        assertTrue(s.isInvalid());
++        mvc.perform(get("/api/auth/sesion").cookie(new Cookie("JSESSIONID",s.getId()))).andExpect(status().isUnauthorized());
++    }
++
++    @Test void demasiadosIntentosDevuelven429() throws Exception {
++        Token t=csrf(null);
++        for (int i=0;i<10;i++) mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor)
++                .contentType("application/json").content("{\"nombreUsuario\":\"inexistenteLimite\",\"contrasena\":\"incorrecta\"}"))
++                .andExpect(status().isUnauthorized());
++        clearInvocations(jdbc);
++        mvc.perform(post("/api/auth/login").session(t.sesion).header("X-CSRF-TOKEN",t.valor)
++                .contentType("application/json").content("{\"nombreUsuario\":\"inexistenteLimite\",\"contrasena\":\"incorrecta\"}"))
++                .andExpect(status().isTooManyRequests());
++        verifyNoInteractions(jdbc);
++    }
++}
+diff --git a/backend/src/test/java/com/techcare/backend/seguridad/IntentosLoginTests.java b/backend/src/test/java/com/techcare/backend/seguridad/IntentosLoginTests.java
+new file mode 100644
+index 0000000..48871a9
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/seguridad/IntentosLoginTests.java
+@@ -0,0 +1,38 @@
++package com.techcare.backend.seguridad;
++
++import org.junit.jupiter.api.Test;
++import java.time.Clock;
++import java.time.Instant;
++import java.time.ZoneId;
++import java.time.ZoneOffset;
++import static org.junit.jupiter.api.Assertions.*;
++
++class IntentosLoginTests {
++    @Test void limitaIntentosPorUsuarioYDireccionSinDistinguirMayusculas() {
++        IntentosLogin intentos=new IntentosLogin();
++        for (int i=0;i<10;i++) assertTrue(intentos.permitir("DEMO01","127.0.0.1"));
++        assertFalse(intentos.permitir("demo01","127.0.0.1"));
++        assertTrue(intentos.permitir("demo01","127.0.0.2"));
++        assertTrue(intentos.permitir("demo02","127.0.0.1"));
++    }
++    @Test void accesoCorrectoLimpiaElContador() {
++        IntentosLogin intentos=new IntentosLogin();
++        for (int i=0;i<10;i++) intentos.permitir("demo01","local");
++        intentos.exito("demo01","local");
++        assertTrue(intentos.permitir("demo01","local"));
++    }
++    @Test void permiteOtroIntentoAlVencerLaVentana() {
++        Reloj reloj=new Reloj();
++        IntentosLogin intentos=new IntentosLogin(reloj);
++        for (int i=0;i<10;i++) intentos.permitir("demo01","local");
++        assertFalse(intentos.permitir("demo01","local"));
++        reloj.ahora=Instant.ofEpochSecond(301);
++        assertTrue(intentos.permitir("demo01","local"));
++    }
++    private static class Reloj extends Clock {
++        Instant ahora=Instant.EPOCH;
++        @Override public ZoneId getZone() { return ZoneOffset.UTC; }
++        @Override public Clock withZone(ZoneId zona) { return this; }
++        @Override public Instant instant() { return ahora; }
++    }
++}
+diff --git a/backend/src/test/java/com/techcare/backend/seguridad/TechCarePasswordEncoderTests.java b/backend/src/test/java/com/techcare/backend/seguridad/TechCarePasswordEncoderTests.java
+new file mode 100644
+index 0000000..0de92c4
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/seguridad/TechCarePasswordEncoderTests.java
+@@ -0,0 +1,31 @@
++package com.techcare.backend.seguridad;
++
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++class TechCarePasswordEncoderTests {
++    private final TechCarePasswordEncoder encoder=new TechCarePasswordEncoder();
++    static final String HASH_DEMO="$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=";
++
++    @Test void verificaElHashYaExistenteSinCambiarlo() {
++        assertTrue(encoder.matches("TechCare2026!",HASH_DEMO));
++        assertFalse(encoder.matches("OtraContraseña",HASH_DEMO));
++    }
++    @Test void conservaUnicodeYEspaciosEnLaContrasena() {
++        String password=" Árbol ñ 漢字 🔐 ";
++        String encoded=encoder.encode(password);
++        assertTrue(encoder.matches(password,encoded));
++        assertFalse(encoder.matches(password.strip(),encoded));
++    }
++    @Test void dosHashesDeLaMismaContrasenaUsanSaltDistinto() {
++        assertNotEquals(encoder.encode("Contraseña de prueba"),encoder.encode("Contraseña de prueba"));
++    }
++    @Test void rechazaFormatosDanadosYCostosExcesivos() {
++        for (String hash:new String[]{"texto", "$pbkdf2-sha256$1$a$b", HASH_DEMO.replace("600000","2147483647"),
++                HASH_DEMO.replace("HuxZ","!!!!"),HASH_DEMO+"$extra",HASH_DEMO.replace("pbkdf2-sha256","sha256")})
++            assertFalse(encoder.matches("TechCare2026!",hash));
++        assertFalse(encoder.matches(null,HASH_DEMO));
++        assertFalse(encoder.matches("x",null));
++        assertFalse(encoder.matches("x".repeat(257),HASH_DEMO));
++    }
++}
+diff --git a/frontend/README.md b/frontend/README.md
+index 70aa690..7e202fa 100644
+--- a/frontend/README.md
++++ b/frontend/README.md
+@@ -1,191 +1,47 @@
+-# TechCare — Frontend (React + TypeScript + Vite)
++# TechCare — Frontend
+ 
+-Interfaz del Sistema Integral de Servicio Técnico, Inventario y Facturación
+-TechCare, con el lenguaje visual **Mercury** adaptado a una aplicación interna
+-de taller. Repositorio: `frontend/` (el backend Spring Boot permanece en
+-`backend/`). La actualización de Equipos agrega sus controladores y catálogos.
++React, TypeScript y Vite. El backend Spring Boot está en `backend/`.
+ 
+----
++## Ejecución
+ 
+-## 1. Estado real de la integración (auditado contra el código)
+-
+-El backend expone los siguientes controladores:
+-
+-```
+-backend/src/main/java/com/techcare/backend/ClienteController.java
+-backend/src/main/java/com/techcare/backend/EquipoController.java
+-backend/src/main/java/com/techcare/backend/CatalogoEquipoController.java
++```bash
++npm ci
++npm run dev
+ ```
+ 
+-No hay controladores de autenticación, órdenes, diagnóstico,
+-reparación, inventario, compras, facturación, pagos, entrega, reportes ni
+-administración. Tampoco hay configuración de CORS ni de seguridad. Por lo
+-tanto:
+-
+-- **Clientes** y **Equipos** están conectados (`/api/clientes`, `/api/equipos`).
+-- Equipos consulta marcas, tipos y modelos desde `/api/catalogos/…`.
+-- El resto de módulos se construyó con la interfaz completa y estados de
+-  **“pendiente de API”**; no se simulan datos ni se inventan endpoints.
+-- Un procedimiento SQL (`spCrearOrden`, `spConsumirRepuesto`, …) **no** implica
+-  una ruta HTTP. Se documentan como dependencia pendiente.
+-
+-La app incluye un **mapa de integración** navegable en `/integracion` con todas
+-las operaciones, método/ruta real, DTO, roles, estado y proceso SQL requerido.
+-
+-### Contrato verificado de Clientes
+-
+-| Operación | Método y ruta | Entrada | Respuesta | Estado |
+-|---|---|---|---|---|
+-| Listar | `GET /api/clientes` | — | `Cliente[]` (sin paginación) | Parcial (pagina/filtra en cliente) |
+-| Consultar | `GET /api/clientes/{id}` | id | `Cliente` | Conectado |
+-| Registrar | `POST /api/clientes` | `ClienteDatos` | `Cliente` (201) | Conectado |
+-| Actualizar / activar / desactivar | `PUT /api/clientes/{id}` | `ClienteDatos` | `Cliente` | Conectado |
+-| Eliminar | — | — | — | **Ausente** (no existe DELETE; se usa `Activo=false`) |
+-
+-Notas del contrato real:
++El proxy de desarrollo envía `/api` al backend; por defecto `http://localhost:8080`.
++Se conserva la configuración local existente de `VITE_PROXY_TARGET` y
++`VITE_API_BASE_URL`. Iniciar también el backend con su `DB_URL` habitual.
+ 
+-- El backend usa `JdbcTemplate.queryForList`, por lo que las claves JSON están
+-  en **PascalCase** (`ClienteID`, `Nombre`, `TipoClienteID`, …). Los tipos del
+-  frontend (`src/types/api.ts`) respetan exactamente eso.
+-- Errores con la forma `{ estado, mensaje, errores? }`; `errores` mapea los
+-  campos del DTO (`nit`, `nombre`, `email`, …). Se muestran junto al campo.
+-- El **correo no es obligatorio** en el modelo ni en el DTO.
+-- No hay autenticación: la identidad del actor y la autorización por rol aún
+-  **no están implementadas en el servidor**.
++## Módulos conectados
+ 
+----
++- Acceso: login, sesión al recargar, cierre de sesión y permisos por rol.
++- Clientes: listado, consulta, registro, edición, activación/desactivación.
++- Equipos: listado, registro, edición, historial y catálogos de tipos, marcas y modelos.
++- Nueva orden: selección de cliente y equipo; la confirmación requiere la API de órdenes.
+ 
+-## 2. Cómo ejecutar
++Los demás módulos conservan sus pantallas pendientes de integración. El mapa
++`/integracion`, disponible para ADMIN, detalla los endpoints implementados.
+ 
+-Requisitos: Node 18+ y el backend TechCare (Spring Boot + SQL Server).
++## Sesión y permisos
+ 
+-```bash
+-cd frontend
+-npm install
+-cp .env.example .env      # Windows: Copy-Item .env.example .env
+-npm run dev               # http://localhost:5173
+-```
+-
+-El servidor de desarrollo de Vite **proxya** `/api` hacia el backend
+-(`VITE_PROXY_TARGET`, por defecto `http://localhost:8080`), de modo que el
+-navegador no necesita CORS. El backend no tiene `Access-Control-Allow-Origin`;
+-por eso **no** se modifica su política CORS: se resuelve con el proxy.
++La identidad y los roles vienen de `/api/auth/sesion`; no se guardan contraseñas,
++hashes ni tokens de autenticación en localStorage. El navegador envía la cookie
++de sesión HttpOnly. Para POST/PUT se obtiene un token CSRF y se envía en la cabecera.
++Se renueva después de login/logout y si el filtro rechaza explícitamente un token
++vencido antes de ejecutar la operación. Otros errores no repiten escrituras.
+ 
+-Variables (`.env.example`, sin secretos):
++Las rutas protegidas redirigen al login cuando no hay sesión. El menú y las
++acciones se ajustan a los roles; el servidor comprueba los mismos permisos.
++Al salir o vencer la sesión se limpia la caché de consultas para el siguiente usuario.
+ 
+-```
+-VITE_API_BASE_URL=/api
+-VITE_PROXY_TARGET=http://localhost:8080
+-```
++Las respuestas de Clientes y Equipos conservan PascalCase. Las de acceso usan los
++DTO camelCase de `src/services/auth.ts`. Los errores mantienen `{estado,mensaje,errores?}`.
+ 
+-Otros comandos:
++## Verificación
+ 
+ ```bash
+-npm run typecheck   # tsc --noEmit
+-npm run build       # tsc --noEmit && vite build
+-npm run preview
++npm run build
+ ```
+ 
+-> El backend se configura con `DB_URL` (variable de entorno) y usa el puerto
+-> `8080` (`backend/src/main/resources/application.properties`). No se ejecuta
+-> ningún script SQL, ni se crean datos ni se modifican triggers desde esta
+-> entrega.
+-
+----
+-
+-## 3. Estructura
+-
+-```
+-frontend/src/
+-  app/          rutas de navegación, sesión, registro de capacidades, queryClient
+-  components/   ui/ (botones, tablas, diálogos, estados) y layout/ (shell)
+-  features/     auth, dashboard, clientes, equipos, ordenes, inventario,
+-                repuestos, compras, proveedores, facturacion, reportes,
+-                administracion, integracion
+-  services/     http centralizado, clientes, catálogos de referencia, errores
+-  types/        DTO reales (PascalCase) y modelos
+-  styles/       tokens Mercury y estilos globales
+-  utils/        formatos (GTQ, fechas America/Guatemala) y búsqueda
+-```
+-
+----
+-
+-## 4. Diseño Mercury
+-
+-Tokens centralizados en `src/styles/tokens.css` exactamente con los valores
+-indicados (canvas `#171721`, surface `#1e1e2a`, primary `#5266eb`, etc.).
+-Barra lateral (~230 px) con grupos *Inicio; Servicio; Inventario y compras;
+-Facturación; Reportes; Administración*, cabecera de contexto y área de trabajo
+-amplia. Radios de tarjeta 12 px y de control 32 px, iconos Lucide, transiciones
+-de ~140 ms con respeto a `prefers-reduced-motion`, foco visible y estados con
+-texto+color (nunca solo color). Responsive hasta 360 px con navegación en panel
+-desplegable y tablas con desplazamiento contenido.
+-
+----
+-
+-## 5. Qué está conectado, implementado o pendiente
+-
+-### Conectado y verificado por compilación de tipos y arranque
+-- Clientes: listar, consultar, crear, actualizar/activar/desactivar, con
+-  validación de campos que replica el DTO, manejo de 400/404/409 y errores por
+-  campo, estados de carga/vacío/error, paginación y búsqueda en cliente.
+-- Equipos: registrar, editar, activar/desactivar, buscar, filtrar por cliente y consultar historial.
+-- Navegación completa, sesión (modo honesto sin autenticación), dashboard,
+-  mapa de integración.
+-
+-> Verificado: `npm run typecheck` y `npm run build` correctos y el bundle se
+-> sirve por HTTP 200. **No** se pudo verificar contra un backend en ejecución en
+-> esta sesión (requiere SQL Server + `DB_URL`), por lo que las llamadas reales a
+-> `/api/clientes` quedan **implementadas pero no ejecutadas end-to-end**.
+-
+-### Implementado pero pendiente de soporte del backend
+-Toda pantalla y flujo está construido y navegable, pero su acción permanece
+-deshabilitada porque falta el endpoint. Cada una indica el método/ruta requerido
+-y el procedimiento SQL de referencia:
+-
+-- Órdenes (listado y expediente), dashboard (6 métricas + actividad),
+-  diagnóstico, reparación, actividades, consumo de repuestos, inventario,
+-  kardex, repuestos, bodegas, proveedores, compras (registro/recepción/anulación),
+-  facturación (emisión/anulación), pagos, entrega y administración.
+-- Los **12 reportes** (R01–R12) listados desde `03_Reportes.sql`.
+-- **Nueva orden**: Cliente y Equipo usan sus APIs reales. La confirmación sigue
+-  pendiente de autenticación y `POST /api/ordenes` → `spCrearOrden`.
+-
+-### Pendiente de backend de forma explícita
+-- **Autenticación y sesión** (`/api/auth/login`, `/api/auth/sesion`). No se
+-  verifica la contraseña en el navegador ni se simula un administrador local.
+-  Mientras no exista, la navegación **no oculta** módulos (no se aparenta una
+-  seguridad inexistente) y `puedeAcceder()` ya está listo para consumir los
+-  roles cuando el servidor los entregue.
+-- Autorización por roles en el servidor para cada operación.
+-
+----
+-
+-## 6. Brechas y contradicciones detectadas
+-
+-1. **No hay endpoint de autenticación** en el backend actual, aunque la
+-   consigna exige acceso por rol. Documentado; no se simuló.
+-2. **El SQL exige UsuarioID de la identidad autenticada** (`fnTieneRol`,
+-   triggers). Sin endpoint de sesión, el frontend no puede aportar ese actor; la
+-   creación de orden, diagnóstico, consumo, etc. quedan pendientes de esa pieza.
+-3. **Sin CORS**: se resolvió con proxy de Vite en desarrollo; en producción el
+-   backend deberá exponer CORS o servirse bajo el mismo origen.
+-4. **Nombres JSON**: el proyecto usa PascalCase por `queryForList`; cualquier
+-   futura capa de mapeo a camelCase debe actualizar `src/types/api.ts` y los
+-   servicios, no darse por sentado.
+-5. **Serialización de fechas**: `java.sql.Timestamp` puede llegar como número o
+-   ISO. `utils/format.ts` acepta ambos y asume UTC cuando no hay zona; confirmar
+-   el serializador real antes de confiar en fechas sin zona.
+-6. **`ClienteController` no pagina ni filtra**: el listado trae el conjunto
+-   completo; el filtrado/paginación es local y así se rotula en la interfaz.
+-
+----
+-
+-## 7. Contrato requerido (resumen por módulo)
+-
+-Detalle completo y filtrable en la pantalla **Integración** (`/integracion`).
+-Cada fila indica operación, `método + ruta` propuestos, entrada, respuesta,
+-roles y el procedimiento SQL que debe respaldarla (por ejemplo
+-`POST /api/ordenes` ↔ `spCrearOrden`, `POST /api/reparaciones/{id}/repuestos`
+-↔ `spConsumirRepuesto`, `POST /api/facturas/{id}/pagos` ↔ `spRegistrarPago`,
+-`POST /api/ordenes/{id}/entrega` ↔ `spEntregarOrden`).
++La instalación y las cuentas de demostración se describen en `../INTEGRACION_LOGIN.md`.
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index 7346007..37b0108 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -1,6 +1,6 @@
+ /**
+  * Capacidades verificadas en los controladores de Clientes, Equipos y catálogos.
+- * Una ruta disponible no implica autenticación: la sesión sigue pendiente.
++ * Las rutas disponibles requieren sesión y permisos del servidor.
+  * Los procesos de órdenes, inventario y caja conservan su estado pendiente.
+  */
+ 
+@@ -19,7 +19,7 @@ export interface OperacionApi {
+   entrada: string;
+   /** DTO de respuesta real. */
+   respuesta: string;
+-  /** Roles que la consigna asigna; autorizacion del servidor no implementada aun. */
++  /** Roles autorizados para la operación. */
+   roles: string;
+   estado: EstadoCapacidad;
+   /** Proceso SQL de referencia cuando no hay endpoint. */
+@@ -28,30 +28,54 @@ export interface OperacionApi {
+ }
+ 
+ export const OPERACIONES: OperacionApi[] = [
+-  // ---- Sesion / autenticacion ----
++  // ---- Sesión y autenticación ----
+   {
+-    id: "auth.login",
+-    modulo: "Acceso",
+-    operacion: "Iniciar sesion del personal",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/auth/login)",
+-    entrada: "nombreUsuario, contrasena",
+-    respuesta: "identidad + roles",
+-    roles: "Todos",
+-    estado: "ausente",
+-    nota: "No existe controlador de autenticacion. Verificar PasswordHash (PBKDF2-HMAC-SHA256) es responsabilidad del servidor; el frontend nunca recibe hashes.",
++    "id": "auth.login",
++    "modulo": "Acceso",
++    "operacion": "Iniciar sesión del personal",
++    "metodo": "POST",
++    "ruta": "/api/auth/login",
++    "entrada": "nombreUsuario, contrasena",
++    "respuesta": "usuario + roles[]",
++    "roles": "Todos",
++    "estado": "disponible",
++    "procedimiento": "spConsultarAcceso",
++    "nota": "Contraseña verificada con PBKDF2-HMAC-SHA256 en el servidor; el hash no se devuelve."
+   },
+   {
+-    id: "auth.sesion",
+-    modulo: "Acceso",
+-    operacion: "Sesion actual y roles",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/auth/sesion)",
+-    entrada: "-",
+-    respuesta: "usuario, empleado, roles[]",
+-    roles: "Todos",
+-    estado: "ausente",
+-    nota: "UsuarioRol es N:M: la respuesta debe devolver una coleccion de roles, no un campo unico.",
++    "id": "auth.sesion",
++    "modulo": "Acceso",
++    "operacion": "Consultar sesión actual",
++    "metodo": "GET",
++    "ruta": "/api/auth/sesion",
++    "entrada": "Cookie de sesión",
++    "respuesta": "usuario + roles[]",
++    "roles": "Todos",
++    "estado": "disponible",
++    "nota": "La sesión se recupera al recargar; sin sesión válida responde 401."
++  },
++  {
++    "id": "auth.logout",
++    "modulo": "Acceso",
++    "operacion": "Cerrar sesión",
++    "metodo": "POST",
++    "ruta": "/api/auth/logout",
++    "entrada": "Cookie + CSRF",
++    "respuesta": "Sesión cerrada",
++    "roles": "Todos",
++    "estado": "disponible",
++    "nota": "Invalida la sesión del servidor y elimina la cookie."
++  },
++  {
++    "id": "auth.csrf",
++    "modulo": "Acceso",
++    "operacion": "Preparar protección de solicitudes",
++    "metodo": "GET",
++    "ruta": "/api/auth/csrf",
++    "entrada": "-",
++    "respuesta": "headerName, token",
++    "roles": "Todos",
++    "estado": "disponible"
+   },
+ 
+   // ---- Dashboard ----
+@@ -90,7 +114,7 @@ export const OPERACIONES: OperacionApi[] = [
+     ruta: "/api/clientes",
+     entrada: "-",
+     respuesta: "Cliente[]",
+-    roles: "RECEPCION, ADMIN",
++    roles: "RECEPCION, TECNICO, CAJA, ADMIN",
+     estado: "incompleta",
+     nota: "Devuelve el conjunto completo sin paginacion ni filtros de servidor; el frontend pagina/filtra en cliente sobre ese conjunto.",
+   },
+@@ -102,7 +126,7 @@ export const OPERACIONES: OperacionApi[] = [
+     ruta: "/api/clientes/{id}",
+     entrada: "id",
+     respuesta: "Cliente",
+-    roles: "RECEPCION, ADMIN",
++    roles: "RECEPCION, TECNICO, CAJA, ADMIN",
+     estado: "disponible",
+   },
+   {
+@@ -163,7 +187,7 @@ export const OPERACIONES: OperacionApi[] = [
+     "ruta": "/api/equipos",
+     "entrada": "EquipoDatos",
+     "respuesta": "Equipo (201)",
+-    "roles": "RECEPCION, TECNICO, ADMIN",
++    "roles": "RECEPCION, ADMIN",
+     "estado": "disponible",
+     "procedimiento": "spRegistrarEquipo"
+   },
+@@ -175,7 +199,7 @@ export const OPERACIONES: OperacionApi[] = [
+     "ruta": "/api/equipos/{id}",
+     "entrada": "id, EquipoDatos",
+     "respuesta": "Equipo",
+-    "roles": "RECEPCION, TECNICO, ADMIN",
++    "roles": "RECEPCION, ADMIN",
+     "estado": "disponible",
+     "procedimiento": "spActualizarEquipo",
+     "nota": "Con órdenes se conserva propietario, serie y modelo; descripción y Activo pueden actualizarse."
+diff --git a/frontend/src/app/navigation.ts b/frontend/src/app/navigation.ts
+index 73c62aa..0d8fbab 100644
+--- a/frontend/src/app/navigation.ts
++++ b/frontend/src/app/navigation.ts
+@@ -43,8 +43,8 @@ export const NAVEGACION: NavGrupo[] = [
+     items: [
+       { etiqueta: "Ordenes", ruta: "/ordenes", icono: ClipboardList },
+       { etiqueta: "Nueva orden", ruta: "/ordenes/nueva", icono: Wrench, roles: ["RECEPCION", "ADMIN"] },
+-      { etiqueta: "Clientes", ruta: "/clientes", icono: Users },
+-      { etiqueta: "Equipos", ruta: "/equipos", icono: LayoutGrid },
++      { etiqueta: "Clientes", ruta: "/clientes", icono: Users, roles: ["RECEPCION", "TECNICO", "CAJA", "ADMIN"] },
++      { etiqueta: "Equipos", ruta: "/equipos", icono: LayoutGrid, roles: ["RECEPCION", "TECNICO", "ADMIN"] },
+     ],
+   },
+   {
+@@ -68,7 +68,7 @@ export const NAVEGACION: NavGrupo[] = [
+     etiqueta: "Administracion",
+     items: [
+       { etiqueta: "Administracion", ruta: "/administracion", icono: Settings, roles: ["ADMIN"] },
+-      { etiqueta: "Integracion", ruta: "/integracion", icono: PackageSearch },
++      { etiqueta: "Integracion", ruta: "/integracion", icono: PackageSearch, roles: ["ADMIN"] },
+     ],
+   },
+ ];
+diff --git a/frontend/src/app/session.tsx b/frontend/src/app/session.tsx
+index 165382c..cb35bc3 100644
+--- a/frontend/src/app/session.tsx
++++ b/frontend/src/app/session.tsx
+@@ -1,90 +1,77 @@
+-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+-
+-/**
+- * Contexto de sesion.
+- *
+- * El backend actual NO expone autenticacion: no existe controlador de login ni
+- * de "sesion actual". Por eso `autenticacionPendiente` es true y no se simula
+- * un usuario administrador ni se verifica la contrasena en el navegador.
+- *
+- * Cuando el backend agregue /api/auth/sesion y /api/auth/login, reemplazar el
+- * cuerpo de `iniciarSesion`/`cargarSesion` por llamadas reales. La funcion
+- * `puedeAcceder` ya consume `roles` para las guardas por rol de la navegacion;
+- * con la sesion pendiente no oculta modulos porque el servidor no autoriza.
+- */
+-
+-export interface UsuarioSesion {
+-  usuarioId: number;
+-  nombreUsuario: string;
+-  nombreCompleto: string;
+-  empleadoCodigo: string;
+-}
+-
+-export interface SesionActual {
+-  autenticado: boolean;
+-  usuario: UsuarioSesion | null;
+-  roles: string[];
+-  /** true mientras no exista un endpoint real de autenticacion. */
+-  autenticacionPendiente: boolean;
+-}
++import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
++import { authApi, type SesionActual } from "../services/auth";
++import { esApiError, mensajeDeError } from "../services/errors";
++import { reiniciarCsrf, SESION_EXPIRADA } from "../services/http";
++import { queryClient } from "./queryClient";
++export type { SesionActual, UsuarioSesion } from "../services/auth";
+ 
+ interface SessionContextValue extends SesionActual {
++  cargando: boolean;
++  errorSesion: string | null;
+   iniciarSesion: (nombreUsuario: string, contrasena: string) => Promise<void>;
+-  continuarSinAutenticar: () => void;
+-  cerrarSesion: () => void;
++  cerrarSesion: () => Promise<void>;
++  cargarSesion: (signal?: AbortSignal) => Promise<void>;
+ }
+-
+ const SessionContext = createContext<SessionContextValue | null>(null);
+-
+-const SESION_PENDIENTE: SesionActual = {
+-  autenticado: false,
+-  usuario: null,
+-  roles: [],
+-  autenticacionPendiente: true,
+-};
++const SIN_SESION: SesionActual = { autenticado: false, usuario: null, roles: [] };
+ 
+ export function SessionProvider({ children }: { children: ReactNode }) {
+-  const [sesion, setSesion] = useState<SesionActual>(SESION_PENDIENTE);
++  const [sesion, setSesion] = useState<SesionActual>(SIN_SESION);
++  const [cargando, setCargando] = useState(true);
++  const [errorSesion, setErrorSesion] = useState<string | null>(null);
+ 
+-  const iniciarSesion = useCallback(async (_nombreUsuario: string, _contrasena: string) => {
+-    // No se llama a una ruta supuesta: /api/auth/login no existe en el backend.
+-    // Se informa la dependencia en lugar de simular una autenticacion.
+-    throw new Error(
+-      "La autenticacion no esta disponible: el backend no expone un endpoint de sesion. " +
+-        "Registrar /api/auth/login y /api/auth/sesion antes de habilitar el acceso.",
+-    );
++  const limpiar = useCallback(() => {
++    setSesion(SIN_SESION);
++    reiniciarCsrf();
++    void queryClient.cancelQueries();
++    queryClient.clear();
+   }, []);
+ 
+-  const continuarSinAutenticar = useCallback(() => {
+-    setSesion({ autenticado: false, usuario: null, roles: [], autenticacionPendiente: true });
++  const cargarSesion = useCallback(async (signal?: AbortSignal) => {
++    setCargando(true);
++    setErrorSesion(null);
++    try {
++      const actual = await authApi.sesion(signal);
++      if (!signal?.aborted) setSesion(actual);
++    } catch (error) {
++      if (signal?.aborted) return;
++      setSesion(SIN_SESION);
++      if (!(esApiError(error) && error.isUnauthorized)) setErrorSesion(mensajeDeError(error, "la sesión"));
++    } finally { if (!signal?.aborted) setCargando(false); }
+   }, []);
+ 
+-  const cerrarSesion = useCallback(() => setSesion(SESION_PENDIENTE), []);
+-
+-  const value = useMemo<SessionContextValue>(
+-    () => ({ ...sesion, iniciarSesion, continuarSinAutenticar, cerrarSesion }),
+-    [sesion, iniciarSesion, continuarSinAutenticar, cerrarSesion],
+-  );
++  useEffect(() => {
++    const controller = new AbortController();
++    void cargarSesion(controller.signal);
++    return () => controller.abort();
++  }, [cargarSesion]);
++  useEffect(() => {
++    const vencida = () => { limpiar(); setErrorSesion("Tu sesión venció. Iniciá sesión nuevamente."); };
++    window.addEventListener(SESION_EXPIRADA, vencida);
++    return () => window.removeEventListener(SESION_EXPIRADA, vencida);
++  }, [limpiar]);
+ 
++  const iniciarSesion = useCallback(async (nombreUsuario: string, contrasena: string) => {
++    const actual = await authApi.login(nombreUsuario, contrasena);
++    await queryClient.cancelQueries();
++    queryClient.clear();
++    setErrorSesion(null);
++    setSesion(actual);
++  }, []);
++  const cerrarSesion = useCallback(async () => { await authApi.logout(); limpiar(); }, [limpiar]);
++  const value = useMemo(() => ({ ...sesion, cargando, errorSesion, iniciarSesion, cerrarSesion, cargarSesion }),
++    [sesion, cargando, errorSesion, iniciarSesion, cerrarSesion, cargarSesion]);
+   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
+ }
+ 
+ export function useSession(): SessionContextValue {
+   const ctx = useContext(SessionContext);
+-  if (!ctx) {
+-    throw new Error("useSession debe usarse dentro de SessionProvider.");
+-  }
++  if (!ctx) throw new Error("useSession debe usarse dentro de SessionProvider.");
+   return ctx;
+ }
+ 
+-/**
+- * Guarda de interfaz por rol. Es una ayuda visual y NUNCA sustituye la
+- * autorizacion del servidor. Mientras la sesion este pendiente (sin roles) no
+- * oculta modulos, para no aparentar una seguridad inexistente.
+- */
+ export function puedeAcceder(sesion: SesionActual, rolesRequeridos?: string[]): boolean {
+-  if (!rolesRequeridos || rolesRequeridos.length === 0) return true;
+-  if (sesion.autenticacionPendiente || sesion.roles.length === 0) return true;
+-  if (sesion.roles.includes("ADMIN")) return true;
+-  return rolesRequeridos.some((r) => sesion.roles.includes(r));
++  if (!sesion.autenticado || sesion.roles.length === 0) return false;
++  if (!rolesRequeridos?.length || sesion.roles.includes("ADMIN")) return true;
++  return rolesRequeridos.some(rol => sesion.roles.includes(rol));
+ }
+diff --git a/frontend/src/components/layout/AppShell.tsx b/frontend/src/components/layout/AppShell.tsx
+index 87f1838..a7c71ab 100644
+--- a/frontend/src/components/layout/AppShell.tsx
++++ b/frontend/src/components/layout/AppShell.tsx
+@@ -1,10 +1,22 @@
+ import { useState } from "react";
++import { Navigate, useLocation } from "react-router-dom";
++import { puedeAcceder, useSession } from "../../app/session";
++import { NAVEGACION } from "../../app/navigation";
++import { LoadingState, PermissionState } from "../ui/StateView";
+ import { NavDrawer } from "./NavDrawer";
+ import { Header } from "./Header";
+ import { PageTransition } from "../motion/PageTransition";
+ 
+ export function AppShell() {
+   const [navAbierto, setNavAbierto] = useState(false);
++  const sesion = useSession();
++  const ubicacion = useLocation();
++  if (sesion.cargando) return <LoadingState titulo="Verificando sesión…" />;
++  if (!sesion.autenticado) return <Navigate to="/login" replace state={{ from: ubicacion.pathname + ubicacion.search }} />;
++  const destino = NAVEGACION.flatMap(g => g.items).filter(i => i.ruta !== "/")
++    .sort((a, b) => b.ruta.length - a.ruta.length)
++    .find(i => ubicacion.pathname === i.ruta || ubicacion.pathname.startsWith(i.ruta + "/"));
++  const permitido = puedeAcceder(sesion, destino?.roles);
+ 
+   return (
+     <div className="tc-shell">
+@@ -12,7 +24,7 @@ export function AppShell() {
+       <NavDrawer abierto={navAbierto} onCerrar={() => setNavAbierto(false)} />
+       <main className="tc-main" id="contenido">
+         <div className="tc-content">
+-          <PageTransition />
++          {permitido ? <PageTransition /> : <PermissionState />}
+         </div>
+       </main>
+     </div>
+diff --git a/frontend/src/components/layout/Header.tsx b/frontend/src/components/layout/Header.tsx
+index 8a8f8a2..323f253 100644
+--- a/frontend/src/components/layout/Header.tsx
++++ b/frontend/src/components/layout/Header.tsx
+@@ -1,4 +1,5 @@
+ import { LogOut, Menu } from "lucide-react";
++import { useState } from "react";
+ import { useLocation } from "react-router-dom";
+ import { contextoDeRuta } from "../../app/navigation";
+ import { useSession } from "../../app/session";
+@@ -11,6 +12,15 @@ export function Header({ navAbierto, onAbrirNav }: { navAbierto: boolean; onAbri
+   const ubicacion = useLocation();
+   const { grupo, etiqueta } = contextoDeRuta(ubicacion.pathname);
+   const sesion = useSession();
++  const [saliendo, setSaliendo] = useState(false);
++  const [errorSalida, setErrorSalida] = useState("");
++  async function salir() {
++    setSaliendo(true);
++    setErrorSalida("");
++    try { await sesion.cerrarSesion(); }
++    catch { setErrorSalida("No se pudo cerrar sesión. Intentá nuevamente."); }
++    finally { setSaliendo(false); }
++  }
+   const esInicio = ubicacion.pathname === "/";
+ 
+   return (
+@@ -45,14 +55,15 @@ export function Header({ navAbierto, onAbrirNav }: { navAbierto: boolean; onAbri
+             {iniciales(sesion.usuario?.nombreCompleto)}
+           </span>
+           <span style={{ fontSize: "var(--tc-fs-meta)" }}>{sesion.usuario?.nombreCompleto}</span>
+-          <IconButton etiqueta="Cerrar sesion" onClick={sesion.cerrarSesion}>
++          {errorSalida ? <span role="alert" className="tc-field__hint">{errorSalida}</span> : null}
++          <IconButton etiqueta="Cerrar sesion" disabled={saliendo} onClick={salir}>
+             <LogOut size={16} />
+           </IconButton>
+         </div>
+       ) : (
+-        <span className="tc-session-note" title="La sesion del personal todavia no esta disponible.">
++        <span className="tc-session-note">
+           <span className="tc-session-note__dot" aria-hidden="true" />
+-          Acceso del personal en preparacion
++          Sin sesión
+         </span>
+       )}
+     </header>
+diff --git a/frontend/src/features/auth/LoginPage.tsx b/frontend/src/features/auth/LoginPage.tsx
+index 39b580f..72d0626 100644
+--- a/frontend/src/features/auth/LoginPage.tsx
++++ b/frontend/src/features/auth/LoginPage.tsx
+@@ -1,12 +1,12 @@
+ import { useState, type FormEvent } from "react";
+-import { useLocation, useNavigate } from "react-router-dom";
+-import { Eye, EyeOff, ShieldAlert } from "lucide-react";
++import { Navigate, useLocation, useNavigate } from "react-router-dom";
++import { Eye, EyeOff } from "lucide-react";
+ import { Button } from "../../components/ui/Button";
+ import { Alert } from "../../components/ui/Alert";
+ import { Field, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { esApiError } from "../../services/errors";
+ import { useSession } from "../../app/session";
+-import { ROLES } from "../../services/catalogos";
+-import { Badge } from "../../components/ui/Badge";
+ 
+ export function LoginPage() {
+   const navigate = useNavigate();
+@@ -17,111 +17,50 @@ export function LoginPage() {
+   const [ver, setVer] = useState(false);
+   const [enviando, setEnviando] = useState(false);
+   const [error, setError] = useState<string | null>(null);
+-
+-  const destino = (location.state as { from?: string } | null)?.from ?? "/dashboard";
++  const [errores, setErrores] = useState<Record<string, string>>({});
++  const solicitado = (location.state as { from?: string } | null)?.from ?? "/";
++  const destino = solicitado.startsWith("/") && !solicitado.startsWith("//") && !solicitado.startsWith("/login") ? solicitado : "/";
++  if (sesion.cargando) return <LoadingState titulo="Verificando sesión…" />;
++  if (sesion.autenticado) return <Navigate to={destino} replace />;
+ 
+   async function onSubmit(e: FormEvent) {
+     e.preventDefault();
++    if (enviando) return;
+     setError(null);
++    const locales: Record<string, string> = {};
++    if (!nombreUsuario.trim() || nombreUsuario.trim().length > 50) locales.nombreUsuario = "Ingresá un usuario de hasta 50 caracteres.";
++    if (!contrasena || contrasena.length > 256) locales.contrasena = "Ingresá tu contraseña.";
++    setErrores(locales);
++    if (Object.keys(locales).length) return;
+     setEnviando(true);
+-    try {
+-      await sesion.iniciarSesion(nombreUsuario, contrasena);
+-      navigate(destino, { replace: true });
+-    } catch (err) {
+-      setError(err instanceof Error ? err.message : "No se pudo iniciar sesion.");
+-    } finally {
+-      setEnviando(false);
+-    }
++    try { await sesion.iniciarSesion(nombreUsuario.trim(), contrasena); navigate(destino, { replace: true }); }
++    catch (err) {
++      if (esApiError(err)) setErrores(err.fieldErrors);
++      setError(err instanceof Error ? err.message : "No se pudo iniciar sesión.");
++    } finally { setEnviando(false); }
+   }
+ 
+-  return (
+-    <div className="tc-login">
+-      <div className="tc-login__panel">
+-        <div className="tc-login__brand">
+-          <span className="tc-brand__mark" aria-hidden="true">
+-            TC
+-          </span>
+-          <div>
+-            <div className="tc-brand__name">TechCare</div>
+-            <div className="tc-brand__sub">Servicio tecnico, inventario y facturacion</div>
+-          </div>
+-        </div>
+-
+-        <Alert tono="info" titulo="Acceso en preparacion">
+-          El inicio de sesion del personal todavia no esta disponible: el servidor aun no expone el servicio de
+-          autenticacion. La interfaz queda lista para conectarse.
+-        </Alert>
+-
+-        <form onSubmit={onSubmit} noValidate className="tc-stack" style={{ marginTop: 16 }}>
+-          <Field label="Usuario" htmlFor="login-usuario" requerido>
+-            <TextInput
+-              id="login-usuario"
+-              autoComplete="username"
+-              value={nombreUsuario}
+-              onChange={(e) => setNombreUsuario(e.target.value)}
+-              placeholder="demo01"
+-              disabled={enviando}
+-            />
+-          </Field>
+-
+-          <Field label="Contrasena" htmlFor="login-contrasena" requerido>
+-            <div className="tc-input-group">
+-              <TextInput
+-                id="login-contrasena"
+-                type={ver ? "text" : "password"}
+-                autoComplete="current-password"
+-                value={contrasena}
+-                onChange={(e) => setContrasena(e.target.value)}
+-                disabled={enviando}
+-              />
+-              <Button
+-                variante="fantasma"
+-                onClick={() => setVer((v) => !v)}
+-                icono={ver ? <EyeOff size={16} /> : <Eye size={16} />}
+-                aria-label={ver ? "Ocultar contrasena" : "Mostrar contrasena"}
+-              >
+-                <span className="tc-sr-only">{ver ? "Ocultar" : "Mostrar"}</span>
+-              </Button>
+-            </div>
+-          </Field>
+-
+-          {error ? <Alert tono="danger">{error}</Alert> : null}
+-
+-          <Button variante="primario" type="submit" bloque disabled={enviando}>
+-            {enviando ? "Ingresando…" : "Ingresar"}
+-          </Button>
+-        </form>
+-
+-        <hr className="tc-divider" />
+-
+-        <div className="tc-stack" style={{ gap: 10 }}>
+-          <div className="tc-row" style={{ gap: 8 }}>
+-            <ShieldAlert size={16} aria-hidden="true" />
+-            <span className="tc-field__hint">Roles de la consigna (aun no exigidos por el servidor)</span>
+-          </div>
+-          <div className="tc-row" style={{ gap: 6 }}>
+-            {ROLES.map((r) => (
+-              <Badge key={r.codigo} tono="neutral">
+-                {r.nombre}
+-              </Badge>
+-            ))}
+-          </div>
+-          <Button
+-            variante="secundario"
+-            bloque
+-            onClick={() => {
+-              sesion.continuarSinAutenticar();
+-              navigate(destino, { replace: true });
+-            }}
+-          >
+-            Continuar sin autenticar (desarrollo)
++  return <div className="tc-login"><div className="tc-login__panel">
++    <div className="tc-login__brand"><span className="tc-brand__mark" aria-hidden="true">TC</span><div>
++      <div className="tc-brand__name">TechCare</div><div className="tc-brand__sub">Servicio técnico, inventario y facturación</div>
++    </div></div>
++    <h1 style={{ fontSize: "1.6rem", marginBottom: 8 }}>Iniciar sesión</h1>
++    <p className="tc-field__hint">Ingresá con tu cuenta del taller.</p>
++    {sesion.errorSesion ? <Alert tono="warn" accion={<Button onClick={() => sesion.cargarSesion()}>Reintentar conexión</Button>}>{sesion.errorSesion}</Alert> : null}
++    <form onSubmit={onSubmit} noValidate className="tc-stack" style={{ marginTop: 20 }}>
++      <Field label="Usuario" htmlFor="login-usuario" requerido error={errores.nombreUsuario}>
++        <TextInput id="login-usuario" autoComplete="username" value={nombreUsuario} maxLength={50} onChange={e => setNombreUsuario(e.target.value)} disabled={enviando} />
++      </Field>
++      <Field label="Contraseña" htmlFor="login-contrasena" requerido error={errores.contrasena}>
++        <div className="tc-input-group">
++          <TextInput id="login-contrasena" autoComplete="current-password" type={ver ? "text" : "password"} value={contrasena} maxLength={256} onChange={e => setContrasena(e.target.value)} disabled={enviando} />
++          <Button variante="fantasma" onClick={() => setVer(v => !v)} icono={ver ? <EyeOff size={16} /> : <Eye size={16} />} aria-label={ver ? "Ocultar contraseña" : "Mostrar contraseña"}>
++            <span className="tc-sr-only">{ver ? "Ocultar" : "Mostrar"}</span>
+           </Button>
+-          <p className="tc-field__hint">
+-            El modo sin autenticar no otorga permisos: solo permite revisar la interfaz y los modulos con API
+-            disponible.
+-          </p>
+         </div>
+-      </div>
+-    </div>
+-  );
++      </Field>
++      {error ? <Alert tono="danger">{error}</Alert> : null}
++      <Button variante="primario" type="submit" bloque disabled={enviando}>{enviando ? "Ingresando…" : "Ingresar"}</Button>
++    </form>
++  </div></div>;
+ }
+diff --git a/frontend/src/features/clientes/ClienteDetallePage.tsx b/frontend/src/features/clientes/ClienteDetallePage.tsx
+index a2bfddc..fd3def0 100644
+--- a/frontend/src/features/clientes/ClienteDetallePage.tsx
++++ b/frontend/src/features/clientes/ClienteDetallePage.tsx
+@@ -14,8 +14,12 @@ import { nombreTipoCliente } from "../../services/catalogos";
+ import { mensajeDeError } from "../../services/errors";
+ import { texto } from "../../utils/format";
+ import type { ClienteDatos } from "../../types/api";
++import { puedeAcceder, useSession } from "../../app/session";
+ 
+ export function ClienteDetallePage() {
++  const sesion = useSession();
++  const puedeEditar = puedeAcceder(sesion, ["ADMIN", "RECEPCION"]);
++  const puedeVerEquipos = puedeAcceder(sesion, ["ADMIN", "RECEPCION", "TECNICO"]);
+   const { id } = useParams();
+   const clienteId = Number(id);
+   const { data, isLoading, isError, error, refetch } = useCliente(Number.isNaN(clienteId) ? null : clienteId);
+@@ -51,7 +55,7 @@ export function ClienteDetallePage() {
+                 Volver
+               </Button>
+             </Link>
+-            <Button variante="primario" icono={<Pencil size={16} />} onClick={() => setEditando(true)}>
++            <Button variante="primario" disabled={!puedeEditar} icono={<Pencil size={16} />} onClick={() => setEditando(true)}>
+               Editar
+             </Button>
+           </>
+@@ -83,7 +87,7 @@ export function ClienteDetallePage() {
+           <Card>
+             <h2 className="tc-section-title">Equipos del cliente</h2>
+             <p>Consultá los equipos registrados a nombre de este cliente o agregá uno nuevo.</p>
+-            <Link to={`/equipos?clienteId=${data.ClienteID}`}><Button>Ver equipos del cliente</Button></Link>
++            {puedeVerEquipos ? <Link to={`/equipos?clienteId=${data.ClienteID}`}><Button>Ver equipos del cliente</Button></Link> : <p>Tu cuenta tiene acceso a los datos del cliente.</p>}
+           </Card>
+         </Reveal>
+ 
+diff --git a/frontend/src/features/clientes/ClientesListPage.tsx b/frontend/src/features/clientes/ClientesListPage.tsx
+index 660a9be..0c0265c 100644
+--- a/frontend/src/features/clientes/ClientesListPage.tsx
++++ b/frontend/src/features/clientes/ClientesListPage.tsx
+@@ -15,10 +15,12 @@ import { nombreTipoCliente, TIPOS_CLIENTE } from "../../services/catalogos";
+ import { mensajeDeError } from "../../services/errors";
+ import { normalizar, texto } from "../../utils/format";
+ import type { Cliente, ClienteDatos } from "../../types/api";
++import { puedeAcceder, useSession } from "../../app/session";
+ 
+ const TAMANO_PAGINA = 10;
+ 
+ export function ClientesListPage() {
++  const puedeEditar = puedeAcceder(useSession(), ["ADMIN", "RECEPCION"]);
+   const { data, isLoading, isError, error, refetch } = useClientes();
+   const crear = useCrearCliente();
+   const actualizar = useActualizarCliente();
+@@ -79,6 +81,7 @@ export function ClientesListPage() {
+         <div className="tc-row" style={{ gap: 4 }}>
+           <IconButton
+             etiqueta={`Editar ${c.Nombre}`}
++            disabled={!puedeEditar}
+             onClick={() => {
+               setErrorDialogo(null);
+               setDialogo({ abierto: true, cliente: c });
+@@ -114,6 +117,7 @@ export function ClientesListPage() {
+         acciones={
+           <Button
+             variante="primario"
++            disabled={!puedeEditar}
+             icono={<Plus size={16} />}
+             onClick={() => {
+               setErrorDialogo(null);
+diff --git a/frontend/src/features/dashboard/ResumenPage.tsx b/frontend/src/features/dashboard/ResumenPage.tsx
+index 020229d..f261d49 100644
+--- a/frontend/src/features/dashboard/ResumenPage.tsx
++++ b/frontend/src/features/dashboard/ResumenPage.tsx
+@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
+ import { Info } from "lucide-react";
+ import { Card, PageHeader } from "../../components/ui/Card";
+ import { Reveal } from "../../components/motion/Reveal";
+-import { useSession } from "../../app/session";
++import { puedeAcceder, useSession } from "../../app/session";
+ import { useClientes } from "../clientes/hooks";
+ import { nombreTipoCliente } from "../../services/catalogos";
+ import { mensajeDeError } from "../../services/errors";
+@@ -54,7 +54,9 @@ export function ResumenPage() {
+ 
+         <div className="tc-grid tc-grid--2">
+           <Reveal delay={0.08}>
+-            <BlockClientes />
++            {puedeAcceder(sesion, ["ADMIN", "RECEPCION", "TECNICO", "CAJA"]) ? <BlockClientes /> : (
++              <Card><h2 className="tc-section-title">Tu acceso</h2><p>Consultá los módulos disponibles para tu cuenta en el menú.</p></Card>
++            )}
+           </Reveal>
+           <Reveal delay={0.16}>
+             <BlockActividad />
+@@ -88,15 +90,6 @@ export function ResumenPage() {
+           </Reveal>
+         </section>
+ 
+-        {!sesion.autenticado ? (
+-          <Reveal delay={0.08}>
+-            <p className="tc-inline-note">
+-              <Info size={16} aria-hidden="true" />
+-              Acceso del personal en preparacion. La sesion y los permisos por rol se habilitaran cuando exista el
+-              servicio de autenticacion.
+-            </p>
+-          </Reveal>
+-        ) : null}
+       </div>
+     </>
+   );
+diff --git a/frontend/src/features/equipos/EquiposPage.tsx b/frontend/src/features/equipos/EquiposPage.tsx
+index 803228a..d1742dc 100644
+--- a/frontend/src/features/equipos/EquiposPage.tsx
++++ b/frontend/src/features/equipos/EquiposPage.tsx
+@@ -16,8 +16,10 @@ import { nombreEstado } from "../../services/catalogos";
+ import { fechaHora, moneda, normalizar } from "../../utils/format";
+ import { useClientes } from "../clientes/hooks";
+ import { EquipoForm } from "./EquipoForm";
++import { puedeAcceder, useSession } from "../../app/session";
+ 
+ export function EquiposPage() {
++  const puedeEditar = puedeAcceder(useSession(), ["ADMIN", "RECEPCION"]);
+   const [params] = useSearchParams();
+   const [clienteFiltro, setClienteFiltro] = useState(params.get("clienteId") ?? "");
+   const [busqueda, setBusqueda] = useState("");
+@@ -63,7 +65,7 @@ export function EquiposPage() {
+     { clave: "modelo", encabezado: "Equipo", render: e => <>{e.Marca} · {e.Modelo}<div className="tc-field__hint">{e.TipoEquipo}</div></> },
+     { clave: "estado", encabezado: "Estado", render: e => <Badge tono={e.Activo ? "ok" : "neutral"}>{e.Activo ? "Activo" : "Inactivo"}</Badge> },
+     { clave: "acciones", encabezado: "Acciones", render: e => <div className="tc-row">
+-      <IconButton etiqueta={`Editar ${e.NumeroSerie}`} disabled={!catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: e })}><Pencil size={16} /></IconButton>
++      <IconButton etiqueta={`Editar ${e.NumeroSerie}`} disabled={!puedeEditar || !catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: e })}><Pencil size={16} /></IconButton>
+       <IconButton etiqueta={`Historial de ${e.NumeroSerie}`} onClick={() => setHistorial(e)}><History size={16} /></IconButton>
+     </div> },
+   ];
+@@ -79,7 +81,7 @@ export function EquiposPage() {
+   }
+   return <>
+     <PageHeader eyebrow="Servicio" titulo="Equipos" descripcion="Equipos de los clientes y su historial de ingresos al taller."
+-      acciones={<Button variante="primario" icono={<Plus size={16} />} disabled={!catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: null })}>Nuevo equipo</Button>} />
++      acciones={<Button variante="primario" icono={<Plus size={16} />} disabled={!puedeEditar || !catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: null })}>Nuevo equipo</Button>} />
+     <div className="tc-stack">
+       {ok ? <Alert tono="ok">{ok}</Alert> : null}
+       {catalogos.isError || clientes.isError ? <Alert tono="danger" accion={<Button onClick={() => { catalogos.refetch(); clientes.refetch(); }}>Reintentar</Button>}>No se pudieron cargar los clientes o catálogos. {mensajeDeError(catalogos.error ?? clientes.error)}</Alert> : null}
+diff --git a/frontend/src/features/home/HomePage.tsx b/frontend/src/features/home/HomePage.tsx
+index 932324e..d33e9b0 100644
+--- a/frontend/src/features/home/HomePage.tsx
++++ b/frontend/src/features/home/HomePage.tsx
+@@ -3,6 +3,8 @@ import { Link } from "react-router-dom";
+ import { motion, useReducedMotion, useScroll, useTransform } from "motion/react";
+ import { Badge, type TonoBadge } from "../../components/ui/Badge";
+ import { Button } from "../../components/ui/Button";
++import { puedeAcceder, useSession } from "../../app/session";
++import { NAVEGACION } from "../../app/navigation";
+ 
+ const EASE_SALIDA: [number, number, number, number] = [0.22, 1, 0.36, 1];
+ 
+@@ -38,6 +40,9 @@ function ShowcaseSection({
+   etiquetaEnlace?: string;
+ }) {
+   const ref = useRef<HTMLElement>(null);
++  const sesion = useSession();
++  const destino = NAVEGACION.flatMap(g => g.items).find(i => i.ruta === enlace);
++  const permitido = puedeAcceder(sesion, destino?.roles);
+   const reduce = useReducedMotion();
+   const { scrollYProgress } = useScroll({
+     target: ref,
+@@ -65,7 +70,7 @@ function ShowcaseSection({
+             <div className="tc-show__meta">
+               <Badge tono={marca.tono}>{marca.texto}</Badge>
+             </div>
+-            {enlace ? (
++            {enlace && permitido ? (
+               <Link to={enlace} className="tc-show__link" aria-label={etiquetaEnlace ?? titulo}>
+                 {etiquetaEnlace ?? "Ver pantalla"}
+               </Link>
+@@ -208,8 +213,8 @@ export function HomePage() {
+         <ShowcaseSection
+           indice={6}
+           titulo="Equipos"
+-          descripcion="Administracion de equipos por cliente en preparacion. Se mantiene la coherencia visual y la navegacion; la accion real requerira endpoints especificos."
+-          estado="preparacion"
++          descripcion="Registro de equipos por cliente, edición de sus datos y consulta del historial de ingresos al taller."
++          estado="conectado"
+           imagen="/capturas/equipos.png"
+           alt="Pantalla de equipos en estado de preparacion."
+           enlace="/equipos"
+diff --git a/frontend/src/features/ordenes/OrdenNuevaPage.tsx b/frontend/src/features/ordenes/OrdenNuevaPage.tsx
+index da12186..f0e0384 100644
+--- a/frontend/src/features/ordenes/OrdenNuevaPage.tsx
++++ b/frontend/src/features/ordenes/OrdenNuevaPage.tsx
+@@ -21,7 +21,7 @@ const PASOS = ["Cliente", "Equipo", "Problema", "Confirmar"] as const;
+  * Flujo guiado de recepcion de un equipo.
+  *
+  * Cliente y Equipo consultan sus APIs reales. Confirmar el ingreso requiere
+- * autenticacion y POST /api/ordenes; permanece deshabilitado hasta integrarlos.
++ * POST /api/ordenes; permanece deshabilitado hasta integrar ese endpoint.
+  */
+ export function OrdenNuevaPage() {
+   const [paso, setPaso] = useState(0);
+@@ -185,7 +185,7 @@ export function OrdenNuevaPage() {
+                 Revisar
+               </Button>
+             </div>
+-            <PendingState titulo="Creación de la orden pendiente" descripcion="La selección del cliente y del equipo está disponible. Confirmar el ingreso requiere integrar el registro de órdenes y la sesión del personal." />
++            <PendingState titulo="Creación de la orden pendiente" descripcion="La selección del cliente y del equipo está disponible. Falta conectar la confirmación del ingreso con el registro de órdenes." />
+           </Card>
+         ) : null}
+ 
+diff --git a/frontend/src/services/auth.ts b/frontend/src/services/auth.ts
+new file mode 100644
+index 0000000..498a4e3
+--- /dev/null
++++ b/frontend/src/services/auth.ts
+@@ -0,0 +1,21 @@
++import { http, reiniciarCsrf } from "./http";
++
++export interface UsuarioSesion {
++  usuarioId: number;
++  nombreUsuario: string;
++  nombreCompleto: string;
++  empleadoCodigo: string;
++}
++export interface SesionActual { autenticado: boolean; usuario: UsuarioSesion | null; roles: string[] }
++export const authApi = {
++  sesion: (signal?: AbortSignal) => http.get<SesionActual>("/auth/sesion", signal),
++  login: async (nombreUsuario: string, contrasena: string) => {
++    const sesion = await http.post<SesionActual>("/auth/login", { nombreUsuario, contrasena });
++    reiniciarCsrf();
++    return sesion;
++  },
++  logout: async () => {
++    await http.post<SesionActual>("/auth/logout");
++    reiniciarCsrf();
++  },
++};
+diff --git a/frontend/src/services/http.ts b/frontend/src/services/http.ts
+index de88fa1..7d130ef 100644
+--- a/frontend/src/services/http.ts
++++ b/frontend/src/services/http.ts
+@@ -1,70 +1,88 @@
+ import { ApiError, parseApiErrorBody } from "./errors";
+ 
+-/**
+- * Capa HTTP centralizada.
+- *
+- * - URL base desde VITE_API_BASE_URL (por defecto "/api", relativo, resuelto por
+- *   el proxy de desarrollo de Vite; ver vite.config.ts).
+- * - `credentials: "include"` para reutilizar cookies si el backend agrega sesion.
+- *   Hoy ClienteController no exige autenticacion, pero no se asume token/JWT.
+- * - No hay ninguna consulta SQL ni credencial de base de datos en el navegador.
+- */
+-
+ const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
+-
+ export const API_BASE_URL = BASE_URL;
++export const SESION_EXPIRADA = "techcare:sesion-expirada";
++interface TokenCsrf { headerName: string; token: string }
++interface RequestOptions { method?: string; body?: unknown; signal?: AbortSignal }
++let csrf: TokenCsrf | null = null;
++let csrfPendiente: Promise<TokenCsrf> | null = null;
++let generacion = 0;
+ 
+-interface RequestOptions {
+-  method?: string;
+-  body?: unknown;
+-  signal?: AbortSignal;
++export function reiniciarCsrf() {
++  csrf = null;
++  csrfPendiente = null;
++  generacion++;
+ }
+ 
+-export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
+-  const { method = "GET", body, signal } = options;
+-
+-  let respuesta: Response;
+-  try {
+-    respuesta = await fetch(`${BASE_URL}${path}`, {
+-      method,
+-      signal,
+-      credentials: "include",
+-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+-      body: body === undefined ? undefined : JSON.stringify(body),
+-    });
+-  } catch (error) {
+-    if (error instanceof DOMException && error.name === "AbortError") {
+-      throw error;
+-    }
++async function solicitar(url: string, init: RequestInit): Promise<Response> {
++  try { return await fetch(url, { ...init, credentials: "include" }); }
++  catch (error) {
++    if (error instanceof DOMException && error.name === "AbortError") throw error;
+     throw new ApiError(0, "No se pudo contactar con el servidor.", {}, error);
+   }
++}
+ 
++async function leer(respuesta: Response): Promise<unknown> {
+   const texto = await respuesta.text();
+-  const datos = texto.length > 0 ? safeParse(texto) : null;
++  if (!texto) return null;
++  try { return JSON.parse(texto); } catch { return texto; }
++}
+ 
+-  if (!respuesta.ok) {
+-    const cuerpo = parseApiErrorBody(datos);
+-    throw new ApiError(
+-      respuesta.status,
+-      cuerpo?.mensaje ?? `La operacion fallo (HTTP ${respuesta.status}).`,
+-      cuerpo?.errores ?? {},
+-      datos,
+-    );
+-  }
++function errorHttp(respuesta: Response, datos: unknown): ApiError {
++  const cuerpo = parseApiErrorBody(datos);
++  return new ApiError(respuesta.status, cuerpo?.mensaje ?? `La operación falló (HTTP ${respuesta.status}).`, cuerpo?.errores ?? {}, datos);
++}
+ 
+-  return datos as T;
++async function obtenerCsrf(): Promise<TokenCsrf> {
++  if (csrf) return csrf;
++  if (csrfPendiente) return csrfPendiente;
++  const actual = generacion;
++  const tarea = (async () => {
++    const respuesta = await solicitar(`${BASE_URL}/auth/csrf`, { method: "GET" });
++    const datos = await leer(respuesta);
++    if (!respuesta.ok) throw errorHttp(respuesta, datos);
++    const token = datos as TokenCsrf;
++    if (!token?.token || token.headerName !== "X-CSRF-TOKEN") throw new ApiError(500, "No se pudo preparar la seguridad de la sesión.");
++    if (actual === generacion) csrf = token;
++    return token;
++  })();
++  csrfPendiente = tarea;
++  try { return await tarea; }
++  finally { if (actual === generacion) csrfPendiente = null; }
++}
++
++export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
++  const { method = "GET", body, signal } = options;
++  const escritura = !["GET", "HEAD", "OPTIONS"].includes(method);
++  for (let intento = 0; intento < 2; intento++) {
++    const headers: Record<string, string> = {};
++    if (body !== undefined) headers["Content-Type"] = "application/json";
++    if (escritura) {
++      const token = await obtenerCsrf();
++      headers[token.headerName] = token.token;
++    }
++    const respuesta = await solicitar(`${BASE_URL}${path}`, {
++      method, signal, headers, body: body === undefined ? undefined : JSON.stringify(body),
++    });
++    const datos = await leer(respuesta);
++    const rechazoCsrf = respuesta.status === 403 && datos && typeof datos === "object" && "codigo" in datos && datos.codigo === "CSRF_INVALIDO";
++    // Solo se reintenta cuando el filtro de seguridad rechazó antes de ejecutar la operación.
++    if (escritura && intento === 0 && rechazoCsrf) { reiniciarCsrf(); continue; }
++    if (!respuesta.ok) {
++      if (respuesta.status === 401 && !path.startsWith("/auth/")) {
++        reiniciarCsrf();
++        window.dispatchEvent(new Event(SESION_EXPIRADA));
++      }
++      throw errorHttp(respuesta, datos);
++    }
++    return datos as T;
++  }
++  throw new ApiError(403, "No se pudo verificar la seguridad de la sesión. Volvé a iniciar sesión.");
+ }
+ 
+ export const http = {
+   get: <T>(path: string, signal?: AbortSignal) => apiRequest<T>(path, { signal }),
+-  post: <T>(path: string, body: unknown) => apiRequest<T>(path, { method: "POST", body }),
++  post: <T>(path: string, body?: unknown) => apiRequest<T>(path, { method: "POST", body }),
+   put: <T>(path: string, body: unknown) => apiRequest<T>(path, { method: "PUT", body }),
+ };
+-
+-function safeParse(texto: string): unknown {
+-  try {
+-    return JSON.parse(texto);
+-  } catch {
+-    return texto;
+-  }
+-}

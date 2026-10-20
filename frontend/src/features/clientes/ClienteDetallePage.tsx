@@ -14,8 +14,12 @@ import { nombreTipoCliente } from "../../services/catalogos";
 import { mensajeDeError } from "../../services/errors";
 import { texto } from "../../utils/format";
 import type { ClienteDatos } from "../../types/api";
+import { puedeAcceder, useSession } from "../../app/session";
 
 export function ClienteDetallePage() {
+  const sesion = useSession();
+  const puedeEditar = puedeAcceder(sesion, ["ADMIN", "RECEPCION"]);
+  const puedeVerEquipos = puedeAcceder(sesion, ["ADMIN", "RECEPCION", "TECNICO"]);
   const { id } = useParams();
   const clienteId = Number(id);
   const { data, isLoading, isError, error, refetch } = useCliente(Number.isNaN(clienteId) ? null : clienteId);
@@ -51,7 +55,7 @@ export function ClienteDetallePage() {
                 Volver
               </Button>
             </Link>
-            <Button variante="primario" icono={<Pencil size={16} />} onClick={() => setEditando(true)}>
+            <Button variante="primario" disabled={!puedeEditar} icono={<Pencil size={16} />} onClick={() => setEditando(true)}>
               Editar
             </Button>
           </>
@@ -83,7 +87,7 @@ export function ClienteDetallePage() {
           <Card>
             <h2 className="tc-section-title">Equipos del cliente</h2>
             <p>Consultá los equipos registrados a nombre de este cliente o agregá uno nuevo.</p>
-            <Link to={`/equipos?clienteId=${data.ClienteID}`}><Button>Ver equipos del cliente</Button></Link>
+            {puedeVerEquipos ? <Link to={`/equipos?clienteId=${data.ClienteID}`}><Button>Ver equipos del cliente</Button></Link> : <p>Tu cuenta tiene acceso a los datos del cliente.</p>}
           </Card>
         </Reveal>
 

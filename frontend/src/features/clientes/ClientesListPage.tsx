@@ -15,10 +15,12 @@ import { nombreTipoCliente, TIPOS_CLIENTE } from "../../services/catalogos";
 import { mensajeDeError } from "../../services/errors";
 import { normalizar, texto } from "../../utils/format";
 import type { Cliente, ClienteDatos } from "../../types/api";
+import { puedeAcceder, useSession } from "../../app/session";
 
 const TAMANO_PAGINA = 10;
 
 export function ClientesListPage() {
+  const puedeEditar = puedeAcceder(useSession(), ["ADMIN", "RECEPCION"]);
   const { data, isLoading, isError, error, refetch } = useClientes();
   const crear = useCrearCliente();
   const actualizar = useActualizarCliente();
@@ -79,6 +81,7 @@ export function ClientesListPage() {
         <div className="tc-row" style={{ gap: 4 }}>
           <IconButton
             etiqueta={`Editar ${c.Nombre}`}
+            disabled={!puedeEditar}
             onClick={() => {
               setErrorDialogo(null);
               setDialogo({ abierto: true, cliente: c });
@@ -114,6 +117,7 @@ export function ClientesListPage() {
         acciones={
           <Button
             variante="primario"
+            disabled={!puedeEditar}
             icono={<Plus size={16} />}
             onClick={() => {
               setErrorDialogo(null);

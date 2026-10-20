@@ -1,70 +1,88 @@
 import { ApiError, parseApiErrorBody } from "./errors";
 
-/**
- * Capa HTTP centralizada.
- *
- * - URL base desde VITE_API_BASE_URL (por defecto "/api", relativo, resuelto por
- *   el proxy de desarrollo de Vite; ver vite.config.ts).
- * - `credentials: "include"` para reutilizar cookies si el backend agrega sesion.
- *   Hoy ClienteController no exige autenticacion, pero no se asume token/JWT.
- * - No hay ninguna consulta SQL ni credencial de base de datos en el navegador.
- */
-
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "/api").replace(/\/$/, "");
-
 export const API_BASE_URL = BASE_URL;
+export const SESION_EXPIRADA = "techcare:sesion-expirada";
+interface TokenCsrf { headerName: string; token: string }
+interface RequestOptions { method?: string; body?: unknown; signal?: AbortSignal }
+let csrf: TokenCsrf | null = null;
+let csrfPendiente: Promise<TokenCsrf> | null = null;
+let generacion = 0;
 
-interface RequestOptions {
-  method?: string;
-  body?: unknown;
-  signal?: AbortSignal;
+export function reiniciarCsrf() {
+  csrf = null;
+  csrfPendiente = null;
+  generacion++;
+}
+
+async function solicitar(url: string, init: RequestInit): Promise<Response> {
+  try { return await fetch(url, { ...init, credentials: "include" }); }
+  catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiError(0, "No se pudo contactar con el servidor.", {}, error);
+  }
+}
+
+async function leer(respuesta: Response): Promise<unknown> {
+  const texto = await respuesta.text();
+  if (!texto) return null;
+  try { return JSON.parse(texto); } catch { return texto; }
+}
+
+function errorHttp(respuesta: Response, datos: unknown): ApiError {
+  const cuerpo = parseApiErrorBody(datos);
+  return new ApiError(respuesta.status, cuerpo?.mensaje ?? `La operación falló (HTTP ${respuesta.status}).`, cuerpo?.errores ?? {}, datos);
+}
+
+async function obtenerCsrf(): Promise<TokenCsrf> {
+  if (csrf) return csrf;
+  if (csrfPendiente) return csrfPendiente;
+  const actual = generacion;
+  const tarea = (async () => {
+    const respuesta = await solicitar(`${BASE_URL}/auth/csrf`, { method: "GET" });
+    const datos = await leer(respuesta);
+    if (!respuesta.ok) throw errorHttp(respuesta, datos);
+    const token = datos as TokenCsrf;
+    if (!token?.token || token.headerName !== "X-CSRF-TOKEN") throw new ApiError(500, "No se pudo preparar la seguridad de la sesión.");
+    if (actual === generacion) csrf = token;
+    return token;
+  })();
+  csrfPendiente = tarea;
+  try { return await tarea; }
+  finally { if (actual === generacion) csrfPendiente = null; }
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, signal } = options;
-
-  let respuesta: Response;
-  try {
-    respuesta = await fetch(`${BASE_URL}${path}`, {
-      method,
-      signal,
-      credentials: "include",
-      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      throw error;
+  const escritura = !["GET", "HEAD", "OPTIONS"].includes(method);
+  for (let intento = 0; intento < 2; intento++) {
+    const headers: Record<string, string> = {};
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (escritura) {
+      const token = await obtenerCsrf();
+      headers[token.headerName] = token.token;
     }
-    throw new ApiError(0, "No se pudo contactar con el servidor.", {}, error);
+    const respuesta = await solicitar(`${BASE_URL}${path}`, {
+      method, signal, headers, body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const datos = await leer(respuesta);
+    const rechazoCsrf = respuesta.status === 403 && datos && typeof datos === "object" && "codigo" in datos && datos.codigo === "CSRF_INVALIDO";
+    // Solo se reintenta cuando el filtro de seguridad rechazó antes de ejecutar la operación.
+    if (escritura && intento === 0 && rechazoCsrf) { reiniciarCsrf(); continue; }
+    if (!respuesta.ok) {
+      if (respuesta.status === 401 && !path.startsWith("/auth/")) {
+        reiniciarCsrf();
+        window.dispatchEvent(new Event(SESION_EXPIRADA));
+      }
+      throw errorHttp(respuesta, datos);
+    }
+    return datos as T;
   }
-
-  const texto = await respuesta.text();
-  const datos = texto.length > 0 ? safeParse(texto) : null;
-
-  if (!respuesta.ok) {
-    const cuerpo = parseApiErrorBody(datos);
-    throw new ApiError(
-      respuesta.status,
-      cuerpo?.mensaje ?? `La operacion fallo (HTTP ${respuesta.status}).`,
-      cuerpo?.errores ?? {},
-      datos,
-    );
-  }
-
-  return datos as T;
+  throw new ApiError(403, "No se pudo verificar la seguridad de la sesión. Volvé a iniciar sesión.");
 }
 
 export const http = {
   get: <T>(path: string, signal?: AbortSignal) => apiRequest<T>(path, { signal }),
-  post: <T>(path: string, body: unknown) => apiRequest<T>(path, { method: "POST", body }),
+  post: <T>(path: string, body?: unknown) => apiRequest<T>(path, { method: "POST", body }),
   put: <T>(path: string, body: unknown) => apiRequest<T>(path, { method: "PUT", body }),
 };
-
-function safeParse(texto: string): unknown {
-  try {
-    return JSON.parse(texto);
-  } catch {
-    return texto;
-  }
-}

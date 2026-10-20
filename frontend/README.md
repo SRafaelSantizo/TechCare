@@ -1,191 +1,47 @@
-# TechCare — Frontend (React + TypeScript + Vite)
+# TechCare — Frontend
 
-Interfaz del Sistema Integral de Servicio Técnico, Inventario y Facturación
-TechCare, con el lenguaje visual **Mercury** adaptado a una aplicación interna
-de taller. Repositorio: `frontend/` (el backend Spring Boot permanece en
-`backend/`). La actualización de Equipos agrega sus controladores y catálogos.
+React, TypeScript y Vite. El backend Spring Boot está en `backend/`.
 
----
-
-## 1. Estado real de la integración (auditado contra el código)
-
-El backend expone los siguientes controladores:
-
-```
-backend/src/main/java/com/techcare/backend/ClienteController.java
-backend/src/main/java/com/techcare/backend/EquipoController.java
-backend/src/main/java/com/techcare/backend/CatalogoEquipoController.java
-```
-
-No hay controladores de autenticación, órdenes, diagnóstico,
-reparación, inventario, compras, facturación, pagos, entrega, reportes ni
-administración. Tampoco hay configuración de CORS ni de seguridad. Por lo
-tanto:
-
-- **Clientes** y **Equipos** están conectados (`/api/clientes`, `/api/equipos`).
-- Equipos consulta marcas, tipos y modelos desde `/api/catalogos/…`.
-- El resto de módulos se construyó con la interfaz completa y estados de
-  **“pendiente de API”**; no se simulan datos ni se inventan endpoints.
-- Un procedimiento SQL (`spCrearOrden`, `spConsumirRepuesto`, …) **no** implica
-  una ruta HTTP. Se documentan como dependencia pendiente.
-
-La app incluye un **mapa de integración** navegable en `/integracion` con todas
-las operaciones, método/ruta real, DTO, roles, estado y proceso SQL requerido.
-
-### Contrato verificado de Clientes
-
-| Operación | Método y ruta | Entrada | Respuesta | Estado |
-|---|---|---|---|---|
-| Listar | `GET /api/clientes` | — | `Cliente[]` (sin paginación) | Parcial (pagina/filtra en cliente) |
-| Consultar | `GET /api/clientes/{id}` | id | `Cliente` | Conectado |
-| Registrar | `POST /api/clientes` | `ClienteDatos` | `Cliente` (201) | Conectado |
-| Actualizar / activar / desactivar | `PUT /api/clientes/{id}` | `ClienteDatos` | `Cliente` | Conectado |
-| Eliminar | — | — | — | **Ausente** (no existe DELETE; se usa `Activo=false`) |
-
-Notas del contrato real:
-
-- El backend usa `JdbcTemplate.queryForList`, por lo que las claves JSON están
-  en **PascalCase** (`ClienteID`, `Nombre`, `TipoClienteID`, …). Los tipos del
-  frontend (`src/types/api.ts`) respetan exactamente eso.
-- Errores con la forma `{ estado, mensaje, errores? }`; `errores` mapea los
-  campos del DTO (`nit`, `nombre`, `email`, …). Se muestran junto al campo.
-- El **correo no es obligatorio** en el modelo ni en el DTO.
-- No hay autenticación: la identidad del actor y la autorización por rol aún
-  **no están implementadas en el servidor**.
-
----
-
-## 2. Cómo ejecutar
-
-Requisitos: Node 18+ y el backend TechCare (Spring Boot + SQL Server).
+## Ejecución
 
 ```bash
-cd frontend
-npm install
-cp .env.example .env      # Windows: Copy-Item .env.example .env
-npm run dev               # http://localhost:5173
+npm ci
+npm run dev
 ```
 
-El servidor de desarrollo de Vite **proxya** `/api` hacia el backend
-(`VITE_PROXY_TARGET`, por defecto `http://localhost:8080`), de modo que el
-navegador no necesita CORS. El backend no tiene `Access-Control-Allow-Origin`;
-por eso **no** se modifica su política CORS: se resuelve con el proxy.
+El proxy de desarrollo envía `/api` al backend; por defecto `http://localhost:8080`.
+Se conserva la configuración local existente de `VITE_PROXY_TARGET` y
+`VITE_API_BASE_URL`. Iniciar también el backend con su `DB_URL` habitual.
 
-Variables (`.env.example`, sin secretos):
+## Módulos conectados
 
-```
-VITE_API_BASE_URL=/api
-VITE_PROXY_TARGET=http://localhost:8080
-```
+- Acceso: login, sesión al recargar, cierre de sesión y permisos por rol.
+- Clientes: listado, consulta, registro, edición, activación/desactivación.
+- Equipos: listado, registro, edición, historial y catálogos de tipos, marcas y modelos.
+- Nueva orden: selección de cliente y equipo; la confirmación requiere la API de órdenes.
 
-Otros comandos:
+Los demás módulos conservan sus pantallas pendientes de integración. El mapa
+`/integracion`, disponible para ADMIN, detalla los endpoints implementados.
+
+## Sesión y permisos
+
+La identidad y los roles vienen de `/api/auth/sesion`; no se guardan contraseñas,
+hashes ni tokens de autenticación en localStorage. El navegador envía la cookie
+de sesión HttpOnly. Para POST/PUT se obtiene un token CSRF y se envía en la cabecera.
+Se renueva después de login/logout y si el filtro rechaza explícitamente un token
+vencido antes de ejecutar la operación. Otros errores no repiten escrituras.
+
+Las rutas protegidas redirigen al login cuando no hay sesión. El menú y las
+acciones se ajustan a los roles; el servidor comprueba los mismos permisos.
+Al salir o vencer la sesión se limpia la caché de consultas para el siguiente usuario.
+
+Las respuestas de Clientes y Equipos conservan PascalCase. Las de acceso usan los
+DTO camelCase de `src/services/auth.ts`. Los errores mantienen `{estado,mensaje,errores?}`.
+
+## Verificación
 
 ```bash
-npm run typecheck   # tsc --noEmit
-npm run build       # tsc --noEmit && vite build
-npm run preview
+npm run build
 ```
 
-> El backend se configura con `DB_URL` (variable de entorno) y usa el puerto
-> `8080` (`backend/src/main/resources/application.properties`). No se ejecuta
-> ningún script SQL, ni se crean datos ni se modifican triggers desde esta
-> entrega.
-
----
-
-## 3. Estructura
-
-```
-frontend/src/
-  app/          rutas de navegación, sesión, registro de capacidades, queryClient
-  components/   ui/ (botones, tablas, diálogos, estados) y layout/ (shell)
-  features/     auth, dashboard, clientes, equipos, ordenes, inventario,
-                repuestos, compras, proveedores, facturacion, reportes,
-                administracion, integracion
-  services/     http centralizado, clientes, catálogos de referencia, errores
-  types/        DTO reales (PascalCase) y modelos
-  styles/       tokens Mercury y estilos globales
-  utils/        formatos (GTQ, fechas America/Guatemala) y búsqueda
-```
-
----
-
-## 4. Diseño Mercury
-
-Tokens centralizados en `src/styles/tokens.css` exactamente con los valores
-indicados (canvas `#171721`, surface `#1e1e2a`, primary `#5266eb`, etc.).
-Barra lateral (~230 px) con grupos *Inicio; Servicio; Inventario y compras;
-Facturación; Reportes; Administración*, cabecera de contexto y área de trabajo
-amplia. Radios de tarjeta 12 px y de control 32 px, iconos Lucide, transiciones
-de ~140 ms con respeto a `prefers-reduced-motion`, foco visible y estados con
-texto+color (nunca solo color). Responsive hasta 360 px con navegación en panel
-desplegable y tablas con desplazamiento contenido.
-
----
-
-## 5. Qué está conectado, implementado o pendiente
-
-### Conectado y verificado por compilación de tipos y arranque
-- Clientes: listar, consultar, crear, actualizar/activar/desactivar, con
-  validación de campos que replica el DTO, manejo de 400/404/409 y errores por
-  campo, estados de carga/vacío/error, paginación y búsqueda en cliente.
-- Equipos: registrar, editar, activar/desactivar, buscar, filtrar por cliente y consultar historial.
-- Navegación completa, sesión (modo honesto sin autenticación), dashboard,
-  mapa de integración.
-
-> Verificado: `npm run typecheck` y `npm run build` correctos y el bundle se
-> sirve por HTTP 200. **No** se pudo verificar contra un backend en ejecución en
-> esta sesión (requiere SQL Server + `DB_URL`), por lo que las llamadas reales a
-> `/api/clientes` quedan **implementadas pero no ejecutadas end-to-end**.
-
-### Implementado pero pendiente de soporte del backend
-Toda pantalla y flujo está construido y navegable, pero su acción permanece
-deshabilitada porque falta el endpoint. Cada una indica el método/ruta requerido
-y el procedimiento SQL de referencia:
-
-- Órdenes (listado y expediente), dashboard (6 métricas + actividad),
-  diagnóstico, reparación, actividades, consumo de repuestos, inventario,
-  kardex, repuestos, bodegas, proveedores, compras (registro/recepción/anulación),
-  facturación (emisión/anulación), pagos, entrega y administración.
-- Los **12 reportes** (R01–R12) listados desde `03_Reportes.sql`.
-- **Nueva orden**: Cliente y Equipo usan sus APIs reales. La confirmación sigue
-  pendiente de autenticación y `POST /api/ordenes` → `spCrearOrden`.
-
-### Pendiente de backend de forma explícita
-- **Autenticación y sesión** (`/api/auth/login`, `/api/auth/sesion`). No se
-  verifica la contraseña en el navegador ni se simula un administrador local.
-  Mientras no exista, la navegación **no oculta** módulos (no se aparenta una
-  seguridad inexistente) y `puedeAcceder()` ya está listo para consumir los
-  roles cuando el servidor los entregue.
-- Autorización por roles en el servidor para cada operación.
-
----
-
-## 6. Brechas y contradicciones detectadas
-
-1. **No hay endpoint de autenticación** en el backend actual, aunque la
-   consigna exige acceso por rol. Documentado; no se simuló.
-2. **El SQL exige UsuarioID de la identidad autenticada** (`fnTieneRol`,
-   triggers). Sin endpoint de sesión, el frontend no puede aportar ese actor; la
-   creación de orden, diagnóstico, consumo, etc. quedan pendientes de esa pieza.
-3. **Sin CORS**: se resolvió con proxy de Vite en desarrollo; en producción el
-   backend deberá exponer CORS o servirse bajo el mismo origen.
-4. **Nombres JSON**: el proyecto usa PascalCase por `queryForList`; cualquier
-   futura capa de mapeo a camelCase debe actualizar `src/types/api.ts` y los
-   servicios, no darse por sentado.
-5. **Serialización de fechas**: `java.sql.Timestamp` puede llegar como número o
-   ISO. `utils/format.ts` acepta ambos y asume UTC cuando no hay zona; confirmar
-   el serializador real antes de confiar en fechas sin zona.
-6. **`ClienteController` no pagina ni filtra**: el listado trae el conjunto
-   completo; el filtrado/paginación es local y así se rotula en la interfaz.
-
----
-
-## 7. Contrato requerido (resumen por módulo)
-
-Detalle completo y filtrable en la pantalla **Integración** (`/integracion`).
-Cada fila indica operación, `método + ruta` propuestos, entrada, respuesta,
-roles y el procedimiento SQL que debe respaldarla (por ejemplo
-`POST /api/ordenes` ↔ `spCrearOrden`, `POST /api/reparaciones/{id}/repuestos`
-↔ `spConsumirRepuesto`, `POST /api/facturas/{id}/pagos` ↔ `spRegistrarPago`,
-`POST /api/ordenes/{id}/entrega` ↔ `spEntregarOrden`).
+La instalación y las cuentas de demostración se describen en `../INTEGRACION_LOGIN.md`.

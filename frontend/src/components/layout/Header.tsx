@@ -1,4 +1,5 @@
 import { LogOut, Menu } from "lucide-react";
+import { useState } from "react";
 import { useLocation } from "react-router-dom";
 import { contextoDeRuta } from "../../app/navigation";
 import { useSession } from "../../app/session";
@@ -11,6 +12,15 @@ export function Header({ navAbierto, onAbrirNav }: { navAbierto: boolean; onAbri
   const ubicacion = useLocation();
   const { grupo, etiqueta } = contextoDeRuta(ubicacion.pathname);
   const sesion = useSession();
+  const [saliendo, setSaliendo] = useState(false);
+  const [errorSalida, setErrorSalida] = useState("");
+  async function salir() {
+    setSaliendo(true);
+    setErrorSalida("");
+    try { await sesion.cerrarSesion(); }
+    catch { setErrorSalida("No se pudo cerrar sesión. Intentá nuevamente."); }
+    finally { setSaliendo(false); }
+  }
   const esInicio = ubicacion.pathname === "/";
 
   return (
@@ -45,14 +55,15 @@ export function Header({ navAbierto, onAbrirNav }: { navAbierto: boolean; onAbri
             {iniciales(sesion.usuario?.nombreCompleto)}
           </span>
           <span style={{ fontSize: "var(--tc-fs-meta)" }}>{sesion.usuario?.nombreCompleto}</span>
-          <IconButton etiqueta="Cerrar sesion" onClick={sesion.cerrarSesion}>
+          {errorSalida ? <span role="alert" className="tc-field__hint">{errorSalida}</span> : null}
+          <IconButton etiqueta="Cerrar sesion" disabled={saliendo} onClick={salir}>
             <LogOut size={16} />
           </IconButton>
         </div>
       ) : (
-        <span className="tc-session-note" title="La sesion del personal todavia no esta disponible.">
+        <span className="tc-session-note">
           <span className="tc-session-note__dot" aria-hidden="true" />
-          Acceso del personal en preparacion
+          Sin sesión
         </span>
       )}
     </header>

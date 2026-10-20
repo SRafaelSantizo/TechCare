@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { Info } from "lucide-react";
 import { Card, PageHeader } from "../../components/ui/Card";
 import { Reveal } from "../../components/motion/Reveal";
-import { useSession } from "../../app/session";
+import { puedeAcceder, useSession } from "../../app/session";
 import { useClientes } from "../clientes/hooks";
 import { nombreTipoCliente } from "../../services/catalogos";
 import { mensajeDeError } from "../../services/errors";
@@ -54,7 +54,9 @@ export function ResumenPage() {
 
         <div className="tc-grid tc-grid--2">
           <Reveal delay={0.08}>
-            <BlockClientes />
+            {puedeAcceder(sesion, ["ADMIN", "RECEPCION", "TECNICO", "CAJA"]) ? <BlockClientes /> : (
+              <Card><h2 className="tc-section-title">Tu acceso</h2><p>Consultá los módulos disponibles para tu cuenta en el menú.</p></Card>
+            )}
           </Reveal>
           <Reveal delay={0.16}>
             <BlockActividad />
@@ -88,15 +90,6 @@ export function ResumenPage() {
           </Reveal>
         </section>
 
-        {!sesion.autenticado ? (
-          <Reveal delay={0.08}>
-            <p className="tc-inline-note">
-              <Info size={16} aria-hidden="true" />
-              Acceso del personal en preparacion. La sesion y los permisos por rol se habilitaran cuando exista el
-              servicio de autenticacion.
-            </p>
-          </Reveal>
-        ) : null}
       </div>
     </>
   );

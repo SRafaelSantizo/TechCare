@@ -3,6 +3,8 @@ import { Link } from "react-router-dom";
 import { motion, useReducedMotion, useScroll, useTransform } from "motion/react";
 import { Badge, type TonoBadge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
+import { puedeAcceder, useSession } from "../../app/session";
+import { NAVEGACION } from "../../app/navigation";
 
 const EASE_SALIDA: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
@@ -38,6 +40,9 @@ function ShowcaseSection({
   etiquetaEnlace?: string;
 }) {
   const ref = useRef<HTMLElement>(null);
+  const sesion = useSession();
+  const destino = NAVEGACION.flatMap(g => g.items).find(i => i.ruta === enlace);
+  const permitido = puedeAcceder(sesion, destino?.roles);
   const reduce = useReducedMotion();
   const { scrollYProgress } = useScroll({
     target: ref,
@@ -65,7 +70,7 @@ function ShowcaseSection({
             <div className="tc-show__meta">
               <Badge tono={marca.tono}>{marca.texto}</Badge>
             </div>
-            {enlace ? (
+            {enlace && permitido ? (
               <Link to={enlace} className="tc-show__link" aria-label={etiquetaEnlace ?? titulo}>
                 {etiquetaEnlace ?? "Ver pantalla"}
               </Link>
@@ -208,8 +213,8 @@ export function HomePage() {
         <ShowcaseSection
           indice={6}
           titulo="Equipos"
-          descripcion="Administracion de equipos por cliente en preparacion. Se mantiene la coherencia visual y la navegacion; la accion real requerira endpoints especificos."
-          estado="preparacion"
+          descripcion="Registro de equipos por cliente, edición de sus datos y consulta del historial de ingresos al taller."
+          estado="conectado"
           imagen="/capturas/equipos.png"
           alt="Pantalla de equipos en estado de preparacion."
           enlace="/equipos"
