@@ -3,24 +3,27 @@
 Interfaz del Sistema Integral de Servicio Técnico, Inventario y Facturación
 TechCare, con el lenguaje visual **Mercury** adaptado a una aplicación interna
 de taller. Repositorio: `frontend/` (el backend Spring Boot permanece en
-`backend/`, sin cambios).
+`backend/`). La actualización de Equipos agrega sus controladores y catálogos.
 
 ---
 
 ## 1. Estado real de la integración (auditado contra el código)
 
-El backend del repositorio contiene **un único controlador**:
+El backend expone los siguientes controladores:
 
 ```
 backend/src/main/java/com/techcare/backend/ClienteController.java
+backend/src/main/java/com/techcare/backend/EquipoController.java
+backend/src/main/java/com/techcare/backend/CatalogoEquipoController.java
 ```
 
-No hay controladores de autenticación, equipos, órdenes, diagnóstico,
+No hay controladores de autenticación, órdenes, diagnóstico,
 reparación, inventario, compras, facturación, pagos, entrega, reportes ni
 administración. Tampoco hay configuración de CORS ni de seguridad. Por lo
 tanto:
 
-- **Clientes** es el único módulo conectado (`/api/clientes`).
+- **Clientes** y **Equipos** están conectados (`/api/clientes`, `/api/equipos`).
+- Equipos consulta marcas, tipos y modelos desde `/api/catalogos/…`.
 - El resto de módulos se construyó con la interfaz completa y estados de
   **“pendiente de API”**; no se simulan datos ni se inventan endpoints.
 - Un procedimiento SQL (`spCrearOrden`, `spConsumirRepuesto`, …) **no** implica
@@ -126,6 +129,7 @@ desplegable y tablas con desplazamiento contenido.
 - Clientes: listar, consultar, crear, actualizar/activar/desactivar, con
   validación de campos que replica el DTO, manejo de 400/404/409 y errores por
   campo, estados de carga/vacío/error, paginación y búsqueda en cliente.
+- Equipos: registrar, editar, activar/desactivar, buscar, filtrar por cliente y consultar historial.
 - Navegación completa, sesión (modo honesto sin autenticación), dashboard,
   mapa de integración.
 
@@ -139,13 +143,13 @@ Toda pantalla y flujo está construido y navegable, pero su acción permanece
 deshabilitada porque falta el endpoint. Cada una indica el método/ruta requerido
 y el procedimiento SQL de referencia:
 
-- Equipos, órdenes (listado y expediente), dashboard (6 métricas + actividad),
+- Órdenes (listado y expediente), dashboard (6 métricas + actividad),
   diagnóstico, reparación, actividades, consumo de repuestos, inventario,
   kardex, repuestos, bodegas, proveedores, compras (registro/recepción/anulación),
   facturación (emisión/anulación), pagos, entrega y administración.
 - Los **12 reportes** (R01–R12) listados desde `03_Reportes.sql`.
-- **Nueva orden**: el paso *Cliente* ya usa la API real; los pasos de equipo y
-  confirmación quedan bloqueados (`POST /api/ordenes` → `spCrearOrden`).
+- **Nueva orden**: Cliente y Equipo usan sus APIs reales. La confirmación sigue
+  pendiente de autenticación y `POST /api/ordenes` → `spCrearOrden`.
 
 ### Pendiente de backend de forma explícita
 - **Autenticación y sesión** (`/api/auth/login`, `/api/auth/sesion`). No se
@@ -165,8 +169,7 @@ y el procedimiento SQL de referencia:
    triggers). Sin endpoint de sesión, el frontend no puede aportar ese actor; la
    creación de orden, diagnóstico, consumo, etc. quedan pendientes de esa pieza.
 3. **Sin CORS**: se resolvió con proxy de Vite en desarrollo; en producción el
-   backend deberá exponer CORS o servirse bajo el mismo origen (no se alteró el
-   backend).
+   backend deberá exponer CORS o servirse bajo el mismo origen.
 4. **Nombres JSON**: el proyecto usa PascalCase por `queryForList`; cualquier
    futura capa de mapeo a camelCase debe actualizar `src/types/api.ts` y los
    servicios, no darse por sentado.

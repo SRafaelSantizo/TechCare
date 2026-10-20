@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Check, Info } from "lucide-react";
 import { PageHeader, Card } from "../../components/ui/Card";
@@ -12,22 +13,27 @@ import { PRIORIDADES, nombreTipoCliente } from "../../services/catalogos";
 import { mensajeDeError } from "../../services/errors";
 import { normalizar } from "../../utils/format";
 import type { Cliente } from "../../types/api";
+import { equiposApi } from "../../services/equipos";
 
 const PASOS = ["Cliente", "Equipo", "Problema", "Confirmar"] as const;
 
 /**
  * Flujo guiado de recepcion de un equipo.
  *
- * El paso "Cliente" usa la unica API real disponible (GET /api/clientes).
- * Los pasos restantes dependen de endpoints que aun no existen
- * (equipos, POST /api/ordenes -> spCrearOrden) y se muestran como pendientes:
- * no se permite confirmar ni se genera NumeroOrden en el navegador.
+ * Cliente y Equipo consultan sus APIs reales. Confirmar el ingreso requiere
+ * autenticacion y POST /api/ordenes; permanece deshabilitado hasta integrarlos.
  */
 export function OrdenNuevaPage() {
   const [paso, setPaso] = useState(0);
   const [clienteSeleccionado, setClienteSeleccionado] = useState<Cliente | null>(null);
   const { data, isLoading, isError, error, refetch } = useClientes();
   const [busqueda, setBusqueda] = useState("");
+  const [equipoId, setEquipoId] = useState("");
+  const equipos = useQuery({
+    queryKey: ["equipos", "cliente", clienteSeleccionado?.ClienteID],
+    queryFn: ({ signal }) => equiposApi.listar(clienteSeleccionado!.ClienteID, signal),
+    enabled: clienteSeleccionado !== null,
+  });
 
   const filtrados = (data ?? []).filter((c) => {
     const q = normalizar(busqueda);
@@ -97,7 +103,7 @@ export function OrdenNuevaPage() {
                       <Button
                         tamano="sm"
                         variante={clienteSeleccionado?.ClienteID === c.ClienteID ? "primario" : "secundario"}
-                        onClick={() => setClienteSeleccionado(c)}
+                        onClick={() => { setClienteSeleccionado(c); setEquipoId(""); }}
                         disabled={!c.Activo}
                       >
                         {clienteSeleccionado?.ClienteID === c.ClienteID ? "Seleccionado" : "Elegir"}
@@ -129,12 +135,19 @@ export function OrdenNuevaPage() {
                 Cambiar
               </Button>
             </div>
-            <PendingState
-              titulo="Seleccion de equipo en preparacion"
-              descripcion="La seleccion del equipo se habilitara cuando el servidor exponga el catalogo de equipos. No se asignan equipos sin registrar."
-            />
+            {equipos.isLoading ? <LoadingState titulo="Cargando equipos…" /> : equipos.isError ? (
+              <Alert tono="danger" accion={<Button onClick={() => equipos.refetch()}>Reintentar</Button>}>{mensajeDeError(equipos.error)}</Alert>
+            ) : (
+              <Field label="Equipo del cliente" htmlFor="nueva-equipo" requerido>
+                <SelectInput id="nueva-equipo" value={equipoId} onChange={e => setEquipoId(e.target.value)}>
+                  <option value="">Elegir equipo</option>
+                  {equipos.data?.filter(e => e.Activo).map(e => <option key={e.EquipoID} value={e.EquipoID}>{e.NumeroSerie} · {e.Marca} {e.Modelo}</option>)}
+                </SelectInput>
+              </Field>
+            )}
+            <Link to={`/equipos?clienteId=${clienteSeleccionado?.ClienteID}`}><Button variante="fantasma">Registrar o consultar equipos</Button></Link>
             <div className="tc-row tc-row--end">
-              <Button disabled>Continuar</Button>
+              <Button disabled={!equipoId || equipos.isError} onClick={() => setPaso(2)}>Continuar</Button>
             </div>
           </Card>
         ) : null}
@@ -172,6 +185,7 @@ export function OrdenNuevaPage() {
                 Revisar
               </Button>
             </div>
+            <PendingState titulo="Creación de la orden pendiente" descripcion="La selección del cliente y del equipo está disponible. Confirmar el ingreso requiere integrar el registro de órdenes y la sesión del personal." />
           </Card>
         ) : null}
 

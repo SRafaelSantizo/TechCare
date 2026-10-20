@@ -1,0 +1,1519 @@
+diff --git a/08_Equipos_Procedimientos.sql b/08_Equipos_Procedimientos.sql
+new file mode 100644
+index 0000000..3fc053f
+--- /dev/null
++++ b/08_Equipos_Procedimientos.sql
+@@ -0,0 +1,258 @@
++﻿-- Actualización para una TechCare existente. Ejecutar completo en SSMS.
++-- Conserva las tablas y los registros; CREATE OR ALTER permite repetir el script.
++USE [TechCare];
++GO
++SET ANSI_NULLS ON;
++SET QUOTED_IDENTIFIER ON;
++GO
++
++-- Equipos: las consultas y escrituras se resuelven en SQL Server.
++CREATE OR ALTER PROCEDURE dbo.spListarEquipos
++    @ClienteID int = NULL, @Serie nvarchar(max) = NULL, @Activo bit = NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    IF @ClienteID IS NOT NULL AND @ClienteID <= 0
++        THROW 51300, N'El cliente del filtro debe ser mayor que cero.', 1;
++    SET @Serie=NULLIF(LTRIM(RTRIM(@Serie)), N'');
++    IF DATALENGTH(@Serie)>160
++        THROW 51300, N'El filtro de serie admite hasta 80 caracteres.', 1;
++    SELECT e.EquipoID, e.ClienteID, c.Nombre AS Cliente, c.Activo AS ClienteActivo,
++           e.ModeloEquipoID, mo.Nombre AS Modelo, ma.MarcaID, ma.Nombre AS Marca,
++           t.TipoEquipoID, t.Nombre AS TipoEquipo, e.NumeroSerie, e.Descripcion, e.Activo,
++           CONVERT(bit, CASE WHEN EXISTS (SELECT 1 FROM dbo.OrdenServicio o WHERE o.EquipoID=e.EquipoID)
++                            THEN 1 ELSE 0 END) AS TieneOrdenes
++    FROM dbo.Equipo e
++    INNER JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID
++    INNER JOIN dbo.ModeloEquipo mo ON mo.ModeloEquipoID=e.ModeloEquipoID
++    INNER JOIN dbo.Marca ma ON ma.MarcaID=mo.MarcaID
++    INNER JOIN dbo.TipoEquipo t ON t.TipoEquipoID=mo.TipoEquipoID
++    WHERE (@ClienteID IS NULL OR e.ClienteID=@ClienteID)
++      AND (@Serie IS NULL OR CHARINDEX(@Serie, e.NumeroSerie)>0)
++      AND (@Activo IS NULL OR e.Activo=@Activo)
++    ORDER BY e.EquipoID;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spConsultarEquipo
++    @EquipoID int
++AS
++BEGIN
++    SET NOCOUNT ON;
++    IF @EquipoID IS NULL OR @EquipoID<=0
++        THROW 51300, N'El ID debe ser mayor que cero.', 1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Equipo WHERE EquipoID=@EquipoID)
++        THROW 51302, N'El equipo no existe.', 1;
++    SELECT e.EquipoID, e.ClienteID, c.Nombre AS Cliente, c.Activo AS ClienteActivo,
++           e.ModeloEquipoID, mo.Nombre AS Modelo, ma.MarcaID, ma.Nombre AS Marca,
++           t.TipoEquipoID, t.Nombre AS TipoEquipo, e.NumeroSerie, e.Descripcion, e.Activo,
++           CONVERT(bit, CASE WHEN EXISTS (SELECT 1 FROM dbo.OrdenServicio o WHERE o.EquipoID=e.EquipoID)
++                            THEN 1 ELSE 0 END) AS TieneOrdenes
++    FROM dbo.Equipo e
++    INNER JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID
++    INNER JOIN dbo.ModeloEquipo mo ON mo.ModeloEquipoID=e.ModeloEquipoID
++    INNER JOIN dbo.Marca ma ON ma.MarcaID=mo.MarcaID
++    INNER JOIN dbo.TipoEquipo t ON t.TipoEquipoID=mo.TipoEquipoID
++    WHERE e.EquipoID=@EquipoID;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spHistorialEquipo
++    @EquipoID int
++AS
++BEGIN
++    SET NOCOUNT ON;
++    IF @EquipoID IS NULL OR @EquipoID<=0
++        THROW 51300, N'El ID debe ser mayor que cero.', 1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Equipo WHERE EquipoID=@EquipoID)
++        THROW 51302, N'El equipo no existe.', 1;
++    -- La vista conserva equipos sin órdenes; el historial devuelve [] para ellos.
++    SELECT EquipoID, NumeroSerie, ClienteID, Cliente, OrdenID, NumeroOrden, FechaIngreso, EstadoCodigo,
++           FechaDiagnostico, Diagnostico, ReparacionID, FechaInicio, FechaFin, DescripcionTrabajo,
++           FacturaID, Total, Saldo, FechaEntrega
++    FROM dbo.vHistorialEquipo
++    WHERE EquipoID=@EquipoID AND OrdenID IS NOT NULL
++    ORDER BY FechaIngreso DESC, OrdenID DESC;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spRegistrarEquipo
++    @ClienteID int, @ModeloEquipoID int, @NumeroSerie nvarchar(max),
++    @Descripcion nvarchar(max), @Activo bit
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    DECLARE @Resultado TABLE (
++        EquipoID int, ClienteID int, ModeloEquipoID int, NumeroSerie varchar(80),
++        Descripcion nvarchar(500), Activo bit
++    );
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION;
++        ELSE SAVE TRANSACTION spRegistrarEquipo;
++        SET @NumeroSerie=NULLIF(LTRIM(RTRIM(@NumeroSerie)), N'');
++        SET @Descripcion=NULLIF(LTRIM(RTRIM(@Descripcion)), N'');
++        -- Parámetros amplios para rechazar textos largos antes de convertirlos a las columnas.
++        IF @NumeroSerie IS NULL OR DATALENGTH(CONVERT(varchar(max), @NumeroSerie))>80
++            THROW 51300, N'La serie es obligatoria y admite hasta 80 caracteres.', 1;
++        IF @Descripcion IS NULL OR DATALENGTH(@Descripcion)>1000
++            THROW 51300, N'La descripción es obligatoria y admite hasta 500 caracteres.', 1;
++        IF @Activo IS NULL
++            THROW 51300, N'Activo es obligatorio.', 1;
++        IF @ClienteID IS NULL OR NOT EXISTS (
++            SELECT 1 FROM dbo.Cliente WITH (HOLDLOCK) WHERE ClienteID=@ClienteID)
++            THROW 51301, N'El cliente no existe.', 1;
++        IF @Activo=1 AND EXISTS (
++            SELECT 1 FROM dbo.Cliente WHERE ClienteID=@ClienteID AND Activo=0)
++            THROW 51301, N'Un equipo activo requiere un cliente activo.', 1;
++        IF @ModeloEquipoID IS NULL OR NOT EXISTS (
++            SELECT 1 FROM dbo.ModeloEquipo WITH (HOLDLOCK) WHERE ModeloEquipoID=@ModeloEquipoID)
++            THROW 51301, N'El modelo de equipo no existe.', 1;
++        IF EXISTS (SELECT 1 FROM dbo.Equipo WHERE NumeroSerie=@NumeroSerie)
++            THROW 51303, N'La serie ya está registrada en otro equipo.', 1;
++        INSERT dbo.Equipo (ClienteID, ModeloEquipoID, NumeroSerie, Descripcion, Activo)
++        OUTPUT inserted.EquipoID, inserted.ClienteID, inserted.ModeloEquipoID,
++               inserted.NumeroSerie, inserted.Descripcion, inserted.Activo INTO @Resultado
++        VALUES (@ClienteID, @ModeloEquipoID, @NumeroSerie, @Descripcion, @Activo);
++        IF @Propia=1 COMMIT TRANSACTION;
++        -- La respuesta conserva los valores de esta escritura.
++    SELECT e.EquipoID, e.ClienteID, c.Nombre AS Cliente, c.Activo AS ClienteActivo,
++           e.ModeloEquipoID, mo.Nombre AS Modelo, ma.MarcaID, ma.Nombre AS Marca,
++           t.TipoEquipoID, t.Nombre AS TipoEquipo, e.NumeroSerie, e.Descripcion, e.Activo,
++           CONVERT(bit, CASE WHEN EXISTS (SELECT 1 FROM dbo.OrdenServicio o WHERE o.EquipoID=e.EquipoID)
++                            THEN 1 ELSE 0 END) AS TieneOrdenes
++    FROM @Resultado e
++    INNER JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID
++    INNER JOIN dbo.ModeloEquipo mo ON mo.ModeloEquipoID=e.ModeloEquipoID
++    INNER JOIN dbo.Marca ma ON ma.MarcaID=mo.MarcaID
++    INNER JOIN dbo.TipoEquipo t ON t.TipoEquipoID=mo.TipoEquipoID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION spRegistrarEquipo;
++        IF ERROR_NUMBER() IN (2601,2627)
++            THROW 51303, N'La serie ya está registrada en otro equipo.', 1;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spActualizarEquipo
++    @EquipoID int,
++    @ClienteID int, @ModeloEquipoID int, @NumeroSerie nvarchar(max),
++    @Descripcion nvarchar(max), @Activo bit
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    DECLARE @Resultado TABLE (
++        EquipoID int, ClienteID int, ModeloEquipoID int, NumeroSerie varchar(80),
++        Descripcion nvarchar(500), Activo bit
++    );
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION;
++        ELSE SAVE TRANSACTION spActualizarEquipo;
++        IF @EquipoID IS NULL OR @EquipoID<=0
++            THROW 51300, N'El ID debe ser mayor que cero.', 1;
++        IF NOT EXISTS (SELECT 1 FROM dbo.Equipo WITH (UPDLOCK, HOLDLOCK) WHERE EquipoID=@EquipoID)
++            THROW 51302, N'El equipo no existe.', 1;
++        SET @NumeroSerie=NULLIF(LTRIM(RTRIM(@NumeroSerie)), N'');
++        SET @Descripcion=NULLIF(LTRIM(RTRIM(@Descripcion)), N'');
++        -- Parámetros amplios para rechazar textos largos antes de convertirlos a las columnas.
++        IF @NumeroSerie IS NULL OR DATALENGTH(CONVERT(varchar(max), @NumeroSerie))>80
++            THROW 51300, N'La serie es obligatoria y admite hasta 80 caracteres.', 1;
++        IF @Descripcion IS NULL OR DATALENGTH(@Descripcion)>1000
++            THROW 51300, N'La descripción es obligatoria y admite hasta 500 caracteres.', 1;
++        IF @Activo IS NULL
++            THROW 51300, N'Activo es obligatorio.', 1;
++        IF @ClienteID IS NULL OR NOT EXISTS (
++            SELECT 1 FROM dbo.Cliente WITH (HOLDLOCK) WHERE ClienteID=@ClienteID)
++            THROW 51301, N'El cliente no existe.', 1;
++        IF @Activo=1 AND EXISTS (
++            SELECT 1 FROM dbo.Cliente WHERE ClienteID=@ClienteID AND Activo=0)
++            THROW 51301, N'Un equipo activo requiere un cliente activo.', 1;
++        IF @ModeloEquipoID IS NULL OR NOT EXISTS (
++            SELECT 1 FROM dbo.ModeloEquipo WITH (HOLDLOCK) WHERE ModeloEquipoID=@ModeloEquipoID)
++            THROW 51301, N'El modelo de equipo no existe.', 1;
++        IF EXISTS (SELECT 1 FROM dbo.OrdenServicio WITH (HOLDLOCK) WHERE EquipoID=@EquipoID)
++           AND EXISTS (SELECT 1 FROM dbo.Equipo WHERE EquipoID=@EquipoID AND
++               (ClienteID<>@ClienteID OR ModeloEquipoID<>@ModeloEquipoID OR NumeroSerie<>@NumeroSerie))
++            THROW 51304, N'Equipo con historial: propietario, serie y modelo no se cambian.', 1;
++        IF EXISTS (SELECT 1 FROM dbo.Equipo WHERE NumeroSerie=@NumeroSerie AND EquipoID<>@EquipoID)
++            THROW 51303, N'La serie ya está registrada en otro equipo.', 1;
++        UPDATE dbo.Equipo
++        SET ClienteID=@ClienteID, ModeloEquipoID=@ModeloEquipoID, NumeroSerie=@NumeroSerie,
++            Descripcion=@Descripcion, Activo=@Activo
++        OUTPUT inserted.EquipoID, inserted.ClienteID, inserted.ModeloEquipoID,
++               inserted.NumeroSerie, inserted.Descripcion, inserted.Activo INTO @Resultado
++        WHERE EquipoID=@EquipoID;
++        IF @Propia=1 COMMIT TRANSACTION;
++        -- La respuesta conserva los valores de esta escritura.
++    SELECT e.EquipoID, e.ClienteID, c.Nombre AS Cliente, c.Activo AS ClienteActivo,
++           e.ModeloEquipoID, mo.Nombre AS Modelo, ma.MarcaID, ma.Nombre AS Marca,
++           t.TipoEquipoID, t.Nombre AS TipoEquipo, e.NumeroSerie, e.Descripcion, e.Activo,
++           CONVERT(bit, CASE WHEN EXISTS (SELECT 1 FROM dbo.OrdenServicio o WHERE o.EquipoID=e.EquipoID)
++                            THEN 1 ELSE 0 END) AS TieneOrdenes
++    FROM @Resultado e
++    INNER JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID
++    INNER JOIN dbo.ModeloEquipo mo ON mo.ModeloEquipoID=e.ModeloEquipoID
++    INNER JOIN dbo.Marca ma ON ma.MarcaID=mo.MarcaID
++    INNER JOIN dbo.TipoEquipo t ON t.TipoEquipoID=mo.TipoEquipoID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION spActualizarEquipo;
++        IF ERROR_NUMBER() IN (2601,2627)
++            THROW 51303, N'La serie ya está registrada en otro equipo.', 1;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spListarTiposEquipo
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SELECT TipoEquipoID, Nombre FROM dbo.TipoEquipo ORDER BY Nombre, TipoEquipoID;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spListarMarcas
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SELECT MarcaID, Nombre FROM dbo.Marca ORDER BY Nombre, MarcaID;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spListarModelosEquipo
++    @MarcaID int = NULL, @TipoEquipoID int = NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    IF (@MarcaID IS NOT NULL AND @MarcaID<=0) OR (@TipoEquipoID IS NOT NULL AND @TipoEquipoID<=0)
++        THROW 51300, N'Los filtros de marca y tipo deben ser mayores que cero.', 1;
++    SELECT mo.ModeloEquipoID, mo.Nombre, mo.MarcaID, ma.Nombre AS Marca,
++           mo.TipoEquipoID, t.Nombre AS TipoEquipo
++    FROM dbo.ModeloEquipo mo
++    INNER JOIN dbo.Marca ma ON ma.MarcaID=mo.MarcaID
++    INNER JOIN dbo.TipoEquipo t ON t.TipoEquipoID=mo.TipoEquipoID
++    WHERE (@MarcaID IS NULL OR mo.MarcaID=@MarcaID)
++      AND (@TipoEquipoID IS NULL OR mo.TipoEquipoID=@TipoEquipoID)
++    ORDER BY ma.Nombre, mo.Nombre, mo.ModeloEquipoID;
++END;
++GO
++
++-- Equipos se mantiene exclusivamente mediante sus procedimientos.
++DENY INSERT, UPDATE, DELETE ON OBJECT::dbo.Equipo TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spListarEquipos TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spConsultarEquipo TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spHistorialEquipo TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spRegistrarEquipo TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spActualizarEquipo TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spListarTiposEquipo TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spListarMarcas TO techcare_app;
++GRANT EXECUTE ON OBJECT::dbo.spListarModelosEquipo TO techcare_app;
++GO
+diff --git a/09_Pruebas_Equipos.sql b/09_Pruebas_Equipos.sql
+new file mode 100644
+index 0000000..4ab906b
+--- /dev/null
++++ b/09_Pruebas_Equipos.sql
+@@ -0,0 +1,135 @@
++﻿-- Ejecutar completo en SSMS después del 08, usando una cuenta de pruebas con permisos de administración.
++-- Cada caso se revierte. Los únicos registros temporales persistidos son dos clientes y dos equipos;
++-- se eliminan al terminar. No se cambia ninguna orden, cliente ni equipo preexistente.
++-- Requiere los catálogos y un usuario de RECEPCION del conjunto de demostración.
++USE [TechCare];
++GO
++SET NOCOUNT ON;
++SET XACT_ABORT ON;
++IF @@TRANCOUNT<>0 THROW 51981,N'Ejecutá las pruebas sin una transacción previa abierta.',1;
++DECLARE @Token varchar(20)=LEFT(REPLACE(CONVERT(varchar(36),NEWID()),'-',''),20);
++DECLARE @Cliente1 int,@Cliente2 int,@Equipo1 int,@Equipo2 int,
++ @Modelo1 int=(SELECT MIN(ModeloEquipoID) FROM dbo.ModeloEquipo),@Modelo2 int,
++ @Recepcion int=(SELECT MIN(UsuarioID) FROM dbo.Usuario WHERE Activo=1 AND dbo.fnTieneRol(UsuarioID,'RECEPCION')=1),
++ @TipoCliente tinyint=(SELECT MIN(TipoClienteID) FROM dbo.TipoCliente),@Marca int,@Tipo int;
++SET @Modelo2=(SELECT MIN(ModeloEquipoID) FROM dbo.ModeloEquipo WHERE ModeloEquipoID<>@Modelo1);
++IF @Modelo1 IS NULL OR @Modelo2 IS NULL OR @Recepcion IS NULL OR @TipoCliente IS NULL
++ THROW 51982,N'Faltan catálogos, dos modelos o un usuario de RECEPCION para las pruebas.',1;
++SELECT @Marca=MarcaID,@Tipo=TipoEquipoID FROM dbo.ModeloEquipo WHERE ModeloEquipoID=@Modelo1;
++DECLARE @Serie1 nvarchar(80)=N'TEST-EQ-A-'+@Token,@Serie2 nvarchar(80)=N'TEST-EQ-B-'+@Token,
++ @NuevaSerie nvarchar(80)=N'TEST-EQ-C-'+@Token,@NumeroOrden varchar(30)='TEST-EQ-'+@Token,
++ @NIT1 varchar(20)='EQA'+LEFT(@Token,17),@NIT2 varchar(20)='EQB'+LEFT(@Token,17);
++BEGIN TRY
++ BEGIN TRANSACTION;
++ INSERT dbo.Cliente(TipoClienteID,NIT,Nombre,Activo) VALUES(@TipoCliente,@NIT1,N'PRUEBA temporal Equipos A',1);
++ SET @Cliente1=CONVERT(int,SCOPE_IDENTITY());
++ INSERT dbo.Cliente(TipoClienteID,NIT,Nombre,Activo) VALUES(@TipoCliente,@NIT2,N'PRUEBA temporal Equipos B',0);
++ SET @Cliente2=CONVERT(int,SCOPE_IDENTITY());
++ INSERT dbo.Equipo(ClienteID,ModeloEquipoID,NumeroSerie,Descripcion,Activo)
++ VALUES(@Cliente1,@Modelo1,@Serie1,N'PRUEBA temporal Equipos A',1);
++ SET @Equipo1=CONVERT(int,SCOPE_IDENTITY());
++ INSERT dbo.Equipo(ClienteID,ModeloEquipoID,NumeroSerie,Descripcion,Activo)
++ VALUES(@Cliente1,@Modelo1,@Serie2,N'PRUEBA temporal Equipos B',1);
++ SET @Equipo2=CONVERT(int,SCOPE_IDENTITY());
++ COMMIT TRANSACTION;
++END TRY
++BEGIN CATCH
++ IF XACT_STATE()<>0 ROLLBACK TRANSACTION;
++ THROW;
++END CATCH;
++DECLARE @Casos TABLE(ID int IDENTITY(1,1),Caso nvarchar(200),Sentencia nvarchar(max),ErrorEsperado int);
++INSERT @Casos(Caso,Sentencia,ErrorEsperado) VALUES
++(N'Registrar devuelve ID y conserva Unicode',N'DECLARE @R TABLE (EquipoID int, ClienteID int, Cliente nvarchar(150), ClienteActivo bit,
++ModeloEquipoID int, Modelo nvarchar(80), MarcaID int, Marca nvarchar(60), TipoEquipoID tinyint,
++TipoEquipo nvarchar(50), NumeroSerie varchar(80), Descripcion nvarchar(500), Activo bit, TieneOrdenes bit);
++INSERT @R EXEC dbo.spRegistrarEquipo @Cliente1, @Modelo1, @NuevaSerie, N''Revisión ñ 漢字'', 1;
++IF NOT EXISTS(SELECT 1 FROM @R WHERE EquipoID>0 AND Descripcion=N''Revisión ñ 漢字'' AND TieneOrdenes=0) THROW 51980,N''Respuesta de registro incorrecta.'',1;',0),
++(N'Actualizar conserva la misma serie',N'DECLARE @R TABLE (EquipoID int, ClienteID int, Cliente nvarchar(150), ClienteActivo bit,
++ModeloEquipoID int, Modelo nvarchar(80), MarcaID int, Marca nvarchar(60), TipoEquipoID tinyint,
++TipoEquipo nvarchar(50), NumeroSerie varchar(80), Descripcion nvarchar(500), Activo bit, TieneOrdenes bit);
++INSERT @R EXEC dbo.spActualizarEquipo @Equipo1, @Cliente1, @Modelo1, @Serie1, N''Descripción modificada'', 1;
++IF NOT EXISTS(SELECT 1 FROM @R WHERE EquipoID=@Equipo1 AND NumeroSerie=@Serie1 AND Descripcion=N''Descripción modificada'') THROW 51980,N''Actualización incorrecta.'',1;',0),
++(N'Desactivar conserva el registro',N'EXEC dbo.spActualizarEquipo @Equipo1,@Cliente1,@Modelo1,@Serie1,N''Equipo inactivo'',0; IF NOT EXISTS(SELECT 1 FROM dbo.Equipo WHERE EquipoID=@Equipo1 AND Activo=0) THROW 51980,N''No conservó el registro.'',1;',0),
++(N'Serie duplicada al crear',N'EXEC dbo.spRegistrarEquipo @Cliente1,@Modelo1,@Serie1,N''Duplicado'',1;',51303),
++(N'Serie de otro equipo al actualizar',N'EXEC dbo.spActualizarEquipo @Equipo1,@Cliente1,@Modelo1,@Serie2,N''Duplicado'',1;',51303),
++(N'Cliente inexistente',N'EXEC dbo.spRegistrarEquipo -1,@Modelo1,@NuevaSerie,N''Cliente inválido'',1;',51301),
++(N'Modelo inexistente',N'EXEC dbo.spRegistrarEquipo @Cliente1,-1,@NuevaSerie,N''Modelo inválido'',1;',51301),
++(N'Equipo activo requiere cliente activo',N'EXEC dbo.spRegistrarEquipo @Cliente2,@Modelo1,@NuevaSerie,N''Cliente inactivo'',1;',51301),
++(N'Serie obligatoria en la BD',N'EXEC dbo.spRegistrarEquipo @Cliente1,@Modelo1,N''   '',N''Prueba'',1;',51300),
++(N'Descripción obligatoria en la BD',N'EXEC dbo.spRegistrarEquipo @Cliente1,@Modelo1,@NuevaSerie,N''   '',1;',51300),
++(N'Serie larga rechazada sin truncar',N'DECLARE @Texto nvarchar(max)=REPLICATE(N''X'',81); EXEC dbo.spRegistrarEquipo @Cliente1,@Modelo1,@Texto,N''Prueba'',1;',51300),
++(N'Descripción larga rechazada sin truncar',N'DECLARE @Texto nvarchar(max)=REPLICATE(N''X'',501); EXEC dbo.spRegistrarEquipo @Cliente1,@Modelo1,@NuevaSerie,@Texto,1;',51300),
++(N'Activo obligatorio en la BD',N'EXEC dbo.spRegistrarEquipo @Cliente1,@Modelo1,@NuevaSerie,N''Prueba'',NULL;',51300),
++(N'Consultar equipo inexistente',N'EXEC dbo.spConsultarEquipo 2147483647;',51302),
++(N'Consultar ID no positivo',N'EXEC dbo.spConsultarEquipo 0;',51300),
++(N'Actualizar equipo inexistente',N'EXEC dbo.spActualizarEquipo 2147483647,@Cliente1,@Modelo1,@NuevaSerie,N''Prueba'',1;',51302),
++(N'Filtro de cliente y serie',N'DECLARE @R TABLE (EquipoID int, ClienteID int, Cliente nvarchar(150), ClienteActivo bit,
++ModeloEquipoID int, Modelo nvarchar(80), MarcaID int, Marca nvarchar(60), TipoEquipoID tinyint,
++TipoEquipo nvarchar(50), NumeroSerie varchar(80), Descripcion nvarchar(500), Activo bit, TieneOrdenes bit);
++INSERT @R EXEC dbo.spListarEquipos @ClienteID=@Cliente1,@Serie=@Serie1,@Activo=1; IF (SELECT COUNT(*) FROM @R)<>1 OR NOT EXISTS(SELECT 1 FROM @R WHERE EquipoID=@Equipo1) THROW 51980,N''Filtro incorrecto.'',1;',0),
++(N'Serie con comodines se busca como texto literal',N'DECLARE @R TABLE (EquipoID int, ClienteID int, Cliente nvarchar(150), ClienteActivo bit,
++ModeloEquipoID int, Modelo nvarchar(80), MarcaID int, Marca nvarchar(60), TipoEquipoID tinyint,
++TipoEquipo nvarchar(50), NumeroSerie varchar(80), Descripcion nvarchar(500), Activo bit, TieneOrdenes bit);
++INSERT @R EXEC dbo.spListarEquipos @ClienteID=@Cliente1,@Serie=N''%_'',@Activo=NULL; IF EXISTS(SELECT 1 FROM @R) THROW 51980,N''Interpretó comodines como patrón.'',1;',0),
++(N'Historial sin órdenes devuelve cero filas',N'DECLARE @H TABLE(EquipoID int, NumeroSerie varchar(80), ClienteID int, Cliente nvarchar(150), OrdenID int, NumeroOrden varchar(30), FechaIngreso datetime2, EstadoCodigo varchar(30), FechaDiagnostico datetime2, Diagnostico nvarchar(2000), ReparacionID int, FechaInicio datetime2, FechaFin datetime2, DescripcionTrabajo nvarchar(2000), FacturaID int, Total decimal(18,2), Saldo decimal(18,2), FechaEntrega datetime2); INSERT @H EXEC dbo.spHistorialEquipo @Equipo1; IF EXISTS(SELECT 1 FROM @H) THROW 51980,N''Historial vacío incorrecto.'',1;',0),
++(N'Historial de equipo inexistente',N'EXEC dbo.spHistorialEquipo 2147483647;',51302),
++(N'Equipo con orden indica historial',N'DECLARE @Orden int; EXEC dbo.spCrearOrden @NumeroOrden=@NumeroOrden, @EquipoID=@Equipo1, @UsuarioID=@Recepcion, @Problema=N''Prueba reversible'', @OrdenID=@Orden OUTPUT;
++DECLARE @R TABLE (EquipoID int, ClienteID int, Cliente nvarchar(150), ClienteActivo bit,
++ModeloEquipoID int, Modelo nvarchar(80), MarcaID int, Marca nvarchar(60), TipoEquipoID tinyint,
++TipoEquipo nvarchar(50), NumeroSerie varchar(80), Descripcion nvarchar(500), Activo bit, TieneOrdenes bit);
++INSERT @R EXEC dbo.spConsultarEquipo @Equipo1; IF NOT EXISTS(SELECT 1 FROM @R WHERE TieneOrdenes=1) THROW 51980,N''No indicó historial.'',1;',0),
++(N'No cambiar serie de equipo con órdenes',N'DECLARE @Orden int; EXEC dbo.spCrearOrden @NumeroOrden=@NumeroOrden, @EquipoID=@Equipo1, @UsuarioID=@Recepcion, @Problema=N''Prueba reversible'', @OrdenID=@Orden OUTPUT;
++EXEC dbo.spActualizarEquipo @Equipo1,@Cliente1,@Modelo1,@NuevaSerie,N''Prueba'',1;',51304),
++(N'No cambiar propietario de equipo con órdenes',N'DECLARE @Orden int; EXEC dbo.spCrearOrden @NumeroOrden=@NumeroOrden, @EquipoID=@Equipo1, @UsuarioID=@Recepcion, @Problema=N''Prueba reversible'', @OrdenID=@Orden OUTPUT;
++EXEC dbo.spActualizarEquipo @Equipo1,@Cliente2,@Modelo1,@Serie1,N''Prueba'',0;',51304),
++(N'No cambiar modelo de equipo con órdenes',N'DECLARE @Orden int; EXEC dbo.spCrearOrden @NumeroOrden=@NumeroOrden, @EquipoID=@Equipo1, @UsuarioID=@Recepcion, @Problema=N''Prueba reversible'', @OrdenID=@Orden OUTPUT;
++EXEC dbo.spActualizarEquipo @Equipo1,@Cliente1,@Modelo2,@Serie1,N''Prueba'',1;',51304),
++(N'Con historial sí permite descripción y estado',N'DECLARE @Orden int; EXEC dbo.spCrearOrden @NumeroOrden=@NumeroOrden, @EquipoID=@Equipo1, @UsuarioID=@Recepcion, @Problema=N''Prueba reversible'', @OrdenID=@Orden OUTPUT;
++EXEC dbo.spActualizarEquipo @Equipo1,@Cliente1,@Modelo1,@Serie1,N''Descripción de prueba'',0; IF NOT EXISTS(SELECT 1 FROM dbo.Equipo WHERE EquipoID=@Equipo1 AND Activo=0 AND Descripcion=N''Descripción de prueba'') THROW 51980,N''Actualización permitida rechazada.'',1;',0),
++(N'Modelos filtran por marca y tipo',N'DECLARE @M TABLE(ModeloEquipoID int, Nombre nvarchar(80), MarcaID int, Marca nvarchar(60), TipoEquipoID tinyint, TipoEquipo nvarchar(50)); INSERT @M EXEC dbo.spListarModelosEquipo @Marca,@Tipo; IF NOT EXISTS(SELECT 1 FROM @M) OR EXISTS(SELECT 1 FROM @M WHERE MarcaID<>@Marca OR TipoEquipoID<>@Tipo) THROW 51980,N''Filtro de modelos incorrecto.'',1;',0),
++(N'Filtros no positivos rechazados',N'EXEC dbo.spListarModelosEquipo @MarcaID=0;',51300),
++(N'Catálogos reales no vacíos',N'DECLARE @T TABLE(TipoEquipoID tinyint,Nombre nvarchar(50)); DECLARE @M TABLE(MarcaID int,Nombre nvarchar(60)); INSERT @T EXEC dbo.spListarTiposEquipo; INSERT @M EXEC dbo.spListarMarcas; IF NOT EXISTS(SELECT 1 FROM @T) OR NOT EXISTS(SELECT 1 FROM @M) THROW 51980,N''Catálogos vacíos.'',1;',0);
++
++DECLARE @Resultados TABLE(Caso nvarchar(200),Resultado varchar(4),Detalle nvarchar(2000));
++DECLARE @i int=1,@Caso nvarchar(200),@SQL nvarchar(max),@Esperado int;
++WHILE @i<=(SELECT COUNT(*) FROM @Casos)
++BEGIN
++ SELECT @Caso=Caso,@SQL=Sentencia,@Esperado=ErrorEsperado FROM @Casos WHERE ID=@i;
++ BEGIN TRY
++  BEGIN TRANSACTION;
++  EXEC sys.sp_executesql @SQL,
++   N'@Cliente1 int,@Cliente2 int,@Modelo1 int,@Modelo2 int,@Equipo1 int,@Equipo2 int,@Serie1 nvarchar(80),@Serie2 nvarchar(80),@NuevaSerie nvarchar(80),@Recepcion int,@NumeroOrden varchar(30),@Marca int,@Tipo int',
++   @Cliente1,@Cliente2,@Modelo1,@Modelo2,@Equipo1,@Equipo2,@Serie1,@Serie2,@NuevaSerie,@Recepcion,@NumeroOrden,@Marca,@Tipo;
++  IF XACT_STATE()<>0 ROLLBACK TRANSACTION;
++  INSERT @Resultados VALUES(@Caso,CASE WHEN @Esperado=0 THEN 'PASS' ELSE 'FAIL' END,
++   CASE WHEN @Esperado=0 THEN NULL ELSE N'No rechazó la operación inválida.' END);
++ END TRY
++ BEGIN CATCH
++  DECLARE @Error int=ERROR_NUMBER(),@Mensaje nvarchar(2000)=ERROR_MESSAGE();
++  IF XACT_STATE()<>0 ROLLBACK TRANSACTION;
++  INSERT @Resultados VALUES(@Caso,CASE WHEN @Error=@Esperado THEN 'PASS' ELSE 'FAIL' END,
++   CASE WHEN @Error=@Esperado THEN NULL ELSE CONCAT(N'Error ',@Error,N': ',@Mensaje) END);
++ END CATCH;
++ SET @i+=1;
++END;
++-- Limpieza atómica de los cuatro registros de preparación, siempre por sus IDs propios.
++BEGIN TRY
++ BEGIN TRANSACTION;
++ DELETE FROM dbo.Equipo WHERE EquipoID IN (@Equipo1,@Equipo2);
++ DELETE FROM dbo.Cliente WHERE ClienteID IN (@Cliente1,@Cliente2);
++ COMMIT TRANSACTION;
++END TRY
++BEGIN CATCH
++ IF XACT_STATE()<>0 ROLLBACK TRANSACTION;
++ SELECT * FROM @Resultados;
++ THROW;
++END CATCH;
++INSERT @Resultados VALUES(N'Errores y pruebas sin registros adicionales',
++ CASE WHEN EXISTS(SELECT 1 FROM dbo.Equipo WHERE NumeroSerie IN (@Serie1,@Serie2,@NuevaSerie))
++        OR EXISTS(SELECT 1 FROM dbo.Cliente WHERE NIT IN (@NIT1,@NIT2))
++        OR EXISTS(SELECT 1 FROM dbo.OrdenServicio WHERE NumeroOrden=@NumeroOrden)
++      THEN 'FAIL' ELSE 'PASS' END,NULL);
++SELECT Caso,Resultado,Detalle FROM @Resultados;
++IF EXISTS(SELECT 1 FROM @Resultados WHERE Resultado='FAIL')
++ THROW 51983,N'Falló una prueba de Equipos; revisá el detalle de los resultados.',1;
++GO
+diff --git a/backend/src/main/java/com/techcare/backend/CatalogoEquipoController.java b/backend/src/main/java/com/techcare/backend/CatalogoEquipoController.java
+new file mode 100644
+index 0000000..b01629a
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/CatalogoEquipoController.java
+@@ -0,0 +1,34 @@
++package com.techcare.backend;
++
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.web.bind.annotation.*;
++
++import java.util.List;
++import java.util.Map;
++
++@RestController
++@RequestMapping("/api/catalogos")
++public class CatalogoEquipoController {
++    private final JdbcTemplate jdbc;
++
++    public CatalogoEquipoController(JdbcTemplate jdbc) {
++        this.jdbc = jdbc;
++    }
++
++    @GetMapping("/tipos-equipos")
++    public List<Map<String, Object>> tipos() {
++        return jdbc.queryForList("EXEC dbo.spListarTiposEquipo");
++    }
++
++    @GetMapping("/marcas")
++    public List<Map<String, Object>> marcas() {
++        return jdbc.queryForList("EXEC dbo.spListarMarcas");
++    }
++
++    @GetMapping("/modelos-equipos")
++    public List<Map<String, Object>> modelos(
++            @RequestParam(name = "marcaId", required = false) Integer marcaId,
++            @RequestParam(name = "tipoEquipoId", required = false) Integer tipoEquipoId) {
++        return jdbc.queryForList("EXEC dbo.spListarModelosEquipo ?, ?", marcaId, tipoEquipoId);
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/EquipoApiErrores.java b/backend/src/main/java/com/techcare/backend/EquipoApiErrores.java
+new file mode 100644
+index 0000000..bde26e6
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/EquipoApiErrores.java
+@@ -0,0 +1,67 @@
++package com.techcare.backend;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.dao.DataAccessException;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.http.converter.HttpMessageNotReadableException;
++import org.springframework.web.bind.MethodArgumentNotValidException;
++import org.springframework.web.bind.annotation.ExceptionHandler;
++import org.springframework.web.bind.annotation.RestControllerAdvice;
++import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
++
++import java.sql.SQLException;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++@RestControllerAdvice(assignableTypes = {EquipoController.class, CatalogoEquipoController.class})
++public class EquipoApiErrores {
++    private static final Logger LOG = LoggerFactory.getLogger(EquipoApiErrores.class);
++
++    @ExceptionHandler(MethodArgumentNotValidException.class)
++    public ResponseEntity<Map<String, Object>> validacion(MethodArgumentNotValidException ex) {
++        Map<String, String> errores = new LinkedHashMap<>();
++        ex.getBindingResult().getFieldErrors().forEach(e -> errores.putIfAbsent(e.getField(), e.getDefaultMessage()));
++        return ResponseEntity.badRequest().body(Map.of(
++                "estado", 400, "mensaje", "Revisá los datos del equipo.", "errores", errores));
++    }
++
++    @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
++    public ResponseEntity<Map<String, Object>> entrada(Exception ex) {
++        return error(HttpStatus.BAD_REQUEST, "La solicitud contiene un JSON, ID o filtro inválido.");
++    }
++
++    @ExceptionHandler(DataAccessException.class)
++    public ResponseEntity<Map<String, Object>> sql(DataAccessException ex) {
++        for (Throwable causa = ex; causa != null; causa = causa.getCause()) {
++            if (!(causa instanceof SQLException sql)) continue;
++            for (SQLException actual = sql; actual != null; actual = actual.getNextException()) {
++                switch (actual.getErrorCode()) {
++                    case 51300:
++                    case 51301:
++                        return error(HttpStatus.BAD_REQUEST, actual.getMessage());
++                    case 51302:
++                        return error(HttpStatus.NOT_FOUND, "El equipo no existe.");
++                    case 51303:
++                    case 2601:
++                    case 2627:
++                        return error(HttpStatus.CONFLICT, "La serie ya está registrada en otro equipo.");
++                    case 51304:
++                    case 51109:
++                        return error(HttpStatus.CONFLICT, "El equipo tiene órdenes: no se puede cambiar su propietario, serie ni modelo.");
++                    case 547:
++                        return error(HttpStatus.CONFLICT, "Los datos ya no cumplen las relaciones de la base. Actualizá y volvé a intentar.");
++                    default:
++                        break;
++                }
++            }
++        }
++        LOG.error("No se pudo completar una operación de Equipos o sus catálogos.", ex);
++        return error(HttpStatus.INTERNAL_SERVER_ERROR, "No se pudo completar la operación. Revisá el backend.");
++    }
++
++    private ResponseEntity<Map<String, Object>> error(HttpStatus estado, String mensaje) {
++        return ResponseEntity.status(estado).body(Map.of("estado", estado.value(), "mensaje", mensaje));
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/EquipoController.java b/backend/src/main/java/com/techcare/backend/EquipoController.java
+new file mode 100644
+index 0000000..57028a1
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/EquipoController.java
+@@ -0,0 +1,81 @@
++package com.techcare.backend;
++
++import jakarta.validation.Valid;
++import jakarta.validation.constraints.Min;
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.NotNull;
++import jakarta.validation.constraints.Size;
++import org.springframework.dao.DataRetrievalFailureException;
++import org.springframework.http.ResponseEntity;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.web.bind.annotation.*;
++
++import java.net.URI;
++import java.util.List;
++import java.util.Map;
++
++@RestController
++@RequestMapping("/api/equipos")
++public class EquipoController {
++    private final JdbcTemplate jdbc;
++
++    public EquipoController(JdbcTemplate jdbc) {
++        this.jdbc = jdbc;
++    }
++
++    @GetMapping
++    public List<Map<String, Object>> listar(
++            @RequestParam(name = "clienteId", required = false) Integer clienteId,
++            @RequestParam(name = "serie", required = false) String serie,
++            @RequestParam(name = "activo", required = false) Boolean activo) {
++        return jdbc.queryForList("EXEC dbo.spListarEquipos ?, ?, ?", clienteId, serie, activo);
++    }
++
++    @GetMapping("/{id}")
++    public Map<String, Object> consultar(@PathVariable("id") int id) {
++        return unaFila(jdbc.queryForList("EXEC dbo.spConsultarEquipo ?", id));
++    }
++
++    @GetMapping("/{id}/historial")
++    public List<Map<String, Object>> historial(@PathVariable("id") int id) {
++        return jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", id);
++    }
++
++    @PostMapping
++    public ResponseEntity<Map<String, Object>> registrar(@Valid @RequestBody EquipoDatos datos) {
++        Map<String, Object> equipo = unaFila(jdbc.queryForList(
++                "EXEC dbo.spRegistrarEquipo ?, ?, ?, ?, ?",
++                datos.clienteId(), datos.modeloEquipoId(), datos.numeroSerie(), datos.descripcion(), datos.activo()));
++        Number id = (Number) equipo.get("EquipoID");
++        return ResponseEntity.created(URI.create("/api/equipos/" + id.intValue())).body(equipo);
++    }
++
++    @PutMapping("/{id}")
++    public Map<String, Object> actualizar(@PathVariable("id") int id, @Valid @RequestBody EquipoDatos datos) {
++        return unaFila(jdbc.queryForList("EXEC dbo.spActualizarEquipo ?, ?, ?, ?, ?, ?",
++                id, datos.clienteId(), datos.modeloEquipoId(), datos.numeroSerie(), datos.descripcion(), datos.activo()));
++    }
++
++    private Map<String, Object> unaFila(List<Map<String, Object>> filas) {
++        if (filas.size() != 1 || !(filas.get(0).get("EquipoID") instanceof Number)) {
++            throw new DataRetrievalFailureException("El procedimiento no devolvió un equipo válido.");
++        }
++        return filas.get(0);
++    }
++
++    public record EquipoDatos(
++            @NotNull(message = "El cliente es obligatorio.") @Min(value = 1, message = "Elegí un cliente válido.")
++            Integer clienteId,
++            @NotNull(message = "El modelo es obligatorio.") @Min(value = 1, message = "Elegí un modelo válido.")
++            Integer modeloEquipoId,
++            @NotBlank(message = "La serie es obligatoria.") @Size(max = 80, message = "La serie admite hasta 80 caracteres.")
++            String numeroSerie,
++            @NotBlank(message = "La descripción es obligatoria.") @Size(max = 500, message = "La descripción admite hasta 500 caracteres.")
++            String descripcion,
++            @NotNull(message = "Activo es obligatorio: usá true o false.") Boolean activo) {
++        public EquipoDatos {
++            numeroSerie = numeroSerie == null ? null : numeroSerie.strip();
++            descripcion = descripcion == null ? null : descripcion.strip();
++        }
++    }
++}
+diff --git a/backend/src/test/java/com/techcare/backend/EquipoControllerTests.java b/backend/src/test/java/com/techcare/backend/EquipoControllerTests.java
+new file mode 100644
+index 0000000..03c478f
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/EquipoControllerTests.java
+@@ -0,0 +1,175 @@
++package com.techcare.backend;
++
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.springframework.dao.DataAccessResourceFailureException;
++import org.springframework.dao.UncategorizedDataAccessException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
++
++import java.sql.SQLException;
++import java.util.List;
++import java.util.Map;
++
++import static org.mockito.Mockito.*;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++class EquipoControllerTests {
++    private JdbcTemplate jdbc;
++    private MockMvc mvc;
++    private static final String BODY = """
++            {"clienteId":1,"modeloEquipoId":2,"numeroSerie":" SER-001 ","descripcion":" Revisión ñ 漢字 ","activo":true}
++            """;
++    private static final String LISTAR = "EXEC dbo.spListarEquipos ?, ?, ?";
++    private static final String CREAR = "EXEC dbo.spRegistrarEquipo ?, ?, ?, ?, ?";
++    private static final String ACTUALIZAR = "EXEC dbo.spActualizarEquipo ?, ?, ?, ?, ?, ?";
++    private final Map<String, Object> fila = Map.of("EquipoID", 7, "NumeroSerie", "SER-001", "Descripcion", "Revisión ñ 漢字", "Activo", true);
++
++    @BeforeEach
++    void preparar() {
++        jdbc = mock(JdbcTemplate.class);
++        LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
++        validator.afterPropertiesSet();
++        mvc = MockMvcBuilders.standaloneSetup(new EquipoController(jdbc), new CatalogoEquipoController(jdbc))
++                .setControllerAdvice(new EquipoApiErrores()).setValidator(validator).build();
++    }
++
++    @Test
++    void listaSinFiltrosNoInventaDatos() throws Exception {
++        when(jdbc.queryForList(LISTAR, (Object) null, null, null)).thenReturn(List.of());
++        mvc.perform(get("/api/equipos")).andExpect(status().isOk()).andExpect(content().json("[]"));
++        verify(jdbc).queryForList(LISTAR, (Object) null, null, null);
++    }
++
++    @Test
++    void filtrosConservanClienteSerieLiteralYFalse() throws Exception {
++        when(jdbc.queryForList(LISTAR, 1, "100%_", false)).thenReturn(List.of(fila));
++        mvc.perform(get("/api/equipos").param("clienteId", "1").param("serie", "100%_").param("activo", "false"))
++                .andExpect(status().isOk()).andExpect(jsonPath("$[0].EquipoID").value(7));
++        verify(jdbc).queryForList(LISTAR, 1, "100%_", false);
++    }
++
++    @Test
++    void consultaConservaContratoPascalCase() throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spConsultarEquipo ?", 7)).thenReturn(List.of(fila));
++        mvc.perform(get("/api/equipos/7")).andExpect(status().isOk()).andExpect(jsonPath("$.NumeroSerie").value("SER-001"));
++    }
++
++    @Test
++    void altaUsaUnaLlamadaAlProcedimientoDevuelve201YLocation() throws Exception {
++        when(jdbc.queryForList(CREAR, 1, 2, "SER-001", "Revisión ñ 漢字", true)).thenReturn(List.of(fila));
++        mvc.perform(post("/api/equipos").contentType("application/json").content(BODY))
++                .andExpect(status().isCreated()).andExpect(header().string("Location", "/api/equipos/7"))
++                .andExpect(jsonPath("$.Descripcion").value("Revisión ñ 漢字"));
++        verify(jdbc).queryForList(CREAR, 1, 2, "SER-001", "Revisión ñ 漢字", true);
++        verifyNoMoreInteractions(jdbc);
++    }
++
++    @Test
++    void actualizarEnviaElIdYPermiteDesactivar() throws Exception {
++        when(jdbc.queryForList(ACTUALIZAR, 7, 1, 2, "SER-001", "Revisión ñ 漢字", false))
++                .thenReturn(List.of(Map.of("EquipoID", 7, "Activo", false)));
++        mvc.perform(put("/api/equipos/7").contentType("application/json").content(BODY.replace("true", "false")))
++                .andExpect(status().isOk()).andExpect(jsonPath("$.Activo").value(false));
++        verify(jdbc).queryForList(ACTUALIZAR, 7, 1, 2, "SER-001", "Revisión ñ 漢字", false);
++        verifyNoMoreInteractions(jdbc);
++    }
++
++    @Test
++    void camposObligatoriosFallanAntesDeJdbc() throws Exception {
++        mvc.perform(post("/api/equipos").contentType("application/json").content("{}"))
++                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.errores.clienteId").exists())
++                .andExpect(jsonPath("$.errores.modeloEquipoId").exists()).andExpect(jsonPath("$.errores.activo").exists());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test
++    void textosLargosSeRechazanSinTruncarlos() throws Exception {
++        mvc.perform(post("/api/equipos").contentType("application/json").content(BODY.replace(" SER-001 ", "X".repeat(81))))
++                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.errores.numeroSerie").exists());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test
++    void jsonInvalidoSeTraduceA400() throws Exception {
++        mvc.perform(post("/api/equipos").contentType("application/json").content("{mal"))
++                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.estado").value(400));
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test
++    void filtroNoNumericoSeTraduceA400() throws Exception {
++        mvc.perform(get("/api/equipos").param("clienteId", "abc")).andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++
++    @Test
++    void erroresDeReglasSqlSeTraducenA400404Y409() throws Exception {
++        for (int codigo : new int[]{51300, 51301, 51302, 51303, 51304, 51109}) {
++            reset(jdbc);
++            SQLException sql = new SQLException("Regla de prueba", "S0001", codigo);
++            when(jdbc.queryForList("EXEC dbo.spConsultarEquipo ?", 7)).thenThrow(fallo(sql));
++            int esperado = codigo == 51302 ? 404 : (codigo == 51300 || codigo == 51301 ? 400 : 409);
++            mvc.perform(get("/api/equipos/7")).andExpect(status().is(esperado)).andExpect(jsonPath("$.estado").value(esperado));
++        }
++    }
++
++    @Test
++    void conflictoEnExcepcionSqlEncadenada() throws Exception {
++        SQLException sql = new SQLException("Excepción envolvente");
++        sql.setNextException(new SQLException("duplicado", "23000", 2627));
++        when(jdbc.queryForList("EXEC dbo.spConsultarEquipo ?", 7)).thenThrow(fallo(sql));
++        mvc.perform(get("/api/equipos/7")).andExpect(status().isConflict());
++    }
++
++    @Test
++    void falloInesperadoNoExponeDetallesSql() throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spConsultarEquipo ?", 7)).thenThrow(new DataAccessResourceFailureException("detalle interno"));
++        mvc.perform(get("/api/equipos/7")).andExpect(status().isInternalServerError())
++                .andExpect(jsonPath("$.mensaje").value("No se pudo completar la operación. Revisá el backend."));
++    }
++
++    @Test
++    void resultadoDeAltaSinIdNoSeReportaComoExito() throws Exception {
++        when(jdbc.queryForList(CREAR, 1, 2, "SER-001", "Revisión ñ 漢字", true)).thenReturn(List.of());
++        mvc.perform(post("/api/equipos").contentType("application/json").content(BODY)).andExpect(status().isInternalServerError());
++    }
++
++    @Test
++    void historialVacioEs200YNoFilaNula() throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", 7)).thenReturn(List.of());
++        mvc.perform(get("/api/equipos/7/historial")).andExpect(status().isOk()).andExpect(content().json("[]"));
++    }
++
++    @Test
++    void historialDeEquipoInexistenteEs404() throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", 7)).thenThrow(fallo(new SQLException("No existe", "S0001", 51302)));
++        mvc.perform(get("/api/equipos/7/historial")).andExpect(status().isNotFound());
++    }
++
++    @Test
++    void tiposYMarcasUsanSusProcedimientos() throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spListarTiposEquipo")).thenReturn(List.of(Map.of("TipoEquipoID", 1, "Nombre", "Laptop")));
++        when(jdbc.queryForList("EXEC dbo.spListarMarcas")).thenReturn(List.of(Map.of("MarcaID", 1, "Nombre", "Marca")));
++        mvc.perform(get("/api/catalogos/tipos-equipos")).andExpect(status().isOk()).andExpect(jsonPath("$[0].TipoEquipoID").value(1));
++        mvc.perform(get("/api/catalogos/marcas")).andExpect(status().isOk()).andExpect(jsonPath("$[0].MarcaID").value(1));
++        verify(jdbc).queryForList("EXEC dbo.spListarTiposEquipo");
++        verify(jdbc).queryForList("EXEC dbo.spListarMarcas");
++        verifyNoMoreInteractions(jdbc);
++    }
++
++    @Test
++    void modelosConservanLosFiltros() throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spListarModelosEquipo ?, ?", 3, 2)).thenReturn(List.of());
++        mvc.perform(get("/api/catalogos/modelos-equipos").param("marcaId", "3").param("tipoEquipoId", "2"))
++                .andExpect(status().isOk()).andExpect(content().json("[]"));
++        verify(jdbc).queryForList("EXEC dbo.spListarModelosEquipo ?, ?", 3, 2);
++    }
++
++    private UncategorizedDataAccessException fallo(SQLException sql) {
++        return new UncategorizedDataAccessException("Fallo simulado", sql) {};
++    }
++}
+diff --git a/backend/src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker b/backend/src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker
+new file mode 100644
+index 0000000..fdbd0b1
+--- /dev/null
++++ b/backend/src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker
+@@ -0,0 +1 @@
++mock-maker-subclass
+diff --git a/frontend/README.md b/frontend/README.md
+index 6291be8..70aa690 100644
+--- a/frontend/README.md
++++ b/frontend/README.md
+@@ -3,24 +3,27 @@
+ Interfaz del Sistema Integral de Servicio Técnico, Inventario y Facturación
+ TechCare, con el lenguaje visual **Mercury** adaptado a una aplicación interna
+ de taller. Repositorio: `frontend/` (el backend Spring Boot permanece en
+-`backend/`, sin cambios).
++`backend/`). La actualización de Equipos agrega sus controladores y catálogos.
+ 
+ ---
+ 
+ ## 1. Estado real de la integración (auditado contra el código)
+ 
+-El backend del repositorio contiene **un único controlador**:
++El backend expone los siguientes controladores:
+ 
+ ```
+ backend/src/main/java/com/techcare/backend/ClienteController.java
++backend/src/main/java/com/techcare/backend/EquipoController.java
++backend/src/main/java/com/techcare/backend/CatalogoEquipoController.java
+ ```
+ 
+-No hay controladores de autenticación, equipos, órdenes, diagnóstico,
++No hay controladores de autenticación, órdenes, diagnóstico,
+ reparación, inventario, compras, facturación, pagos, entrega, reportes ni
+ administración. Tampoco hay configuración de CORS ni de seguridad. Por lo
+ tanto:
+ 
+-- **Clientes** es el único módulo conectado (`/api/clientes`).
++- **Clientes** y **Equipos** están conectados (`/api/clientes`, `/api/equipos`).
++- Equipos consulta marcas, tipos y modelos desde `/api/catalogos/…`.
+ - El resto de módulos se construyó con la interfaz completa y estados de
+   **“pendiente de API”**; no se simulan datos ni se inventan endpoints.
+ - Un procedimiento SQL (`spCrearOrden`, `spConsumirRepuesto`, …) **no** implica
+@@ -126,6 +129,7 @@ desplegable y tablas con desplazamiento contenido.
+ - Clientes: listar, consultar, crear, actualizar/activar/desactivar, con
+   validación de campos que replica el DTO, manejo de 400/404/409 y errores por
+   campo, estados de carga/vacío/error, paginación y búsqueda en cliente.
++- Equipos: registrar, editar, activar/desactivar, buscar, filtrar por cliente y consultar historial.
+ - Navegación completa, sesión (modo honesto sin autenticación), dashboard,
+   mapa de integración.
+ 
+@@ -139,13 +143,13 @@ Toda pantalla y flujo está construido y navegable, pero su acción permanece
+ deshabilitada porque falta el endpoint. Cada una indica el método/ruta requerido
+ y el procedimiento SQL de referencia:
+ 
+-- Equipos, órdenes (listado y expediente), dashboard (6 métricas + actividad),
++- Órdenes (listado y expediente), dashboard (6 métricas + actividad),
+   diagnóstico, reparación, actividades, consumo de repuestos, inventario,
+   kardex, repuestos, bodegas, proveedores, compras (registro/recepción/anulación),
+   facturación (emisión/anulación), pagos, entrega y administración.
+ - Los **12 reportes** (R01–R12) listados desde `03_Reportes.sql`.
+-- **Nueva orden**: el paso *Cliente* ya usa la API real; los pasos de equipo y
+-  confirmación quedan bloqueados (`POST /api/ordenes` → `spCrearOrden`).
++- **Nueva orden**: Cliente y Equipo usan sus APIs reales. La confirmación sigue
++  pendiente de autenticación y `POST /api/ordenes` → `spCrearOrden`.
+ 
+ ### Pendiente de backend de forma explícita
+ - **Autenticación y sesión** (`/api/auth/login`, `/api/auth/sesion`). No se
+@@ -165,8 +169,7 @@ y el procedimiento SQL de referencia:
+    triggers). Sin endpoint de sesión, el frontend no puede aportar ese actor; la
+    creación de orden, diagnóstico, consumo, etc. quedan pendientes de esa pieza.
+ 3. **Sin CORS**: se resolvió con proxy de Vite en desarrollo; en producción el
+-   backend deberá exponer CORS o servirse bajo el mismo origen (no se alteró el
+-   backend).
++   backend deberá exponer CORS o servirse bajo el mismo origen.
+ 4. **Nombres JSON**: el proyecto usa PascalCase por `queryForList`; cualquier
+    futura capa de mapeo a camelCase debe actualizar `src/types/api.ts` y los
+    servicios, no darse por sentado.
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index 102834c..7346007 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -1,15 +1,7 @@
+ /**
+- * Registro de capacidades de integracion (mapa de integracion).
+- *
+- * Cada fila se contrasto contra el codigo real del backend:
+- *   backend/src/main/java/com/techcare/backend/ClienteController.java
+- * Unico controlador presente en el repositorio. No hay seguridad, sesion,
+- * equipos, ordenes, inventario, compras, facturacion, pagos, entrega ni reportes
+- * expuestos como endpoints. Por eso la mayoria de operaciones queda "ausente".
+- *
+- * Un procedimiento SQL (spCrearOrden, spConsumirRepuesto, ...) NO implica que
+- * exista una ruta HTTP. Aqui se listan como dependencia pendiente para que la
+- * interfaz muestre la accion como indisponible en lugar de simular resultados.
++ * Capacidades verificadas en los controladores de Clientes, Equipos y catálogos.
++ * Una ruta disponible no implica autenticación: la sesión sigue pendiente.
++ * Los procesos de órdenes, inventario y caja conservan su estado pendiente.
+  */
+ 
+ export type EstadoCapacidad = "disponible" | "incompleta" | "ausente";
+@@ -89,7 +81,7 @@ export const OPERACIONES: OperacionApi[] = [
+     procedimiento: "HistorialEstadoOrden, MovimientoInventario",
+   },
+ 
+-  // ---- Clientes (UNICO modulo integrado) ----
++  // ---- Clientes ----
+   {
+     id: "clientes.listar",
+     modulo: "Clientes",
+@@ -138,19 +130,103 @@ export const OPERACIONES: OperacionApi[] = [
+     nota: "No hay DELETE: la desactivacion es Activo=false.",
+   },
+ 
+-  // ---- Equipos ----
+-  {
+-    id: "equipos.listar",
+-    modulo: "Equipos",
+-    operacion: "Buscar equipos por serie / cliente",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/equipos?serie=...)",
+-    entrada: "serie, clienteId",
+-    respuesta: "Equipo[]",
+-    roles: "RECEPCION, TECNICO, ADMIN",
+-    estado: "ausente",
+-    procedimiento: "vHistorialEquipo",
+-    nota: "Equipo toma Marca/Tipo a traves de ModeloEquipo. Un equipo con ordenes no permite cambiar propietario, serie ni modelo (trEquipoPropietario).",
++  // ---- Equipos y sus catálogos ----
++  {
++    "id": "equipos.listar",
++    "modulo": "Equipos",
++    "operacion": "Buscar equipos por serie / cliente",
++    "metodo": "GET",
++    "ruta": "/api/equipos",
++    "entrada": "clienteId?, serie?, activo?",
++    "respuesta": "Equipo[]",
++    "roles": "RECEPCION, TECNICO, ADMIN",
++    "estado": "disponible",
++    "procedimiento": "spListarEquipos"
++  },
++  {
++    "id": "equipos.consultar",
++    "modulo": "Equipos",
++    "operacion": "Consultar equipo",
++    "metodo": "GET",
++    "ruta": "/api/equipos/{id}",
++    "entrada": "id",
++    "respuesta": "Equipo",
++    "roles": "RECEPCION, TECNICO, ADMIN",
++    "estado": "disponible",
++    "procedimiento": "spConsultarEquipo"
++  },
++  {
++    "id": "equipos.crear",
++    "modulo": "Equipos",
++    "operacion": "Registrar equipo",
++    "metodo": "POST",
++    "ruta": "/api/equipos",
++    "entrada": "EquipoDatos",
++    "respuesta": "Equipo (201)",
++    "roles": "RECEPCION, TECNICO, ADMIN",
++    "estado": "disponible",
++    "procedimiento": "spRegistrarEquipo"
++  },
++  {
++    "id": "equipos.actualizar",
++    "modulo": "Equipos",
++    "operacion": "Actualizar / activar / desactivar equipo",
++    "metodo": "PUT",
++    "ruta": "/api/equipos/{id}",
++    "entrada": "id, EquipoDatos",
++    "respuesta": "Equipo",
++    "roles": "RECEPCION, TECNICO, ADMIN",
++    "estado": "disponible",
++    "procedimiento": "spActualizarEquipo",
++    "nota": "Con órdenes se conserva propietario, serie y modelo; descripción y Activo pueden actualizarse."
++  },
++  {
++    "id": "equipos.historial",
++    "modulo": "Equipos",
++    "operacion": "Consultar historial de un equipo",
++    "metodo": "GET",
++    "ruta": "/api/equipos/{id}/historial",
++    "entrada": "id",
++    "respuesta": "HistorialEquipo[]",
++    "roles": "RECEPCION, TECNICO, ADMIN",
++    "estado": "disponible",
++    "procedimiento": "spHistorialEquipo"
++  },
++  {
++    "id": "catalogos.tiposEquipos",
++    "modulo": "Catalogos",
++    "operacion": "Consultar tipos de equipo",
++    "metodo": "GET",
++    "ruta": "/api/catalogos/tipos-equipos",
++    "entrada": "-",
++    "respuesta": "TipoEquipo[]",
++    "roles": "RECEPCION, TECNICO, ADMIN",
++    "estado": "disponible",
++    "procedimiento": "spListarTiposEquipo"
++  },
++  {
++    "id": "catalogos.marcas",
++    "modulo": "Catalogos",
++    "operacion": "Consultar marcas",
++    "metodo": "GET",
++    "ruta": "/api/catalogos/marcas",
++    "entrada": "-",
++    "respuesta": "Marca[]",
++    "roles": "RECEPCION, TECNICO, ADMIN",
++    "estado": "disponible",
++    "procedimiento": "spListarMarcas"
++  },
++  {
++    "id": "catalogos.modelosEquipos",
++    "modulo": "Catalogos",
++    "operacion": "Consultar modelos",
++    "metodo": "GET",
++    "ruta": "/api/catalogos/modelos-equipos",
++    "entrada": "marcaId?, tipoEquipoId?",
++    "respuesta": "ModeloEquipo[]",
++    "roles": "RECEPCION, TECNICO, ADMIN",
++    "estado": "disponible",
++    "procedimiento": "spListarModelosEquipo"
+   },
+ 
+   // ---- Ordenes ----
+diff --git a/frontend/src/features/clientes/ClienteDetallePage.tsx b/frontend/src/features/clientes/ClienteDetallePage.tsx
+index 50f0d7f..a2bfddc 100644
+--- a/frontend/src/features/clientes/ClienteDetallePage.tsx
++++ b/frontend/src/features/clientes/ClienteDetallePage.tsx
+@@ -82,10 +82,8 @@ export function ClienteDetallePage() {
+         <Reveal delay={0.08}>
+           <Card>
+             <h2 className="tc-section-title">Equipos del cliente</h2>
+-            <PendingState
+-              titulo="Equipos en preparacion"
+-              descripcion="Los equipos del cliente se mostraran cuando el servidor exponga su catalogo. No se inventan resultados."
+-            />
++            <p>Consultá los equipos registrados a nombre de este cliente o agregá uno nuevo.</p>
++            <Link to={`/equipos?clienteId=${data.ClienteID}`}><Button>Ver equipos del cliente</Button></Link>
+           </Card>
+         </Reveal>
+ 
+diff --git a/frontend/src/features/equipos/EquipoForm.tsx b/frontend/src/features/equipos/EquipoForm.tsx
+new file mode 100644
+index 0000000..5ca2e96
+--- /dev/null
++++ b/frontend/src/features/equipos/EquipoForm.tsx
+@@ -0,0 +1,95 @@
++import { useState, type FormEvent } from "react";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { Field, SelectInput, Switch, TextArea, TextInput } from "../../components/ui/inputs";
++import { esApiError, mensajeDeError } from "../../services/errors";
++import type { MarcaEquipo, TipoEquipo, Equipo, EquipoDatos, ModeloEquipo } from "../../services/equipos";
++import type { Cliente } from "../../types/api";
++
++export function EquipoForm({ equipo, clientes, marcas, tipos, modelos, clienteInicial, guardando, onGuardar, onCancelar }: {
++  equipo: Equipo | null;
++  clientes: Cliente[];
++  marcas: MarcaEquipo[];
++  tipos: TipoEquipo[];
++  modelos: ModeloEquipo[];
++  clienteInicial: string;
++  guardando: boolean;
++  onGuardar: (datos: EquipoDatos) => Promise<void>;
++  onCancelar: () => void;
++}) {
++  const [clienteId, setClienteId] = useState(equipo ? String(equipo.ClienteID) : clienteInicial);
++  const [marcaId, setMarcaId] = useState(equipo ? String(equipo.MarcaID) : "");
++  const [tipoId, setTipoId] = useState(equipo ? String(equipo.TipoEquipoID) : "");
++  const [modeloId, setModeloId] = useState(equipo ? String(equipo.ModeloEquipoID) : "");
++  const [serie, setSerie] = useState(equipo?.NumeroSerie ?? "");
++  const [descripcion, setDescripcion] = useState(equipo?.Descripcion ?? "");
++  const [activo, setActivo] = useState(equipo?.Activo ?? true);
++  const [errores, setErrores] = useState<Record<string, string>>({});
++  const [mensaje, setMensaje] = useState("");
++  const bloqueado = Boolean(equipo?.TieneOrdenes);
++  const disponibles = modelos.filter(m => (!marcaId || String(m.MarcaID) === marcaId) && (!tipoId || String(m.TipoEquipoID) === tipoId));
++
++  async function guardar(e: FormEvent) {
++    e.preventDefault();
++    if (guardando) return;
++    const invalidos: Record<string, string> = {};
++    if (!Number(clienteId)) invalidos.clienteId = "Elegí un cliente.";
++    if (!Number(modeloId)) invalidos.modeloEquipoId = "Elegí un modelo.";
++    if (!serie.trim() || serie.trim().length > 80) invalidos.numeroSerie = "Ingresá una serie de hasta 80 caracteres.";
++    if (!descripcion.trim() || descripcion.trim().length > 500) invalidos.descripcion = "Ingresá una descripción de hasta 500 caracteres.";
++    setErrores(invalidos);
++    setMensaje("");
++    if (Object.keys(invalidos).length) return;
++    try {
++      await onGuardar({ clienteId: Number(clienteId), modeloEquipoId: Number(modeloId), numeroSerie: serie.trim(), descripcion: descripcion.trim(), activo });
++    } catch (error) {
++      if (esApiError(error)) setErrores(error.fieldErrors);
++      setMensaje(mensajeDeError(error, "el registro del equipo"));
++    }
++  }
++
++  return <form className="tc-stack" onSubmit={guardar} noValidate>
++    {mensaje ? <Alert tono="danger" titulo="No se pudo guardar">{mensaje}</Alert> : null}
++    {bloqueado ? <Alert>Este equipo tiene órdenes registradas. Podés actualizar su descripción y estado; el propietario, la serie y el modelo conservan el historial.</Alert> : null}
++    <Field label="Cliente" htmlFor="equipo-cliente" requerido error={errores.clienteId}>
++      <SelectInput id="equipo-cliente" value={clienteId} disabled={guardando || bloqueado} onChange={e => setClienteId(e.target.value)}>
++        <option value="">Elegir cliente</option>
++        {clientes.map(c => <option key={c.ClienteID} value={c.ClienteID} disabled={!c.Activo && c.ClienteID !== equipo?.ClienteID}>
++          {c.Nombre} · {c.NIT}{c.Activo ? "" : " · inactivo"}
++        </option>)}
++      </SelectInput>
++    </Field>
++    <div className="tc-grid tc-grid--2">
++      <Field label="Marca" htmlFor="equipo-marca">
++        <SelectInput id="equipo-marca" value={marcaId} disabled={guardando || bloqueado} onChange={e => { setMarcaId(e.target.value); setModeloId(""); }}>
++          <option value="">Todas las marcas</option>
++          {marcas.map(m => <option key={m.MarcaID} value={m.MarcaID}>{m.Nombre}</option>)}
++        </SelectInput>
++      </Field>
++      <Field label="Tipo" htmlFor="equipo-tipo">
++        <SelectInput id="equipo-tipo" value={tipoId} disabled={guardando || bloqueado} onChange={e => { setTipoId(e.target.value); setModeloId(""); }}>
++          <option value="">Todos los tipos</option>
++          {tipos.map(t => <option key={t.TipoEquipoID} value={t.TipoEquipoID}>{t.Nombre}</option>)}
++        </SelectInput>
++      </Field>
++    </div>
++    <Field label="Modelo" htmlFor="equipo-modelo" requerido error={errores.modeloEquipoId}>
++      <SelectInput id="equipo-modelo" value={modeloId} disabled={guardando || bloqueado} onChange={e => setModeloId(e.target.value)}>
++        <option value="">Elegir modelo</option>
++        {disponibles.map(m => <option key={m.ModeloEquipoID} value={m.ModeloEquipoID}>{m.Marca} · {m.Nombre} · {m.TipoEquipo}</option>)}
++      </SelectInput>
++    </Field>
++    {!disponibles.length ? <Alert tono="warn">No hay modelos para estos filtros. Cambiá la marca o el tipo.</Alert> : null}
++    <Field label="Número de serie" htmlFor="equipo-serie" requerido error={errores.numeroSerie}>
++      <TextInput id="equipo-serie" value={serie} maxLength={80} disabled={guardando || bloqueado} onChange={e => setSerie(e.target.value)} />
++    </Field>
++    <Field label="Descripción" htmlFor="equipo-descripcion" requerido error={errores.descripcion}>
++      <TextArea id="equipo-descripcion" rows={3} value={descripcion} maxLength={500} disabled={guardando} onChange={e => setDescripcion(e.target.value)} />
++    </Field>
++    <Switch id="equipo-activo" etiqueta="Equipo activo" checked={activo} disabled={guardando} onChange={setActivo} />
++    <div className="tc-row tc-row--end">
++      <Button onClick={onCancelar} disabled={guardando}>Cancelar</Button>
++      <Button variante="primario" type="submit" disabled={guardando}>{guardando ? "Guardando…" : equipo ? "Guardar cambios" : "Registrar equipo"}</Button>
++    </div>
++  </form>;
++}
+diff --git a/frontend/src/features/equipos/EquiposPage.tsx b/frontend/src/features/equipos/EquiposPage.tsx
+index 521642a..803228a 100644
+--- a/frontend/src/features/equipos/EquiposPage.tsx
++++ b/frontend/src/features/equipos/EquiposPage.tsx
+@@ -1,11 +1,113 @@
+-﻿import { PendingModule } from "../../components/ui/PendingModule";
++import { useMemo, useState } from "react";
++import { Link, useSearchParams } from "react-router-dom";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { History, Pencil, Plus } from "lucide-react";
++import { Alert } from "../../components/ui/Alert";
++import { Badge } from "../../components/ui/Badge";
++import { Button, IconButton } from "../../components/ui/Button";
++import { Card, PageHeader } from "../../components/ui/Card";
++import { DataTable, Paginacion, type Columna } from "../../components/ui/DataTable";
++import { Dialog } from "../../components/ui/Dialog";
++import { SearchInput, SelectInput } from "../../components/ui/inputs";
++import { EmptyState, ErrorState, LoadingState } from "../../components/ui/StateView";
++import { equiposApi, type Equipo, type EquipoDatos, type HistorialEquipo } from "../../services/equipos";
++import { mensajeDeError } from "../../services/errors";
++import { nombreEstado } from "../../services/catalogos";
++import { fechaHora, moneda, normalizar } from "../../utils/format";
++import { useClientes } from "../clientes/hooks";
++import { EquipoForm } from "./EquipoForm";
+ 
+ export function EquiposPage() {
+-  return (
+-    <PendingModule
+-      modulo="Equipos"
+-      titulo="Equipos"
+-      descripcion="Equipos de los clientes con su numero de serie e historial de ingresos al taller."
+-    />
+-  );
++  const [params] = useSearchParams();
++  const [clienteFiltro, setClienteFiltro] = useState(params.get("clienteId") ?? "");
++  const [busqueda, setBusqueda] = useState("");
++  const [estadoFiltro, setEstadoFiltro] = useState("");
++  const [pagina, setPagina] = useState(1);
++  const [dialogo, setDialogo] = useState<{ equipo: Equipo | null } | null>(null);
++  const [historial, setHistorial] = useState<Equipo | null>(null);
++  const [ok, setOk] = useState("");
++  const qc = useQueryClient();
++  const equipos = useQuery({ queryKey: ["equipos"], queryFn: ({ signal }) => equiposApi.listar(undefined, signal) });
++  const clientes = useClientes();
++  const catalogos = useQuery({
++    queryKey: ["catalogos", "equipos"],
++    queryFn: async ({ signal }) => {
++      const [marcas, tipos, modelos] = await Promise.all([equiposApi.marcas(signal), equiposApi.tipos(signal), equiposApi.modelos(signal)]);
++      return { marcas, tipos, modelos };
++    },
++  });
++  const movimientos = useQuery({
++    queryKey: ["equipos", "historial", historial?.EquipoID],
++    queryFn: ({ signal }) => equiposApi.historial(historial!.EquipoID, signal),
++    enabled: historial !== null,
++  });
++  const guardar = useMutation({
++    mutationFn: ({ equipo, datos }: { equipo: Equipo | null; datos: EquipoDatos }) => equipo
++      ? equiposApi.actualizar(equipo.EquipoID, datos) : equiposApi.crear(datos),
++    onSuccess: async (equipo) => {
++      await qc.invalidateQueries({ queryKey: ["equipos"] });
++      setDialogo(null);
++      setOk(`Equipo ${equipo.NumeroSerie} guardado.`);
++    },
++  });
++  const filas = useMemo(() => (equipos.data ?? []).filter(e => {
++    if (clienteFiltro && String(e.ClienteID) !== clienteFiltro) return false;
++    if (estadoFiltro && String(e.Activo) !== estadoFiltro) return false;
++    return normalizar(`${e.NumeroSerie} ${e.Cliente} ${e.Marca} ${e.Modelo} ${e.Descripcion}`).includes(normalizar(busqueda));
++  }), [equipos.data, clienteFiltro, estadoFiltro, busqueda]);
++  const totalPaginas = Math.max(1, Math.ceil(filas.length / 10));
++  const paginaActual = Math.min(pagina, totalPaginas);
++  const columnas: Columna<Equipo>[] = [
++    { clave: "serie", encabezado: "Serie", render: e => <><strong>{e.NumeroSerie}</strong><div className="tc-field__hint">{e.Descripcion}</div></> },
++    { clave: "cliente", encabezado: "Cliente", render: e => <Link to={`/clientes/${e.ClienteID}`}>{e.Cliente}</Link> },
++    { clave: "modelo", encabezado: "Equipo", render: e => <>{e.Marca} · {e.Modelo}<div className="tc-field__hint">{e.TipoEquipo}</div></> },
++    { clave: "estado", encabezado: "Estado", render: e => <Badge tono={e.Activo ? "ok" : "neutral"}>{e.Activo ? "Activo" : "Inactivo"}</Badge> },
++    { clave: "acciones", encabezado: "Acciones", render: e => <div className="tc-row">
++      <IconButton etiqueta={`Editar ${e.NumeroSerie}`} disabled={!catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: e })}><Pencil size={16} /></IconButton>
++      <IconButton etiqueta={`Historial de ${e.NumeroSerie}`} onClick={() => setHistorial(e)}><History size={16} /></IconButton>
++    </div> },
++  ];
++  const historialColumnas: Columna<HistorialEquipo>[] = [
++    { clave: "orden", encabezado: "Orden", render: h => h.NumeroOrden },
++    { clave: "fecha", encabezado: "Ingreso", render: h => fechaHora(h.FechaIngreso) },
++    { clave: "estado", encabezado: "Estado", render: h => nombreEstado(h.EstadoCodigo) },
++    { clave: "diagnostico", encabezado: "Diagnóstico", render: h => h.Diagnostico ?? "Pendiente" },
++    { clave: "saldo", encabezado: "Saldo", render: h => h.Saldo === null ? "Sin factura" : moneda(h.Saldo) },
++  ];
++  async function onGuardar(datos: EquipoDatos) {
++    await guardar.mutateAsync({ equipo: dialogo?.equipo ?? null, datos });
++  }
++  return <>
++    <PageHeader eyebrow="Servicio" titulo="Equipos" descripcion="Equipos de los clientes y su historial de ingresos al taller."
++      acciones={<Button variante="primario" icono={<Plus size={16} />} disabled={!catalogos.data || !clientes.data} onClick={() => setDialogo({ equipo: null })}>Nuevo equipo</Button>} />
++    <div className="tc-stack">
++      {ok ? <Alert tono="ok">{ok}</Alert> : null}
++      {catalogos.isError || clientes.isError ? <Alert tono="danger" accion={<Button onClick={() => { catalogos.refetch(); clientes.refetch(); }}>Reintentar</Button>}>No se pudieron cargar los clientes o catálogos. {mensajeDeError(catalogos.error ?? clientes.error)}</Alert> : null}
++      <Card>
++        <div className="tc-row" style={{ flexWrap: "wrap", marginBottom: 16 }}>
++          <SearchInput placeholder="Buscar por serie, cliente o modelo" aria-label="Buscar equipo" value={busqueda} onChange={e => { setBusqueda(e.target.value); setPagina(1); }} />
++          <SelectInput aria-label="Filtrar por cliente" value={clienteFiltro} onChange={e => { setClienteFiltro(e.target.value); setPagina(1); }}>
++            <option value="">Todos los clientes</option>
++            {clientes.data?.map(c => <option key={c.ClienteID} value={c.ClienteID}>{c.Nombre}</option>)}
++          </SelectInput>
++          <SelectInput aria-label="Filtrar por estado" value={estadoFiltro} onChange={e => { setEstadoFiltro(e.target.value); setPagina(1); }}>
++            <option value="">Todos los estados</option><option value="true">Activos</option><option value="false">Inactivos</option>
++          </SelectInput>
++        </div>
++        {equipos.isLoading ? <LoadingState titulo="Cargando equipos…" /> : equipos.isError
++          ? <ErrorState mensaje={mensajeDeError(equipos.error)} onRetry={() => equipos.refetch()} />
++          : <><DataTable columnas={columnas} filas={filas.slice((paginaActual - 1) * 10, paginaActual * 10)} claveFila={e => e.EquipoID} />
++            <Paginacion pagina={paginaActual} totalPaginas={totalPaginas} total={filas.length} onCambiar={setPagina} /></>}
++      </Card>
++    </div>
++    <Dialog abierto={dialogo !== null} titulo={dialogo?.equipo ? "Editar equipo" : "Registrar equipo"} onCerrar={() => { if (!guardar.isPending) setDialogo(null); }}>
++      {dialogo && catalogos.data && clientes.data ? <EquipoForm key={dialogo.equipo?.EquipoID ?? "nuevo"} equipo={dialogo.equipo} clientes={clientes.data}
++        {...catalogos.data} clienteInicial={clienteFiltro} guardando={guardar.isPending} onGuardar={onGuardar} onCancelar={() => setDialogo(null)} /> : null}
++    </Dialog>
++    <Dialog abierto={historial !== null} titulo={`Historial · ${historial?.NumeroSerie ?? ""}`} ancho={1000} onCerrar={() => setHistorial(null)}>
++      {movimientos.isLoading ? <LoadingState /> : movimientos.isError ? <ErrorState mensaje={mensajeDeError(movimientos.error)} onRetry={() => movimientos.refetch()} />
++        : movimientos.data?.length ? <DataTable columnas={historialColumnas} filas={movimientos.data} claveFila={h => h.OrdenID} />
++          : <EmptyState titulo="Sin órdenes registradas" descripcion="El equipo todavía no ha ingresado al taller." />}
++    </Dialog>
++  </>;
+ }
+diff --git a/frontend/src/features/ordenes/OrdenNuevaPage.tsx b/frontend/src/features/ordenes/OrdenNuevaPage.tsx
+index 689be90..da12186 100644
+--- a/frontend/src/features/ordenes/OrdenNuevaPage.tsx
++++ b/frontend/src/features/ordenes/OrdenNuevaPage.tsx
+@@ -1,4 +1,5 @@
+ import { useState } from "react";
++import { useQuery } from "@tanstack/react-query";
+ import { Link } from "react-router-dom";
+ import { Check, Info } from "lucide-react";
+ import { PageHeader, Card } from "../../components/ui/Card";
+@@ -12,22 +13,27 @@ import { PRIORIDADES, nombreTipoCliente } from "../../services/catalogos";
+ import { mensajeDeError } from "../../services/errors";
+ import { normalizar } from "../../utils/format";
+ import type { Cliente } from "../../types/api";
++import { equiposApi } from "../../services/equipos";
+ 
+ const PASOS = ["Cliente", "Equipo", "Problema", "Confirmar"] as const;
+ 
+ /**
+  * Flujo guiado de recepcion de un equipo.
+  *
+- * El paso "Cliente" usa la unica API real disponible (GET /api/clientes).
+- * Los pasos restantes dependen de endpoints que aun no existen
+- * (equipos, POST /api/ordenes -> spCrearOrden) y se muestran como pendientes:
+- * no se permite confirmar ni se genera NumeroOrden en el navegador.
++ * Cliente y Equipo consultan sus APIs reales. Confirmar el ingreso requiere
++ * autenticacion y POST /api/ordenes; permanece deshabilitado hasta integrarlos.
+  */
+ export function OrdenNuevaPage() {
+   const [paso, setPaso] = useState(0);
+   const [clienteSeleccionado, setClienteSeleccionado] = useState<Cliente | null>(null);
+   const { data, isLoading, isError, error, refetch } = useClientes();
+   const [busqueda, setBusqueda] = useState("");
++  const [equipoId, setEquipoId] = useState("");
++  const equipos = useQuery({
++    queryKey: ["equipos", "cliente", clienteSeleccionado?.ClienteID],
++    queryFn: ({ signal }) => equiposApi.listar(clienteSeleccionado!.ClienteID, signal),
++    enabled: clienteSeleccionado !== null,
++  });
+ 
+   const filtrados = (data ?? []).filter((c) => {
+     const q = normalizar(busqueda);
+@@ -97,7 +103,7 @@ export function OrdenNuevaPage() {
+                       <Button
+                         tamano="sm"
+                         variante={clienteSeleccionado?.ClienteID === c.ClienteID ? "primario" : "secundario"}
+-                        onClick={() => setClienteSeleccionado(c)}
++                        onClick={() => { setClienteSeleccionado(c); setEquipoId(""); }}
+                         disabled={!c.Activo}
+                       >
+                         {clienteSeleccionado?.ClienteID === c.ClienteID ? "Seleccionado" : "Elegir"}
+@@ -129,12 +135,19 @@ export function OrdenNuevaPage() {
+                 Cambiar
+               </Button>
+             </div>
+-            <PendingState
+-              titulo="Seleccion de equipo en preparacion"
+-              descripcion="La seleccion del equipo se habilitara cuando el servidor exponga el catalogo de equipos. No se asignan equipos sin registrar."
+-            />
++            {equipos.isLoading ? <LoadingState titulo="Cargando equipos…" /> : equipos.isError ? (
++              <Alert tono="danger" accion={<Button onClick={() => equipos.refetch()}>Reintentar</Button>}>{mensajeDeError(equipos.error)}</Alert>
++            ) : (
++              <Field label="Equipo del cliente" htmlFor="nueva-equipo" requerido>
++                <SelectInput id="nueva-equipo" value={equipoId} onChange={e => setEquipoId(e.target.value)}>
++                  <option value="">Elegir equipo</option>
++                  {equipos.data?.filter(e => e.Activo).map(e => <option key={e.EquipoID} value={e.EquipoID}>{e.NumeroSerie} · {e.Marca} {e.Modelo}</option>)}
++                </SelectInput>
++              </Field>
++            )}
++            <Link to={`/equipos?clienteId=${clienteSeleccionado?.ClienteID}`}><Button variante="fantasma">Registrar o consultar equipos</Button></Link>
+             <div className="tc-row tc-row--end">
+-              <Button disabled>Continuar</Button>
++              <Button disabled={!equipoId || equipos.isError} onClick={() => setPaso(2)}>Continuar</Button>
+             </div>
+           </Card>
+         ) : null}
+@@ -172,6 +185,7 @@ export function OrdenNuevaPage() {
+                 Revisar
+               </Button>
+             </div>
++            <PendingState titulo="Creación de la orden pendiente" descripcion="La selección del cliente y del equipo está disponible. Confirmar el ingreso requiere integrar el registro de órdenes y la sesión del personal." />
+           </Card>
+         ) : null}
+ 
+diff --git a/frontend/src/services/equipos.ts b/frontend/src/services/equipos.ts
+new file mode 100644
+index 0000000..298a295
+--- /dev/null
++++ b/frontend/src/services/equipos.ts
+@@ -0,0 +1,57 @@
++import { http } from "./http";
++
++export interface Equipo {
++  EquipoID: number;
++  ClienteID: number;
++  Cliente: string;
++  ClienteActivo: boolean;
++  ModeloEquipoID: number;
++  Modelo: string;
++  MarcaID: number;
++  Marca: string;
++  TipoEquipoID: number;
++  TipoEquipo: string;
++  NumeroSerie: string;
++  Descripcion: string;
++  Activo: boolean;
++  TieneOrdenes: boolean;
++}
++export interface EquipoDatos {
++  clienteId: number;
++  modeloEquipoId: number;
++  numeroSerie: string;
++  descripcion: string;
++  activo: boolean;
++}
++export interface MarcaEquipo { MarcaID: number; Nombre: string }
++export interface TipoEquipo { TipoEquipoID: number; Nombre: string }
++export interface ModeloEquipo {
++  ModeloEquipoID: number;
++  Nombre: string;
++  MarcaID: number;
++  Marca: string;
++  TipoEquipoID: number;
++  TipoEquipo: string;
++}
++export interface HistorialEquipo {
++  OrdenID: number;
++  NumeroOrden: string;
++  FechaIngreso: string | number;
++  EstadoCodigo: string;
++  Diagnostico: string | null;
++  DescripcionTrabajo: string | null;
++  FacturaID: number | null;
++  Total: number | null;
++  Saldo: number | null;
++}
++export const equiposApi = {
++  listar: (clienteId?: number, signal?: AbortSignal) =>
++    http.get<Equipo[]>(`/equipos${clienteId ? `?clienteId=${clienteId}` : ""}`, signal),
++  consultar: (id: number, signal?: AbortSignal) => http.get<Equipo>(`/equipos/${id}`, signal),
++  crear: (datos: EquipoDatos) => http.post<Equipo>("/equipos", datos),
++  actualizar: (id: number, datos: EquipoDatos) => http.put<Equipo>(`/equipos/${id}`, datos),
++  historial: (id: number, signal?: AbortSignal) => http.get<HistorialEquipo[]>(`/equipos/${id}/historial`, signal),
++  tipos: (signal?: AbortSignal) => http.get<TipoEquipo[]>("/catalogos/tipos-equipos", signal),
++  marcas: (signal?: AbortSignal) => http.get<MarcaEquipo[]>("/catalogos/marcas", signal),
++  modelos: (signal?: AbortSignal) => http.get<ModeloEquipo[]>("/catalogos/modelos-equipos", signal),
++};
+diff --git a/INTEGRACION_EQUIPOS.md b/INTEGRACION_EQUIPOS.md
+new file mode 100644
+--- /dev/null
++++ b/INTEGRACION_EQUIPOS.md
+@@ -0,0 +1,110 @@
++# Equipos y catálogos
++
++Esta actualización continúa el módulo de Clientes en el proyecto existente.
++Agrega ocho endpoints y conecta la pantalla de Equipos. Cada endpoint ejecuta
++un procedimiento almacenado; Java no inserta ni actualiza tablas directamente.
++
++## Aplicar en tu proyecto
++
++1. Guardar `10_Equipos_API_v2.patch` en la carpeta TechCare que contiene `backend`,
++   `frontend` y los scripts SQL. Se presupone que la API de Clientes ya funciona
++   con sus procedimientos almacenados; el maestro puede conservar su versión actual.
++2. Desde la terminal de IntelliJ, en esa carpeta, ejecutar:
++
++   ```bash
++   git apply 10_Equipos_API_v2.patch
++   ```
++
++   Esto modifica y agrega los archivos en la rama actual. No crea ramas ni
++   realiza commit o push. Git comprueba los cambios antes de aplicarlos; si la
++   versión local tiene un conflicto, lo informa sin aplicar parcialmente el parche.
++3. En SSMS ejecutar completo `08_Equipos_Procedimientos.sql`. Crea o actualiza
++   los ocho SP y sus permisos; conserva las tablas y los datos existentes.
++4. Ejecutar `09_Pruebas_Equipos.sql` desde una conexión de pruebas con permisos
++   de administración. Devuelve 29 casos PASS/FAIL. Cada caso se revierte y se
++   eliminan los dos clientes y los dos equipos usados para preparar la prueba.
++   Requiere los catálogos, dos modelos y un usuario activo de RECEPCION del fixture.
++5. Reiniciar el backend desde IntelliJ con la misma configuración `DB_URL` y
++   abrir el frontend como hasta ahora. No hay nuevas dependencias de aplicación.
++6. En Equipos, registrar un equipo para un cliente activo, editarlo, desactivarlo
++   y consultar su historial. Repetir una serie debe mostrar un conflicto sin
++   perder los datos del formulario.
++
++Este parche conserva el maestro `01_TechCare_Maestro.sql` y los scripts 02–07.
++Para una base existente, el 08 instala Equipos; el 09 permite comprobarlo.
++Al preparar una base desde cero con un maestro anterior, aplicar también las
++actualizaciones de procedimientos que falten, incluidas las de Clientes y Equipos.
++El maestro completo puede consolidarse cuando se cierre la definición de la BD.
++
++## Endpoints
++
++| Método | Ruta | Procedimiento |
++|---|---|---|
++| GET | `/api/equipos?clienteId=1&serie=ABC&activo=true` (filtros opcionales) | `spListarEquipos` |
++| GET | `/api/equipos/{id}` | `spConsultarEquipo` |
++| POST | `/api/equipos` | `spRegistrarEquipo` |
++| PUT | `/api/equipos/{id}` | `spActualizarEquipo` |
++| GET | `/api/equipos/{id}/historial` | `spHistorialEquipo` |
++| GET | `/api/catalogos/tipos-equipos` | `spListarTiposEquipo` |
++| GET | `/api/catalogos/marcas` | `spListarMarcas` |
++| GET | `/api/catalogos/modelos-equipos?marcaId=1&tipoEquipoId=1` (filtros opcionales) | `spListarModelosEquipo` |
++
++POST y PUT reciben:
++
++```json
++{
++  "clienteId": 1,
++  "modeloEquipoId": 1,
++  "numeroSerie": "SERIE-PRUEBA-001",
++  "descripcion": "Laptop entregada con cargador",
++  "activo": true
++}
++```
++
++Los IDs del ejemplo deben existir. La respuesta usa nombres de columna PascalCase:
++`EquipoID`, `ClienteID`, `Cliente`, `ClienteActivo`, `ModeloEquipoID`, `Modelo`,
++`MarcaID`, `Marca`, `TipoEquipoID`, `TipoEquipo`, `NumeroSerie`, `Descripcion`,
++`Activo` y `TieneOrdenes`. POST devuelve 201 y `Location`; los otros endpoints
++devuelven 200. El historial vacío es `[]`; equipo inexistente es 404.
++
++## Reglas y errores
++
++- Descripción y serie obligatorias: hasta 500 y 80 caracteres respectivamente.
++- Serie única; cliente y modelo existentes. Un equipo activo requiere cliente activo.
++- Se conservan equipos inactivos y su historial. No se implementa DELETE.
++- Con órdenes, propietario, modelo y serie permanecen fijos. Sí pueden cambiar
++  descripción y Activo. El formulario bloquea esos tres campos y SQL los valida.
++- Escrituras con TRY/CATCH, XACT_ABORT, COMMIT/ROLLBACK, SAVE TRANSACTION y THROW.
++  La restricción UNIQUE resuelve también series duplicadas por solicitudes simultáneas.
++- El rol `techcare_app` tiene EXECUTE y DENY de escritura directa sobre Equipo.
++  Las cuentas administrativas conservan sus privilegios; no sustituyen al rol de la aplicación.
++- HTTP 400: datos inválidos o relaciones inválidas; 404: equipo inexistente;
++  409: serie duplicada o cambio prohibido por historial; 500: error inesperado.
++  Se conserva la forma `{estado, mensaje, errores?}` utilizada por el frontend.
++
++## Interfaz y alcance
++
++Equipos permite búsqueda, filtro por cliente/estado, paginación, registro, edición,
++activación/desactivación e historial. Marcas, modelos y tipos se cargan desde la BD.
++El detalle de Cliente enlaza a sus equipos; Nueva orden ya permite seleccionar un
++equipo real del cliente. Confirmar una orden requiere integrar autenticación y
++el endpoint de órdenes; esa confirmación continúa deshabilitada.
++
++Esta entrega consulta catálogos existentes. No incorpora todavía pantallas para
++crear marcas o modelos. La autenticación y autorización HTTP siguen pendientes,
++al igual que antes de esta actualización.
++
++## Validación
++
++- Compilación Java y 17 pruebas de Equipos/catálogos más una de contexto Spring aprobadas.
++  MockMvc usa JDBC simulado; estas pruebas no ejecutan SQL Server.
++- Frontend: TypeScript y compilación Vite aprobados.
++- Navegador de prueba: registro, conflicto conservando los datos, edición,
++  desactivación, historial vacío/con órdenes, bloqueo de identidad con historial,
++  selección en Nueva orden y ancho móvil verificados con HTTP simulado.
++- Scripts 01, 08 y 09 analizados con SQLFluff T-SQL, sin errores de análisis.
++  Esto no equivale a compilarlos o ejecutarlos en SQL Server.
++- La comprobación real de los 29 casos SQL corresponde al paso 4.
++
++Para repetir las pruebas Java desde IntelliJ: ejecutar `EquipoControllerTests`.
++La prueba de contexto existente necesita `DB_URL`, igual que la aplicación.

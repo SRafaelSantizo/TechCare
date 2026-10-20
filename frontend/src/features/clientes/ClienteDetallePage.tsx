@@ -82,10 +82,8 @@ export function ClienteDetallePage() {
         <Reveal delay={0.08}>
           <Card>
             <h2 className="tc-section-title">Equipos del cliente</h2>
-            <PendingState
-              titulo="Equipos en preparacion"
-              descripcion="Los equipos del cliente se mostraran cuando el servidor exponga su catalogo. No se inventan resultados."
-            />
+            <p>Consultá los equipos registrados a nombre de este cliente o agregá uno nuevo.</p>
+            <Link to={`/equipos?clienteId=${data.ClienteID}`}><Button>Ver equipos del cliente</Button></Link>
           </Card>
         </Reveal>
 

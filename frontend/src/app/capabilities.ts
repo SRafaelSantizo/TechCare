@@ -1,15 +1,7 @@
 /**
- * Registro de capacidades de integracion (mapa de integracion).
- *
- * Cada fila se contrasto contra el codigo real del backend:
- *   backend/src/main/java/com/techcare/backend/ClienteController.java
- * Unico controlador presente en el repositorio. No hay seguridad, sesion,
- * equipos, ordenes, inventario, compras, facturacion, pagos, entrega ni reportes
- * expuestos como endpoints. Por eso la mayoria de operaciones queda "ausente".
- *
- * Un procedimiento SQL (spCrearOrden, spConsumirRepuesto, ...) NO implica que
- * exista una ruta HTTP. Aqui se listan como dependencia pendiente para que la
- * interfaz muestre la accion como indisponible en lugar de simular resultados.
+ * Capacidades verificadas en los controladores de Clientes, Equipos y catálogos.
+ * Una ruta disponible no implica autenticación: la sesión sigue pendiente.
+ * Los procesos de órdenes, inventario y caja conservan su estado pendiente.
  */
 
 export type EstadoCapacidad = "disponible" | "incompleta" | "ausente";
@@ -89,7 +81,7 @@ export const OPERACIONES: OperacionApi[] = [
     procedimiento: "HistorialEstadoOrden, MovimientoInventario",
   },
 
-  // ---- Clientes (UNICO modulo integrado) ----
+  // ---- Clientes ----
   {
     id: "clientes.listar",
     modulo: "Clientes",
@@ -138,19 +130,103 @@ export const OPERACIONES: OperacionApi[] = [
     nota: "No hay DELETE: la desactivacion es Activo=false.",
   },
 
-  // ---- Equipos ----
+  // ---- Equipos y sus catálogos ----
   {
-    id: "equipos.listar",
-    modulo: "Equipos",
-    operacion: "Buscar equipos por serie / cliente",
-    metodo: "Sin endpoint",
-    ruta: "(requiere /api/equipos?serie=...)",
-    entrada: "serie, clienteId",
-    respuesta: "Equipo[]",
-    roles: "RECEPCION, TECNICO, ADMIN",
-    estado: "ausente",
-    procedimiento: "vHistorialEquipo",
-    nota: "Equipo toma Marca/Tipo a traves de ModeloEquipo. Un equipo con ordenes no permite cambiar propietario, serie ni modelo (trEquipoPropietario).",
+    "id": "equipos.listar",
+    "modulo": "Equipos",
+    "operacion": "Buscar equipos por serie / cliente",
+    "metodo": "GET",
+    "ruta": "/api/equipos",
+    "entrada": "clienteId?, serie?, activo?",
+    "respuesta": "Equipo[]",
+    "roles": "RECEPCION, TECNICO, ADMIN",
+    "estado": "disponible",
+    "procedimiento": "spListarEquipos"
+  },
+  {
+    "id": "equipos.consultar",
+    "modulo": "Equipos",
+    "operacion": "Consultar equipo",
+    "metodo": "GET",
+    "ruta": "/api/equipos/{id}",
+    "entrada": "id",
+    "respuesta": "Equipo",
+    "roles": "RECEPCION, TECNICO, ADMIN",
+    "estado": "disponible",
+    "procedimiento": "spConsultarEquipo"
+  },
+  {
+    "id": "equipos.crear",
+    "modulo": "Equipos",
+    "operacion": "Registrar equipo",
+    "metodo": "POST",
+    "ruta": "/api/equipos",
+    "entrada": "EquipoDatos",
+    "respuesta": "Equipo (201)",
+    "roles": "RECEPCION, TECNICO, ADMIN",
+    "estado": "disponible",
+    "procedimiento": "spRegistrarEquipo"
+  },
+  {
+    "id": "equipos.actualizar",
+    "modulo": "Equipos",
+    "operacion": "Actualizar / activar / desactivar equipo",
+    "metodo": "PUT",
+    "ruta": "/api/equipos/{id}",
+    "entrada": "id, EquipoDatos",
+    "respuesta": "Equipo",
+    "roles": "RECEPCION, TECNICO, ADMIN",
+    "estado": "disponible",
+    "procedimiento": "spActualizarEquipo",
+    "nota": "Con órdenes se conserva propietario, serie y modelo; descripción y Activo pueden actualizarse."
+  },
+  {
+    "id": "equipos.historial",
+    "modulo": "Equipos",
+    "operacion": "Consultar historial de un equipo",
+    "metodo": "GET",
+    "ruta": "/api/equipos/{id}/historial",
+    "entrada": "id",
+    "respuesta": "HistorialEquipo[]",
+    "roles": "RECEPCION, TECNICO, ADMIN",
+    "estado": "disponible",
+    "procedimiento": "spHistorialEquipo"
+  },
+  {
+    "id": "catalogos.tiposEquipos",
+    "modulo": "Catalogos",
+    "operacion": "Consultar tipos de equipo",
+    "metodo": "GET",
+    "ruta": "/api/catalogos/tipos-equipos",
+    "entrada": "-",
+    "respuesta": "TipoEquipo[]",
+    "roles": "RECEPCION, TECNICO, ADMIN",
+    "estado": "disponible",
+    "procedimiento": "spListarTiposEquipo"
+  },
+  {
+    "id": "catalogos.marcas",
+    "modulo": "Catalogos",
+    "operacion": "Consultar marcas",
+    "metodo": "GET",
+    "ruta": "/api/catalogos/marcas",
+    "entrada": "-",
+    "respuesta": "Marca[]",
+    "roles": "RECEPCION, TECNICO, ADMIN",
+    "estado": "disponible",
+    "procedimiento": "spListarMarcas"
+  },
+  {
+    "id": "catalogos.modelosEquipos",
+    "modulo": "Catalogos",
+    "operacion": "Consultar modelos",
+    "metodo": "GET",
+    "ruta": "/api/catalogos/modelos-equipos",
+    "entrada": "marcaId?, tipoEquipoId?",
+    "respuesta": "ModeloEquipo[]",
+    "roles": "RECEPCION, TECNICO, ADMIN",
+    "estado": "disponible",
+    "procedimiento": "spListarModelosEquipo"
   },
 
   // ---- Ordenes ----
