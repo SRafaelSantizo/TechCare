@@ -17,8 +17,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -33,7 +31,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.net.URI;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -44,12 +41,6 @@ public class ClienteController {
 
     private static final Logger LOG = LoggerFactory.getLogger(ClienteController.class);
 
-    private static final String SELECT_CLIENTES = """
-            SELECT ClienteID, TipoClienteID, NIT, Nombre, Email,
-                   Telefono, Direccion, Activo
-            FROM dbo.Cliente
-            """;
-
     private final JdbcTemplate jdbc;
 
     public ClienteController(JdbcTemplate jdbc) {
@@ -58,94 +49,52 @@ public class ClienteController {
 
     @GetMapping
     public List<Map<String, Object>> listarClientes() {
-        return jdbc.queryForList(SELECT_CLIENTES + " ORDER BY ClienteID");
+        return jdbc.queryForList("EXEC dbo.spListarClientes");
     }
 
     @GetMapping("/{id}")
     public Map<String, Object> consultarCliente(@PathVariable("id") int id) {
         validarId(id);
-        List<Map<String, Object>> clientes = jdbc.queryForList(
-                SELECT_CLIENTES + " WHERE ClienteID = ?", id);
-
-        if (clientes.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "El cliente no existe.");
-        }
-
-        return clientes.get(0);
+        return obtenerCliente(jdbc.queryForList("EXEC dbo.spConsultarCliente ?", id));
     }
 
     @PostMapping
-    @Transactional
     public ResponseEntity<Map<String, Object>> registrarCliente(
             @Valid @RequestBody ClienteDatos datos) {
 
-        validarTipoCliente(datos.tipoClienteId());
-        GeneratedKeyHolder clave = new GeneratedKeyHolder();
+        Map<String, Object> cliente = obtenerCliente(jdbc.queryForList(
+                "EXEC dbo.spRegistrarCliente ?, ?, ?, ?, ?, ?, ?",
+                datos.tipoClienteId(), datos.nit(), datos.nombre(), datos.email(),
+                datos.telefono(), datos.direccion(), datos.activo()));
 
-        jdbc.update(conexion -> {
-            var sentencia = conexion.prepareStatement("""
-                    INSERT INTO dbo.Cliente
-                        (TipoClienteID, NIT, Nombre, Email, Telefono, Direccion, Activo)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, Statement.RETURN_GENERATED_KEYS);
-
-            sentencia.setInt(1, datos.tipoClienteId());
-            sentencia.setString(2, datos.nit());
-            sentencia.setNString(3, datos.nombre());
-            sentencia.setNString(4, datos.email());
-            sentencia.setString(5, datos.telefono());
-            sentencia.setNString(6, datos.direccion());
-            sentencia.setBoolean(7, datos.activo());
-            return sentencia;
-        }, clave);
-
-        Number nuevoId = clave.getKey();
-        if (nuevoId == null) {
-            throw new DataRetrievalFailureException("No se recuperó el ID del cliente creado.");
-        }
-
-        int id = nuevoId.intValue();
-        return ResponseEntity.created(URI.create("/api/clientes/" + id))
-                .body(consultarCliente(id));
+        Number id = (Number) cliente.get("ClienteID");
+        return ResponseEntity.created(URI.create("/api/clientes/" + id.intValue()))
+                .body(cliente);
     }
 
     @PutMapping("/{id}")
-    @Transactional
     public Map<String, Object> actualizarCliente(
             @PathVariable("id") int id,
             @Valid @RequestBody ClienteDatos datos) {
 
         validarId(id);
-        validarTipoCliente(datos.tipoClienteId());
+        return obtenerCliente(jdbc.queryForList(
+                "EXEC dbo.spActualizarCliente ?, ?, ?, ?, ?, ?, ?, ?",
+                id, datos.tipoClienteId(), datos.nit(), datos.nombre(), datos.email(),
+                datos.telefono(), datos.direccion(), datos.activo()));
+    }
 
-        int filas = jdbc.update("""
-                UPDATE dbo.Cliente
-                SET TipoClienteID = ?, NIT = ?, Nombre = ?, Email = ?,
-                    Telefono = ?, Direccion = ?, Activo = ?
-                WHERE ClienteID = ?
-                """, datos.tipoClienteId(), datos.nit(), datos.nombre(),
-                datos.email(), datos.telefono(), datos.direccion(), datos.activo(), id);
-
-        if (filas == 0) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "El cliente no existe.");
+    private Map<String, Object> obtenerCliente(List<Map<String, Object>> clientes) {
+        if (clientes.size() != 1 || !(clientes.get(0).get("ClienteID") instanceof Number)) {
+            throw new DataRetrievalFailureException(
+                    "El procedimiento no devolvió un cliente válido.");
         }
-
-        return consultarCliente(id);
+        return clientes.get(0);
     }
 
     private void validarId(int id) {
         if (id <= 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El ID debe ser mayor que cero.");
-        }
-    }
-
-    private void validarTipoCliente(int tipoClienteId) {
-        Integer cantidad = jdbc.queryForObject(
-                "SELECT COUNT(*) FROM dbo.TipoCliente WHERE TipoClienteID = ?",
-                Integer.class, tipoClienteId);
-
-        if (cantidad == null || cantidad == 0) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El tipo de cliente no existe.");
         }
     }
 
@@ -185,18 +134,45 @@ public class ClienteController {
 
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<Map<String, Object>> manejarIntegridad(DataIntegrityViolationException ex) {
-        if (ex.getMostSpecificCause() instanceof SQLException sql
-                && (sql.getErrorCode() == 2601 || sql.getErrorCode() == 2627)) {
-            return error(HttpStatus.CONFLICT, "El NIT ya está registrado en otro cliente.");
-        }
-
-        return error(HttpStatus.CONFLICT, "Los datos incumplen una regla de integridad de la base de datos.");
+        ResponseEntity<Map<String, Object>> respuesta = traducirErrorSql(ex);
+        return respuesta != null ? respuesta : error(HttpStatus.CONFLICT,
+                "Los datos incumplen una regla de integridad de la base de datos.");
     }
 
     @ExceptionHandler(DataAccessException.class)
     public ResponseEntity<Map<String, Object>> manejarBaseDatos(DataAccessException ex) {
+        ResponseEntity<Map<String, Object>> respuesta = traducirErrorSql(ex);
+        if (respuesta != null) {
+            return respuesta;
+        }
         LOG.error("No se pudo completar una operación del módulo de Clientes.", ex);
         return error(HttpStatus.INTERNAL_SERVER_ERROR, "No se pudo completar la operación. Revisá el backend.");
+    }
+
+    private ResponseEntity<Map<String, Object>> traducirErrorSql(DataAccessException ex) {
+        // THROW conserva el número de error de SQL Server. La API lo traduce a HTTP.
+        Throwable causa = ex;
+        while (causa != null) {
+            if (causa instanceof SQLException sql) {
+                for (SQLException actual = sql; actual != null; actual = actual.getNextException()) {
+                    switch (actual.getErrorCode()) {
+                        case 51200:
+                        case 51201:
+                            return error(HttpStatus.BAD_REQUEST, actual.getMessage());
+                        case 51202:
+                            return error(HttpStatus.NOT_FOUND, "El cliente no existe.");
+                        case 51203:
+                        case 2601:
+                        case 2627:
+                            return error(HttpStatus.CONFLICT, "El NIT ya está registrado en otro cliente.");
+                        default:
+                            break;
+                    }
+                }
+            }
+            causa = causa.getCause();
+        }
+        return null;
     }
 
     private ResponseEntity<Map<String, Object>> error(HttpStatus estado, String mensaje) {
