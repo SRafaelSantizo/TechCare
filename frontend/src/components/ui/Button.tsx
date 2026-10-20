@@ -1,4 +1,6 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+﻿import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { motion, useReducedMotion } from "motion/react";
+import { EASE_OUT } from "../motion/motionConfig";
 
 type Variante = "primario" | "secundario" | "fantasma" | "peligro";
 
@@ -7,6 +9,7 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   tamano?: "normal" | "sm";
   bloque?: boolean;
   icono?: ReactNode;
+  whileTapScale?: number;
 }
 
 const claseVariante: Record<Variante, string> = {
@@ -24,8 +27,10 @@ export function Button({
   children,
   className,
   type = "button",
+  whileTapScale = 0.995,
   ...rest
 }: ButtonProps) {
+  const reduce = useReducedMotion();
   const clases = [
     "tc-btn",
     claseVariante[variante],
@@ -36,11 +41,27 @@ export function Button({
     .filter(Boolean)
     .join(" ");
 
+  if (reduce) {
+    return (
+      <button type={type} className={clases} {...rest}>
+        {icono}
+        {children}
+      </button>
+    );
+  }
+
   return (
-    <button type={type} className={clases} {...rest}>
+    <motion.button
+      type={type}
+      className={clases}
+      whileTap={{ scale: whileTapScale }}
+      whileHover={{ scale: 1.002 }}
+      transition={{ duration: 0.16, ease: EASE_OUT }}
+      {...(rest as any)}
+    >
       {icono}
       {children}
-    </button>
+    </motion.button>
   );
 }
 
@@ -50,15 +71,29 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 export function IconButton({ etiqueta, children, className, type = "button", ...rest }: IconButtonProps) {
+  const reduce = useReducedMotion();
+  const clases = ["tc-icon-btn", className ?? ""].filter(Boolean).join(" ");
+
+  if (reduce) {
+    return (
+      <button type={type} className={clases} aria-label={etiqueta} title={etiqueta} {...rest}>
+        {children}
+      </button>
+    );
+  }
+
   return (
-    <button
+    <motion.button
       type={type}
-      className={["tc-icon-btn", className ?? ""].filter(Boolean).join(" ")}
+      className={clases}
       aria-label={etiqueta}
       title={etiqueta}
-      {...rest}
+      whileTap={{ scale: 0.98 }}
+      whileHover={{ scale: 1.02 }}
+      transition={{ duration: 0.16, ease: EASE_OUT }}
+      {...(rest as any)}
     >
       {children}
-    </button>
+    </motion.button>
   );
 }

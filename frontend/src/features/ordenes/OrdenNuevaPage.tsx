@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+
 import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { Check, Info } from "lucide-react";
 import { PageHeader, Card } from "../../components/ui/Card";
 import { Button } from "../../components/ui/Button";
@@ -59,7 +60,7 @@ export function OrdenNuevaPage() {
                 <Badge tono={activo ? "info" : completado ? "ok" : "neutral"}>
                   {completado ? <Check size={13} /> : null} {i + 1}. {nombre}
                 </Badge>
-                {i < PASOS.length - 1 ? <span aria-hidden="true" className="tc-field__hint">›</span> : null}
+                {i < PASOS.length - 1 ? <span aria-hidden="true" className="tc-field__hint">Ã¢â‚¬Âº</span> : null}
               </div>
             );
           })}
@@ -67,9 +68,9 @@ export function OrdenNuevaPage() {
 
         {paso === 0 ? (
           <Card>
-            <h2 className="tc-section-title">Paso 1 · Cliente</h2>
+            <h2 className="tc-section-title">Paso 1 Ã‚Â· Cliente</h2>
             <p className="tc-section-sub">
-              Buscá el cliente que entrega el equipo. Si todavia no existe, registralo en el modulo de Clientes.
+              BuscÃƒÂ¡ el cliente que entrega el equipo. Si todavia no existe, registralo en el modulo de Clientes.
             </p>
             <SearchInput
               placeholder="Buscar por nombre o NIT"
@@ -79,7 +80,7 @@ export function OrdenNuevaPage() {
             />
             <div style={{ marginTop: 16 }}>
               {isLoading ? (
-                <LoadingState titulo="Cargando clientes…" />
+                <LoadingState titulo="Cargando clientesÃ¢â‚¬Â¦" />
               ) : isError ? (
                 <Alert tono="danger" titulo="No se pudo cargar clientes" accion={<Button onClick={() => refetch()}>Reintentar</Button>}>
                   {mensajeDeError(error, "la lista de clientes")}
@@ -97,7 +98,7 @@ export function OrdenNuevaPage() {
                       <span>
                         <strong style={{ fontWeight: 500 }}>{c.Nombre}</strong>
                         <div className="tc-field__hint">
-                          {nombreTipoCliente(c.TipoClienteID)} · NIT {c.NIT} {c.Activo ? "" : "· inactivo"}
+                          {nombreTipoCliente(c.TipoClienteID)} Ã‚Â· NIT {c.NIT} {c.Activo ? "" : "Ã‚Â· inactivo"}
                         </div>
                       </span>
                       <Button
@@ -126,7 +127,7 @@ export function OrdenNuevaPage() {
 
         {paso === 1 ? (
           <Card>
-            <h2 className="tc-section-title">Paso 2 · Equipo</h2>
+            <h2 className="tc-section-title">Paso 2 Ã‚Â· Equipo</h2>
             <div className="tc-row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
               <span className="tc-field__hint">
                 Cliente: <strong style={{ color: "var(--tc-text)" }}>{clienteSeleccionado?.Nombre}</strong>
@@ -135,13 +136,13 @@ export function OrdenNuevaPage() {
                 Cambiar
               </Button>
             </div>
-            {equipos.isLoading ? <LoadingState titulo="Cargando equipos…" /> : equipos.isError ? (
+            {equipos.isLoading ? <LoadingState titulo="Cargando equiposâ€¦" /> : equipos.isError ? (
               <Alert tono="danger" accion={<Button onClick={() => equipos.refetch()}>Reintentar</Button>}>{mensajeDeError(equipos.error)}</Alert>
             ) : (
               <Field label="Equipo del cliente" htmlFor="nueva-equipo" requerido>
-                <SelectInput id="nueva-equipo" value={equipoId} onChange={e => setEquipoId(e.target.value)}>
+                <SelectInput id="nueva-equipo" value={equipoId} onChange={(e: any) => setEquipoId(e.target.value)}>
                   <option value="">Elegir equipo</option>
-                  {equipos.data?.filter(e => e.Activo).map(e => <option key={e.EquipoID} value={e.EquipoID}>{e.NumeroSerie} · {e.Marca} {e.Modelo}</option>)}
+                  {equipos.data?.filter((e: any) => e.Activo).map((e: any) => <option key={e.EquipoID} value={e.EquipoID}>{e.NumeroSerie} Â· {e.Marca} {e.Modelo}</option>)}
                 </SelectInput>
               </Field>
             )}
@@ -154,7 +155,7 @@ export function OrdenNuevaPage() {
 
         {paso === 2 ? (
           <Card>
-            <h2 className="tc-section-title">Paso 3 · Problema reportado</h2>
+            <h2 className="tc-section-title">Paso 3 Ã‚Â· Problema reportado</h2>
             <div className="tc-stack">
               <Field label="Problema reportado" htmlFor="nueva-problema" requerido hint="Obligatorio (CK_Orden_Problema).">
                 <TextArea id="nueva-problema" rows={4} placeholder="Describi la falla tal como la reporta el cliente." />
@@ -185,13 +186,13 @@ export function OrdenNuevaPage() {
                 Revisar
               </Button>
             </div>
-            <PendingState titulo="Creación de la orden pendiente" descripcion="La selección del cliente y del equipo está disponible. Falta conectar la confirmación del ingreso con el registro de órdenes." />
+            <PendingState titulo="CreaciÃ³n de la orden pendiente" descripcion="La selecciÃ³n del cliente y del equipo estÃ¡ disponible. Falta conectar la confirmaciÃ³n del ingreso con el registro de Ã³rdenes." />
           </Card>
         ) : null}
 
         {paso === 3 ? (
           <Card>
-            <h2 className="tc-section-title">Paso 4 · Confirmar ingreso</h2>
+            <h2 className="tc-section-title">Paso 4 Ã‚Â· Confirmar ingreso</h2>
             <p className="tc-inline-note">
               <Info size={16} aria-hidden="true" />
               La confirmacion del ingreso todavia no esta disponible: el servidor debe crear la orden y asignar su

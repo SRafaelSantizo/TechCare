@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
+import { EASE_SALIDA } from "../motion/motionConfig";
 import { Button } from "./Button";
 
 export interface Columna<T> {
@@ -28,6 +29,15 @@ export function DataTable<T>({
 }) {
   const reduce = useReducedMotion();
   const usarAnimacion = animarFilas && !reduce;
+  const seenRef = useRef<Set<string | number>>(new Set());
+  const pageKeyRef = useRef<string>("");
+
+  const pageKey = `${filas.map((f, _i) => claveFila(f)).join("|")}|${filas.length}`;
+  const isNewPage = pageKeyRef.current !== pageKey && pageKeyRef.current !== "";
+
+  useEffect(() => {
+    pageKeyRef.current = pageKey;
+  }, [pageKey]);
 
   return (
     <div className="tc-table-wrap">
@@ -57,17 +67,23 @@ export function DataTable<T>({
               </td>
             </tr>
           ) : (
-            filas.map((fila, idx) => {
-              const trProps: any = usarAnimacion
+            filas.map((fila, _idx) => {
+              const key = claveFila(fila);
+              const isNew = !seenRef.current.has(key);
+              if (isNew) {
+                seenRef.current.add(key);
+              }
+              const shouldAnimate = usarAnimacion && (isNewPage || isNew);
+              const trProps: Record<string, unknown> = shouldAnimate
                 ? {
                     initial: { opacity: 0, y: 8 },
                     animate: { opacity: 1, y: 0 },
-                    transition: { duration: 0.26, ease: [0.22, 1, 0.36, 1], delay: idx * 0.055 },
+                    transition: { duration: 0.25, ease: EASE_SALIDA, delay: Math.min(_idx, 12) * 0.05 },
                   }
                 : {};
-              const Tr = usarAnimacion ? (motion.tr as any) : "tr";
+              const Tr = shouldAnimate ? motion.tr : "tr";
               return (
-                <Tr key={claveFila(fila)} {...trProps}>
+                <Tr key={key} {...trProps}>
                   {columnas.map((c) => (
                     <td key={c.clave} className={c.numerica ? "tc-table__num" : undefined}>
                       {c.render(fila)}
@@ -100,7 +116,7 @@ export function Paginacion({
   return (
     <div className="tc-row" style={{ justifyContent: "space-between", marginTop: 12 }}>
       <span className="tc-field__hint">
-        Pagina {pagina} de {totalPaginas} Â· {total} registro(s)
+        Pagina {pagina} de {totalPaginas} • {total} registro(s)
       </span>
       <div className="tc-row" style={{ gap: 8 }}>
         <Button

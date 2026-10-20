@@ -1,4 +1,4 @@
-﻿import { PendingModule } from "../../components/ui/PendingModule";
+import { PendingModule } from "../../components/ui/PendingModule";
 
 export function OrdenesListPage() {
   return (
