@@ -9,7 +9,7 @@ import { EstadoOrdenBadge } from "../../components/ui/Badge";
 import { Alert } from "../../components/ui/Alert";
 import { Dialog } from "../../components/ui/Dialog";
 import { Field, SelectInput, TextArea } from "../../components/ui/inputs";
-import { LoadingState, PendingState } from "../../components/ui/StateView";
+import { LoadingState } from "../../components/ui/StateView";
 import { DataTable, type Columna } from "../../components/ui/DataTable";
 import { ordenesApi, type EventoOrden } from "../../services/ordenes";
 import { esApiError, mensajeDeError } from "../../services/errors";
@@ -18,6 +18,7 @@ import { nombreEstado } from "../../services/catalogos";
 import "./ordenes.css";
 
 const ServicioTecnicoPanel = lazy(() => import("./ServicioTecnicoPanel").then(m => ({ default: m.ServicioTecnicoPanel })));
+const FacturacionPanel = lazy(() => import("../facturacion/FacturacionPanel").then(m => ({ default: m.FacturacionPanel })));
 const SECCIONES = ["Recepción", "Diagnóstico", "Reparación", "Repuestos", "Factura y pagos", "Entrega", "Historial"] as const;
 type Seccion = typeof SECCIONES[number];
 export function OrdenExpedientePage() {
@@ -29,6 +30,10 @@ export function OrdenExpedientePage() {
   const location = useLocation();
   const qc = useQueryClient();
   const [seccion, setSeccion] = useState<Seccion>("Recepción");
+  useEffect(() => {
+    const destino = new URLSearchParams(location.search).get("seccion");
+    setSeccion(destino === "factura" ? "Factura y pagos" : destino === "entrega" ? "Entrega" : "Recepción");
+  }, [ordenId, location.search]);
   const [accion, setAccion] = useState<"asignar" | "cancelar" | null>(null);
   const [tecnicoId, setTecnicoId] = useState("");
   const [observacion, setObservacion] = useState("");
@@ -105,7 +110,8 @@ export function OrdenExpedientePage() {
           {seccion === "Historial" ? historial.isLoading ? <LoadingState titulo="Cargando historial…" /> : historial.isError ?
             <Alert tono="danger" accion={<Button onClick={() => historial.refetch()}>Reintentar</Button>}>{mensajeDeError(historial.error)}</Alert> :
             <DataTable columnas={columnas} filas={historial.data ?? []} claveFila={e => e.eventoId} vacio="Sin eventos registrados." /> : null}
-          {["Factura y pagos", "Entrega"].includes(seccion) ? <PendingState titulo="Sección pendiente" descripcion="Esta parte del expediente todavía no está disponible." /> : null}
+          {seccion === "Factura y pagos" || seccion === "Entrega" ? <Suspense fallback={<LoadingState titulo="Cargando caja y entrega…" />}>
+            <FacturacionPanel key={ordenId} orden={o} seccion={seccion} /></Suspense> : null}
         </div></Card>
       </div> : null}
     {accion && o ? <Dialog abierto titulo={accion === "asignar" ? "Asignar técnico" : "Cancelar orden"}

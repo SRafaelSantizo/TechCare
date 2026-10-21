@@ -183,6 +183,8 @@ el mensaje SQL concreto puede variar frente a la versión con INSTEAD OF.
 
 Documentos para el equipo:
 
+- `INTEGRACION_FACTURACION_ENTREGA.md`: caja, abonos, entrega y factura PDF detallada; scripts 23 y 24.
+
 - `GUIA_TRIGGERS.md`: definición, inserted/deleted, ejemplo reversible y los 16 objetos.
 - `GUIA_GITHUB.md`: publicación privada con GitHub Desktop y trabajo por ramas.
 - `CAMBIOS.md`: correspondencia entre los 28 triggers anteriores y los 16 actuales.

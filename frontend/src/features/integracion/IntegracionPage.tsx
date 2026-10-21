@@ -63,7 +63,7 @@ export function IntegracionPage() {
 
       <div className="tc-stack">
         <Alert tono="info" titulo="Contrato verificado">
-          Acceso, administración, clientes, equipos, órdenes y servicio técnico tienen rutas bajo <code>{API_BASE_URL}</code>.
+          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF y entrega tienen rutas bajo <code>{API_BASE_URL}</code>.
           Las operaciones requieren sesión, rol y protección CSRF al escribir. El servicio técnico valida además
           el responsable asignado. Los errores mantienen la forma <code>{"{ estado, mensaje, errores? }"}</code>.
         </Alert>

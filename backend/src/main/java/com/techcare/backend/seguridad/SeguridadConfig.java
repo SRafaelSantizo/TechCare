@@ -59,6 +59,11 @@ public class SeguridadConfig {
                                 "/api/admin/roles","/api/admin/empleados-disponibles").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.POST,"/api/admin/usuarios").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.GET,"/api/ordenes/catalogos/tecnicos").hasAnyRole("ADMIN","RECEPCION")
+                        .requestMatchers(HttpMethod.GET,"/api/facturas","/api/caja/metodos-pago",
+                                "/api/ordenes/*/factura/previa").hasAnyRole("ADMIN","CAJA")
+                        .requestMatchers(HttpMethod.POST,"/api/ordenes/*/factura","/api/ordenes/*/factura/pagos")
+                            .hasAnyRole("ADMIN","CAJA")
+                        .requestMatchers(HttpMethod.POST,"/api/ordenes/*/entrega").hasAnyRole("ADMIN","RECEPCION")
                         .requestMatchers(HttpMethod.GET,"/api/ordenes","/api/ordenes/**")
                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
                         .requestMatchers(HttpMethod.POST,"/api/ordenes","/api/ordenes/*/cancelacion")

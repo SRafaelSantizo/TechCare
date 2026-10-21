@@ -86,3 +86,14 @@ export const http = {
   post: <T>(path: string, body?: unknown) => apiRequest<T>(path, { method: "POST", body }),
   put: <T>(path: string, body: unknown) => apiRequest<T>(path, { method: "PUT", body }),
 };
+
+export async function descargarPdf(path: string): Promise<Blob> {
+  const respuesta = await solicitar(`${BASE_URL}${path}`, { method: "GET", headers: { Accept: "application/pdf, application/json" } });
+  if (!respuesta.ok) {
+    if (respuesta.status === 401) { reiniciarCsrf(); window.dispatchEvent(new Event(SESION_EXPIRADA)); }
+    throw errorHttp(respuesta, await leer(respuesta));
+  }
+  if (!respuesta.headers.get("Content-Type")?.toLowerCase().startsWith("application/pdf"))
+    throw new ApiError(502, "El servidor no devolvió una factura PDF válida.");
+  return respuesta.blob();
+}
