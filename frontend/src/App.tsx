@@ -11,15 +11,17 @@ import { OrdenesListPage } from "./features/ordenes/OrdenesListPage";
 import { OrdenNuevaPage } from "./features/ordenes/OrdenNuevaPage";
 import { OrdenExpedientePage } from "./features/ordenes/OrdenExpedientePage";
 import { InventarioPage } from "./features/inventario/InventarioPage";
-import { RepuestosPage } from "./features/repuestos/RepuestosPage";
 import { ComprasPage } from "./features/compras/ComprasPage";
-import { ProveedoresPage } from "./features/proveedores/ProveedoresPage";
 import { ReportesPage } from "./features/reportes/ReportesPage";
 import { AdministracionPage } from "./features/administracion/AdministracionPage";
 import { IntegracionPage } from "./features/integracion/IntegracionPage";
 import { LoginPage } from "./features/auth/LoginPage";
 
 const FacturacionPage = lazy(() => import("./features/facturacion/FacturacionPage").then(m => ({ default: m.FacturacionPage })));
+
+const RepuestosPage = lazy(() => import("./features/repuestos/RepuestosPage").then(m => ({ default: m.RepuestosPage })));
+const ProveedoresPage = lazy(() => import("./features/proveedores/ProveedoresPage").then(m => ({ default: m.ProveedoresPage })));
+const BodegasPage = lazy(() => import("./features/bodegas/BodegasPage").then(m => ({ default: m.BodegasPage })));
 
 export default function App() {
   return (
@@ -41,9 +43,10 @@ export default function App() {
         <Route path="/equipos" element={<EquiposPage />} />
 
         <Route path="/inventario" element={<InventarioPage />} />
-        <Route path="/repuestos" element={<RepuestosPage />} />
+        <Route path="/repuestos" element={<Suspense fallback={<LoadingState titulo="Cargando repuestos…" />}><RepuestosPage /></Suspense>} />
+        <Route path="/bodegas" element={<Suspense fallback={<LoadingState titulo="Cargando bodegas…" />}><BodegasPage /></Suspense>} />
         <Route path="/compras" element={<ComprasPage />} />
-        <Route path="/proveedores" element={<ProveedoresPage />} />
+        <Route path="/proveedores" element={<Suspense fallback={<LoadingState titulo="Cargando proveedores…" />}><ProveedoresPage /></Suspense>} />
 
         <Route path="/facturacion" element={<Suspense fallback={<LoadingState titulo="Cargando caja…" />}><FacturacionPage /></Suspense>} />
 

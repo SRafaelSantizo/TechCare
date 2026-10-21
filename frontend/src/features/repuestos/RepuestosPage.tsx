@@ -1,11 +1,3 @@
-import { PendingModule } from "../../components/ui/PendingModule";
+import { GestionCatalogo } from "../abastecimiento/GestionCatalogo";
 
-export function RepuestosPage() {
-  return (
-    <PendingModule
-      modulo="Repuestos"
-      titulo="Catalogo de repuestos"
-      descripcion="Catalogo de repuestos con codigo, categoria, descripcion, costo de referencia, precio de venta y estado."
-    />
-  );
-}
+export function RepuestosPage() { return <GestionCatalogo tipo="repuestos" />; }

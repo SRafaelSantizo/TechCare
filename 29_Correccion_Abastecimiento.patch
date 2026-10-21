@@ -1,0 +1,166 @@
+gdiff --git a/26_Abastecimiento_Procedimientos.sql b/26_Abastecimiento_Procedimientos.sql
+index 41a7da6b8e9239edbc12e6bc34ac96dacb1557b1..15e612af1ab20148c57b1a6379a5a7085dacbbce 100644
+--- a/26_Abastecimiento_Procedimientos.sql
++++ b/26_Abastecimiento_Procedimientos.sql
+@@ -129,7 +129,8 @@ BEGIN
+         SET @Codigo=NULLIF(LTRIM(RTRIM(@Codigo)),N''); SET @Nombre=NULLIF(LTRIM(RTRIM(@Nombre)),N'');
+         SET @Descripcion=NULLIF(LTRIM(RTRIM(@Descripcion)),N'');
+         IF @RepuestoID<=0 OR (@RepuestoID IS NULL AND @Revision IS NOT NULL) OR @Activo IS NULL
+-           OR @Codigo IS NULL OR DATALENGTH(@Codigo)>60 OR @Codigo COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9A-Za-z._/-]%'
++           -- El guion literal va primero dentro del conjunto; no forma un rango con la barra.
++           OR @Codigo IS NULL OR DATALENGTH(@Codigo)>60 OR @Codigo COLLATE Latin1_General_100_BIN2 LIKE N'%[^-0-9A-Za-z._/]%'
+            OR @Nombre IS NULL OR DATALENGTH(@Nombre)>200 OR DATALENGTH(@Descripcion)>1000
+             THROW 52000,N'Revisá código (30), nombre (100), descripción (500) y estado del repuesto.',1;
+         IF @CostoReferencia IS NULL OR @PrecioVenta IS NULL OR @CostoReferencia<0 OR @PrecioVenta<0
+@@ -212,7 +213,7 @@ BEGIN
+         SET @NIT=NULLIF(LTRIM(RTRIM(@NIT)),N''); SET @Nombre=NULLIF(LTRIM(RTRIM(@Nombre)),N'');
+         SET @Email=NULLIF(LTRIM(RTRIM(@Email)),N''); SET @Telefono=NULLIF(LTRIM(RTRIM(@Telefono)),N''); SET @Direccion=NULLIF(LTRIM(RTRIM(@Direccion)),N'');
+         IF @ProveedorID<=0 OR (@ProveedorID IS NULL AND @Revision IS NOT NULL) OR @Activo IS NULL
+-           OR @NIT IS NULL OR DATALENGTH(@NIT)>40 OR @NIT COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9A-Za-z-]%'
++           OR @NIT IS NULL OR DATALENGTH(@NIT)>40 OR @NIT COLLATE Latin1_General_100_BIN2 LIKE N'%[^-0-9A-Za-z]%'
+            OR @Nombre IS NULL OR DATALENGTH(@Nombre)>300 OR DATALENGTH(@Email)>508 OR DATALENGTH(@Telefono)>50 OR DATALENGTH(@Direccion)>500
+            OR (@Email IS NOT NULL AND (@Email NOT LIKE N'%_@_%._%' OR @Email LIKE N'% %'))
+            OR @Telefono COLLATE Latin1_General_100_BIN2 LIKE N'%[^ -~]%'
+@@ -258,7 +259,7 @@ BEGIN
+         EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
+         SET @CodigoProveedor=NULLIF(LTRIM(RTRIM(@CodigoProveedor)),N'');
+         IF @ProveedorID IS NULL OR @ProveedorID<=0 OR @RepuestoID IS NULL OR @RepuestoID<=0 OR @Ofrecido IS NULL
+-           OR DATALENGTH(@CodigoProveedor)>100 OR @CodigoProveedor COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9A-Za-z._/ -]%'
++           OR DATALENGTH(@CodigoProveedor)>100 OR @CodigoProveedor COLLATE Latin1_General_100_BIN2 LIKE N'%[^-0-9A-Za-z._/ ]%'
+             THROW 52000,N'Revisá proveedor, repuesto y código del proveedor (hasta 50 caracteres).',1;
+         DECLARE @ProveedorActivo bit,@RepuestoActivo bit,@Actual varchar(64);
+         SELECT @ProveedorActivo=Activo FROM dbo.Proveedor WITH (UPDLOCK,HOLDLOCK) WHERE ProveedorID=@ProveedorID;
+@@ -322,7 +323,7 @@ BEGIN
+         EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
+         SET @Codigo=NULLIF(LTRIM(RTRIM(@Codigo)),N''); SET @Nombre=NULLIF(LTRIM(RTRIM(@Nombre)),N''); SET @Direccion=NULLIF(LTRIM(RTRIM(@Direccion)),N'');
+         IF @BodegaID<=0 OR (@BodegaID IS NULL AND @Revision IS NOT NULL) OR @Activo IS NULL
+-           OR @Codigo IS NULL OR DATALENGTH(@Codigo)>40 OR @Codigo COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9A-Za-z._/-]%'
++           OR @Codigo IS NULL OR DATALENGTH(@Codigo)>40 OR @Codigo COLLATE Latin1_General_100_BIN2 LIKE N'%[^-0-9A-Za-z._/]%'
+            OR @Nombre IS NULL OR DATALENGTH(@Nombre)>200 OR DATALENGTH(@Direccion)>500
+             THROW 52000,N'Revisá código (20), nombre (100), dirección (250) y estado de la bodega.',1;
+         IF @BodegaID IS NULL
+diff --git a/27_Pruebas_Abastecimiento.sql b/27_Pruebas_Abastecimiento.sql
+index 0b1bd835340506e2ca139c1d9839c56c8af8c36a..f9a5ff33f9d99c1f1a4fcba9c53fd433370f3867 100644
+--- a/27_Pruebas_Abastecimiento.sql
++++ b/27_Pruebas_Abastecimiento.sql
+@@ -68,7 +68,11 @@ INSERT @Casos VALUES
+ (52,N'Repuesto inexistente devuelve error controlado',52002),
+ (53,N'Búsqueda trata porcentaje y guion bajo como texto literal',0),
+ (54,N'Cambiar precios no reescribe consumo ni factura histórica',0),
+-(55,N'Error de actualización restaura el contexto de auditoría',2627);
++(55,N'Error de actualización restaura el contexto de auditoría',2627),
++(56,N'Repuesto admite código de 30 caracteres',0),
++(57,N'Bodega admite código de 20 caracteres',0),
++(58,N'Código de repuesto con carácter no permitido rechazado',52000),
++(59,N'Código de bodega con carácter no permitido rechazado',52000);
+ DECLARE @Antes TABLE (Nombre sysname PRIMARY KEY,Cantidad bigint);
+ INSERT @Antes
+ SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
+@@ -101,9 +105,11 @@ SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
+ SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi;
+ SELECT TOP (0) * INTO #ResultadoOrden FROM dbo.vOrdenAcceso;
+ SELECT TOP (0) * INTO #Repuestos FROM dbo.vRepuestoGestion;
+-SELECT TOP (0) * INTO #Categorias FROM dbo.vCategoriaRepuestoGestion;
+-SELECT TOP (0) * INTO #Proveedores FROM dbo.vProveedorGestion;
+-SELECT TOP (0) * INTO #Bodegas FROM dbo.vBodegaGestion;
++-- La expresión +0 conserva el valor/tipo del ID sin copiar IDENTITY.
++-- INSERT ... EXEC debe recibir también el ID devuelto por el procedimiento.
++SELECT TOP (0) CategoriaID+0 AS CategoriaID,Nombre,Revision INTO #Categorias FROM dbo.vCategoriaRepuestoGestion;
++SELECT TOP (0) ProveedorID+0 AS ProveedorID,NIT,Nombre,Email,Telefono,Direccion,Activo,Revision INTO #Proveedores FROM dbo.vProveedorGestion;
++SELECT TOP (0) BodegaID+0 AS BodegaID,Codigo,Nombre,Direccion,Activo,Revision INTO #Bodegas FROM dbo.vBodegaGestion;
+ SELECT TOP (0) * INTO #Ofertas FROM dbo.vOfertaProveedorGestion;
+ SELECT TOP (0) * INTO #Minimos FROM dbo.vRepuestoBodegaGestion;
+ DECLARE @Resultados TABLE (ID int,Caso nvarchar(200),Resultado varchar(4),Detalle nvarchar(4000));
+@@ -115,7 +121,7 @@ DECLARE @RevR varchar(64),@RevP varchar(64),@RevB varchar(64),@RevC varchar(64),
+ DECLARE @Movimientos bigint,@Inventarios bigint,@Auditorias bigint;
+ DECLARE @Lineas dbo.TipoDetalleCompra;
+ DECLARE @Hash varchar(255)='$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
+-WHILE @Caso<=55
++WHILE @Caso<=59
+ BEGIN
+     SELECT @Nombre=Caso,@Esperado=ErrorEsperado FROM @Casos WHERE ID=@Caso;
+     SET @Resultado='PASS';SET @Detalle=NULL;SET @Preparado=0;
+@@ -219,9 +225,9 @@ BEGIN
+         END;
+         IF @Caso=7
+         BEGIN
+-            SET @Codigo='NUEVO-'+@Sufijo;
++            SET @Codigo='-R.1_2/3-'+@Sufijo+'-';
+             INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,@Codigo,N'Fuente ñ 漢字',N'Descripción ñ 漢字',0,0,1;
+-            IF NOT EXISTS(SELECT 1 FROM #Repuestos WHERE Nombre=N'Fuente ñ 漢字' AND Descripcion=N'Descripción ñ 漢字' AND CostoReferencia=0 AND PrecioVenta=0)
++            IF NOT EXISTS(SELECT 1 FROM #Repuestos WHERE Codigo=@Codigo AND Nombre=N'Fuente ñ 漢字' AND Descripcion=N'Descripción ñ 漢字' AND CostoReferencia=0 AND PrecioVenta=0)
+                OR (SELECT COUNT_BIG(*) FROM dbo.Inventario)<>@Inventarios OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos
+                 THROW 52091,N'El alta no conservó datos o creó existencias.',1;
+         END;
+@@ -282,9 +288,9 @@ BEGIN
+         END;
+         IF @Caso=27
+         BEGIN
+-            SET @Codigo='NUEVA-'+@Sufijo;
++            SET @Codigo='-B.1_2/3-'+@Sufijo+'-';
+             INSERT #Bodegas EXEC dbo.spGuardarBodegaGestion @Bodeguero,NULL,@Codigo,N'Bodega ñ 漢字',N'Dirección ñ',1;
+-            IF NOT EXISTS(SELECT 1 FROM #Bodegas WHERE Nombre=N'Bodega ñ 漢字') OR (SELECT COUNT_BIG(*) FROM dbo.Inventario)<>@Inventarios
++            IF NOT EXISTS(SELECT 1 FROM #Bodegas WHERE Codigo=@Codigo AND Nombre=N'Bodega ñ 漢字') OR (SELECT COUNT_BIG(*) FROM dbo.Inventario)<>@Inventarios
+                OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos THROW 52091,N'El alta de bodega alteró inventario.',1;
+         END;
+         IF @Caso=28 EXEC dbo.spGuardarBodegaGestion @Bodeguero,NULL,@CodigoB,N'Duplicado',NULL,1;
+@@ -378,6 +384,22 @@ BEGIN
+                 THROW 52091,N'El cambio reescribió valores históricos.',1;
+         END;
+         IF @Caso=55 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@ExtraCodigo,N'Duplicado',NULL,13.50,30,1,@RevR;
++        IF @Caso=56
++        BEGIN
++            SET @Codigo='R-'+REPLICATE('A',19)+'-'+@Sufijo;
++            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,@Codigo,N'Código al límite',NULL,0,0,1;
++            IF NOT EXISTS(SELECT 1 FROM #Repuestos WHERE Codigo=@Codigo AND DATALENGTH(Codigo)=30)
++                THROW 52091,N'El código de 30 caracteres no se conservó.',1;
++        END;
++        IF @Caso=57
++        BEGIN
++            SET @Codigo='B-'+REPLICATE('A',9)+'-'+@Sufijo;
++            INSERT #Bodegas EXEC dbo.spGuardarBodegaGestion @Bodeguero,NULL,@Codigo,N'Código al límite',NULL,1;
++            IF NOT EXISTS(SELECT 1 FROM #Bodegas WHERE Codigo=@Codigo AND DATALENGTH(Codigo)=20)
++                THROW 52091,N'El código de 20 caracteres no se conservó.',1;
++        END;
++        IF @Caso=58 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'REP:INVALIDO',N'Prueba',NULL,1,1,1;
++        IF @Caso=59 EXEC dbo.spGuardarBodegaGestion @Bodeguero,NULL,N'BOD:INVALIDO',N'Prueba',NULL,1;
+         IF @Esperado<>0 THROW 52091,N'La operación debía rechazarse y fue aceptada.',1;
+         ROLLBACK TRANSACTION;
+     END TRY
+diff --git a/INTEGRACION_ABASTECIMIENTO.md b/INTEGRACION_ABASTECIMIENTO.md
+index 83f6f25bf75fdb3f2906d5167d7a3c9077699cd1..b93b05da92a4a16c21184aa586881ef6d47197ce 100644
+--- a/INTEGRACION_ABASTECIMIENTO.md
++++ b/INTEGRACION_ABASTECIMIENTO.md
+@@ -20,7 +20,7 @@ activar/desactivar, asociar repuestos y revisar cambios de precios.
+    TechCare habitual. Requiere el 23; es repetible y conserva datos. No volver
+    a ejecutar 01, 02 ni los scripts anteriores que ya están instalados.
+ 3. En DESARROLLO, sin transacciones abiertas ni otras escrituras concurrentes,
+-   ejecutar `27_Pruebas_Abastecimiento.sql`. Incluye 55 casos con datos propios,
++   ejecutar `27_Pruebas_Abastecimiento.sql`. Incluye 59 casos con datos propios,
+    ROLLBACK y comprobación de cantidades antes/después. Las identidades pueden
+    dejar huecos; no se conservan registros de prueba.
+ 4. Reiniciar el backend y el frontend como de costumbre. Este bloque no agrega
+@@ -141,9 +141,22 @@ sobre el conjunto completo devuelto por esos filtros.
+ - Los scripts 26 y 27 se analizaron con el dialecto T-SQL. El 27 reutiliza la
+   preparación corregida del 20, incluida la relación ProveedorRepuesto antes
+   de registrar la compra del escenario.
+-- SQL Server no está disponible aquí. Los 55 casos del 27 se ejecutan en su
++- La corrección incremental 29 cambia el 26 y el 27: el guion literal se ubica
++  al inicio de los conjuntos de caracteres permitidos, y las tablas temporales
++  de categorías, proveedores y bodegas no heredan IDENTITY. El resultado del
++  procedimiento se recibe completo, incluido el ID. Los casos 7 y 27 cubren
++  punto, guion, guion bajo y barra; los cuatro nuevos comprueban códigos en su
++  longitud máxima y el rechazo de caracteres no permitidos.
++- Para una instalación que ya tiene el patch 28, aplicar solamente el 29;
++  ejecutar de nuevo el 26 completo y después el 27 completo. No se necesita
++  reiniciar Java/Vite para esta corrección SQL.
++- SQL Server no está disponible aquí. Los 59 casos del 27 se ejecutan en su
+   instancia; no se declaran aprobados aquí. Las pruebas entre dos sesiones
+   concurrentes permanecen dentro de la validación final del proyecto.
+ 
+ Referencia de contexto de auditoría:
+ https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-set-session-context-transact-sql
++
++Referencias de la corrección SQL:
++https://learn.microsoft.com/sql/t-sql/language-elements/like-transact-sql
++https://learn.microsoft.com/sql/t-sql/queries/select-into-clause-transact-sql

@@ -2,15 +2,16 @@
 
 Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional,
 normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
-Clientes, Equipos, Órdenes y servicio técnico hasta LISTO tienen API e interfaz conectadas. El acceso usa las cuentas y
-roles de la BD, con login, sesión y cierre de sesión. Los demás módulos y manuales
-con capturas aún deben completarse.
+Clientes, equipos, órdenes, servicio técnico, facturación, pagos, entrega y los catálogos de
+abastecimiento tienen API e interfaz conectadas. El acceso usa las cuentas y roles de la BD,
+con login, sesión y cierre de sesión. Compras, inventario general, reportes y manuales con
+capturas aún deben completarse.
 
 Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
 La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
 las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
 Una instalación nueva con un maestro anterior debe incluir también las
-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes) y 19 (Servicio técnico).
+actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega) y 26 (Abastecimiento).
 
 Administración permite consultar y registrar cuentas, empleados y roles desde
 una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
@@ -25,7 +26,12 @@ historial de Equipos. Diagnóstico, autorización e inicio de reparación, activ
 consumo de repuestos y cierre en LISTO están conectados. Instalación:
 [INTEGRACION_SERVICIO_TECNICO.md](INTEGRACION_SERVICIO_TECNICO.md).
 En una base existente se ejecuta `19_Servicio_Tecnico_Procedimientos.sql`.
-Facturación, cobros y entrega desde la API quedan pendientes.
+Facturación, abonos, entrega y factura PDF están conectados mediante el 23. Instalación:
+[INTEGRACION_FACTURACION_ENTREGA.md](INTEGRACION_FACTURACION_ENTREGA.md).
+
+Repuestos, categorías, proveedores y bodegas se administran desde la aplicación con el 26.
+Incluye catálogo ofrecido, asociación de repuestos a bodegas, mínimos y auditoría de precios.
+Instalación: [INTEGRACION_ABASTECIMIENTO.md](INTEGRACION_ABASTECIMIENTO.md).
 
 ## Ejecución desde cero
 
@@ -54,7 +60,7 @@ TasaImpuesto es una tasa de prueba configurable (0.1200); no constituye configur
 
 ## Decisiones que debe conocer el equipo
 
-- **35 tablas originales**, más AsignacionOrden en la actualización 16. Cliente -> Equipo -> Orden determina el propietario. Orden
+- **35 tablas originales**, más AsignacionOrden en la actualización 16 y SolicitudPagoApi en la 23. Cliente -> Equipo -> Orden determina el propietario. Orden
   no repite ClienteID; `vOrdenResumen` lo presenta mediante JOIN y preserva 3FN.
   No se permite cambiar propietario, serie ni modelo de un equipo con órdenes.
 - **Un diagnóstico consolidado y una reparación por orden.** Las revisiones del
@@ -184,6 +190,7 @@ el mensaje SQL concreto puede variar frente a la versión con INSTEAD OF.
 Documentos para el equipo:
 
 - `INTEGRACION_FACTURACION_ENTREGA.md`: caja, abonos, entrega y factura PDF detallada; scripts 23 y 24.
+- `INTEGRACION_ABASTECIMIENTO.md`: repuestos, categorías, proveedores, bodegas y asociaciones; scripts 26 y 27.
 
 - `GUIA_TRIGGERS.md`: definición, inserted/deleted, ejemplo reversible y los 16 objetos.
 - `GUIA_GITHUB.md`: publicación privada con GitHub Desktop y trabajo por ramas.

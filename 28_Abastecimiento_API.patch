@@ -1,0 +1,2113 @@
+diff --git a/26_Abastecimiento_Procedimientos.sql b/26_Abastecimiento_Procedimientos.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..41a7da6b8e9239edbc12e6bc34ac96dacb1557b1
+--- /dev/null
++++ b/26_Abastecimiento_Procedimientos.sql
+@@ -0,0 +1,400 @@
++-- Catálogos de abastecimiento. Ejecutar completo después del 23.
++-- No crea existencias ni modifica compras, consumos o facturas históricas.
++USE [TechCare];
++GO
++SET NOCOUNT ON; SET XACT_ABORT ON;
++IF OBJECT_ID(N'dbo.spEmitirFacturaOrden',N'P') IS NULL
++    THROW 52090,N'Ejecutá primero 23_Facturacion_Entrega_Procedimientos.sql.',1;
++GO
++CREATE OR ALTER VIEW dbo.vCategoriaRepuestoGestion AS
++SELECT CategoriaID,Nombre,CONVERT(varchar(64),HASHBYTES('SHA2_256',CONCAT(CONVERT(nvarchar(max),CategoriaID),N'|',DATALENGTH(Nombre),N':',Nombre)),2) AS Revision
++FROM dbo.CategoriaRepuesto;
++GO
++CREATE OR ALTER VIEW dbo.vRepuestoGestion AS
++SELECT r.RepuestoID,r.CategoriaID,c.Nombre AS Categoria,r.Codigo,r.Nombre,r.Descripcion,r.CostoReferencia,r.PrecioVenta,r.Activo,
++    CONVERT(varchar(64),HASHBYTES('SHA2_256',CONCAT(CONVERT(nvarchar(max),r.RepuestoID),N'|',r.CategoriaID,N'|',
++        DATALENGTH(r.Codigo),N':',r.Codigo,N'|',DATALENGTH(r.Nombre),N':',r.Nombre,N'|',
++        COALESCE(DATALENGTH(r.Descripcion),-1),N':',r.Descripcion,N'|',r.CostoReferencia,N'|',r.PrecioVenta,N'|',r.Activo)),2) AS Revision
++FROM dbo.Repuesto r JOIN dbo.CategoriaRepuesto c ON c.CategoriaID=r.CategoriaID;
++GO
++CREATE OR ALTER VIEW dbo.vProveedorGestion AS
++SELECT ProveedorID,NIT,Nombre,Email,Telefono,Direccion,Activo,
++    CONVERT(varchar(64),HASHBYTES('SHA2_256',CONCAT(CONVERT(nvarchar(max),ProveedorID),N'|',DATALENGTH(NIT),N':',NIT,N'|',
++        DATALENGTH(Nombre),N':',Nombre,N'|',COALESCE(DATALENGTH(Email),-1),N':',Email,N'|',
++        COALESCE(DATALENGTH(Telefono),-1),N':',Telefono,N'|',COALESCE(DATALENGTH(Direccion),-1),N':',Direccion,N'|',Activo)),2) AS Revision
++FROM dbo.Proveedor;
++GO
++CREATE OR ALTER VIEW dbo.vBodegaGestion AS
++SELECT BodegaID,Codigo,Nombre,Direccion,Activo,
++    CONVERT(varchar(64),HASHBYTES('SHA2_256',CONCAT(CONVERT(nvarchar(max),BodegaID),N'|',DATALENGTH(Codigo),N':',Codigo,N'|',
++        DATALENGTH(Nombre),N':',Nombre,N'|',COALESCE(DATALENGTH(Direccion),-1),N':',Direccion,N'|',Activo)),2) AS Revision
++FROM dbo.Bodega;
++GO
++CREATE OR ALTER VIEW dbo.vOfertaProveedorGestion AS
++SELECT pr.ProveedorID,pr.RepuestoID,r.Codigo,r.Nombre,r.CategoriaID,c.Nombre AS Categoria,r.Activo,r.PrecioVenta,pr.CodigoProveedor,
++    CONVERT(varchar(64),HASHBYTES('SHA2_256',CONCAT(CONVERT(nvarchar(max),pr.ProveedorID),N'|',pr.RepuestoID,N'|',
++        COALESCE(DATALENGTH(pr.CodigoProveedor),-1),N':',pr.CodigoProveedor)),2) AS Revision
++FROM dbo.ProveedorRepuesto pr JOIN dbo.Repuesto r ON r.RepuestoID=pr.RepuestoID JOIN dbo.CategoriaRepuesto c ON c.CategoriaID=r.CategoriaID;
++GO
++CREATE OR ALTER VIEW dbo.vRepuestoBodegaGestion AS
++SELECT i.BodegaID,i.RepuestoID,r.Codigo,r.Nombre,r.Activo,i.StockMinimo,i.Existencia
++FROM dbo.vInventario i JOIN dbo.Repuesto r ON r.RepuestoID=i.RepuestoID;
++GO
++CREATE OR ALTER PROCEDURE dbo.spValidarActorAbastecimiento @UsuarioActorID int AS
++BEGIN
++    SET NOCOUNT ON;
++    IF dbo.fnTieneRol(@UsuarioActorID,'BODEGA')=0 THROW 52004,N'Se requiere un usuario activo de bodega o administración.',1;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spValidarRevisionAbastecimiento @Actual varchar(64),@Revision nvarchar(max) AS
++BEGIN
++    SET NOCOUNT ON;
++    IF @Actual IS NULL THROW 52002,N'El registro no existe.',1;
++    IF @Revision IS NULL OR DATALENGTH(@Revision)<>128
++       OR @Actual COLLATE Latin1_General_100_BIN2<>@Revision COLLATE Latin1_General_100_BIN2
++        THROW 52003,N'El registro cambió. Actualizá los datos y revisalos antes de guardar.',1;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spListarCategoriasRepuesto @UsuarioActorID int AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    SELECT * FROM dbo.vCategoriaRepuestoGestion ORDER BY Nombre,CategoriaID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spGuardarCategoriaRepuesto
++    @UsuarioActorID int,@CategoriaID int,@Nombre nvarchar(max),@Revision nvarchar(max)=NULL
++AS
++BEGIN
++    SET NOCOUNT ON; SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APICategoriaRepuesto;
++        EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++        SET @Nombre=NULLIF(LTRIM(RTRIM(@Nombre)),N'');
++        IF @Nombre IS NULL OR DATALENGTH(@Nombre)>160 OR @CategoriaID<=0 OR (@CategoriaID IS NULL AND @Revision IS NOT NULL)
++            THROW 52000,N'Ingresá una categoría de hasta 80 caracteres y un ID válido.',1;
++        IF @CategoriaID IS NULL
++        BEGIN
++            INSERT dbo.CategoriaRepuesto(Nombre) VALUES (@Nombre); SET @CategoriaID=CONVERT(int,SCOPE_IDENTITY());
++        END
++        ELSE
++        BEGIN
++            DECLARE @Actual varchar(64);
++            SELECT @Actual=Revision FROM dbo.vCategoriaRepuestoGestion WITH (UPDLOCK,HOLDLOCK) WHERE CategoriaID=@CategoriaID;
++            EXEC dbo.spValidarRevisionAbastecimiento @Actual,@Revision;
++            UPDATE dbo.CategoriaRepuesto SET Nombre=@Nombre WHERE CategoriaID=@CategoriaID;
++        END;
++        IF @Propia=1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vCategoriaRepuestoGestion WHERE CategoriaID=@CategoriaID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APICategoriaRepuesto;
++        THROW;
++    END CATCH;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spListarRepuestosGestion
++    @UsuarioActorID int,@Buscar nvarchar(max)=NULL,@CategoriaID int=NULL,@Activo bit=NULL
++AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    SET @Buscar=NULLIF(LTRIM(RTRIM(@Buscar)),N'');
++    IF DATALENGTH(@Buscar)>300 OR @CategoriaID<=0 THROW 52000,N'Revisá los filtros de repuestos.',1;
++    SELECT * FROM dbo.vRepuestoGestion WHERE (@CategoriaID IS NULL OR CategoriaID=@CategoriaID)
++      AND (@Activo IS NULL OR Activo=@Activo)
++      AND (@Buscar IS NULL OR CHARINDEX(@Buscar,Codigo)>0 OR CHARINDEX(@Buscar,Nombre)>0 OR CHARINDEX(@Buscar,Descripcion)>0)
++    ORDER BY Nombre,RepuestoID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spConsultarRepuestoGestion @UsuarioActorID int,@RepuestoID int AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    IF @RepuestoID IS NULL OR @RepuestoID<=0 THROW 52000,N'El ID del repuesto no es válido.',1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Repuesto WHERE RepuestoID=@RepuestoID) THROW 52002,N'El repuesto no existe.',1;
++    SELECT * FROM dbo.vRepuestoGestion WHERE RepuestoID=@RepuestoID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spGuardarRepuestoGestion
++    @UsuarioActorID int,@RepuestoID int,@CategoriaID int,@Codigo nvarchar(max),@Nombre nvarchar(max),@Descripcion nvarchar(max),
++    @CostoReferencia decimal(19,4),@PrecioVenta decimal(19,4),@Activo bit,@Revision nvarchar(max)=NULL
++AS
++BEGIN
++    SET NOCOUNT ON; SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    DECLARE @Contexto sql_variant=SESSION_CONTEXT(N'UsuarioID'),@ContextoCambiado bit=0;
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIRepuestoGestion;
++        EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++        SET @Codigo=NULLIF(LTRIM(RTRIM(@Codigo)),N''); SET @Nombre=NULLIF(LTRIM(RTRIM(@Nombre)),N'');
++        SET @Descripcion=NULLIF(LTRIM(RTRIM(@Descripcion)),N'');
++        IF @RepuestoID<=0 OR (@RepuestoID IS NULL AND @Revision IS NOT NULL) OR @Activo IS NULL
++           OR @Codigo IS NULL OR DATALENGTH(@Codigo)>60 OR @Codigo COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9A-Za-z._/-]%'
++           OR @Nombre IS NULL OR DATALENGTH(@Nombre)>200 OR DATALENGTH(@Descripcion)>1000
++            THROW 52000,N'Revisá código (30), nombre (100), descripción (500) y estado del repuesto.',1;
++        IF @CostoReferencia IS NULL OR @PrecioVenta IS NULL OR @CostoReferencia<0 OR @PrecioVenta<0
++           OR @CostoReferencia>9999999999.99 OR @PrecioVenta>9999999999.99
++           OR ROUND(@CostoReferencia,2)<>@CostoReferencia OR ROUND(@PrecioVenta,2)<>@PrecioVenta
++            THROW 52000,N'Los precios admiten valores desde cero y hasta dos decimales.',1;
++        IF @CategoriaID IS NULL OR NOT EXISTS (SELECT 1 FROM dbo.CategoriaRepuesto WITH (HOLDLOCK) WHERE CategoriaID=@CategoriaID)
++            THROW 52001,N'La categoría del repuesto no existe.',1;
++        IF @RepuestoID IS NULL
++        BEGIN
++            INSERT dbo.Repuesto(CategoriaID,Codigo,Nombre,Descripcion,CostoReferencia,PrecioVenta,Activo)
++            VALUES (@CategoriaID,@Codigo,@Nombre,@Descripcion,@CostoReferencia,@PrecioVenta,@Activo);
++            SET @RepuestoID=CONVERT(int,SCOPE_IDENTITY());
++        END
++        ELSE
++        BEGIN
++            DECLARE @Actual varchar(64),@BloqueoRepuesto int;
++            SELECT @BloqueoRepuesto=RepuestoID FROM dbo.Repuesto WITH (UPDLOCK,HOLDLOCK) WHERE RepuestoID=@RepuestoID;
++            SELECT @Actual=Revision FROM dbo.vRepuestoGestion WHERE RepuestoID=@RepuestoID;
++            EXEC dbo.spValidarRevisionAbastecimiento @Actual,@Revision;
++            -- El trigger existente registra al usuario autenticado que cambió costo/precio.
++            EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@UsuarioActorID;
++            SET @ContextoCambiado=1;
++            UPDATE dbo.Repuesto SET CategoriaID=@CategoriaID,Codigo=@Codigo,Nombre=@Nombre,Descripcion=@Descripcion,
++                CostoReferencia=@CostoReferencia,PrecioVenta=@PrecioVenta,Activo=@Activo WHERE RepuestoID=@RepuestoID;
++            EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@Contexto;
++            SET @ContextoCambiado=0;
++        END;
++        IF @Propia=1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vRepuestoGestion WHERE RepuestoID=@RepuestoID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APIRepuestoGestion;
++        IF @ContextoCambiado=1 EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@Contexto;
++        THROW;
++    END CATCH;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spPreciosRepuestoGestion @UsuarioActorID int,@RepuestoID int AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    IF @RepuestoID IS NULL OR @RepuestoID<=0 THROW 52000,N'El ID del repuesto no es válido.',1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Repuesto WHERE RepuestoID=@RepuestoID) THROW 52002,N'El repuesto no existe.',1;
++    SELECT a.AuditoriaID,a.Fecha,a.CostoAnterior,a.CostoNuevo,a.PrecioAnterior,a.PrecioNuevo,
++       e.Nombres+N' '+e.Apellidos AS RegistradoPor
++    FROM dbo.AuditoriaPrecioRepuesto a LEFT JOIN dbo.Usuario u ON u.UsuarioID=a.UsuarioAplicacionID
++    LEFT JOIN dbo.Empleado e ON e.EmpleadoID=u.EmpleadoID
++    WHERE a.RepuestoID=@RepuestoID ORDER BY a.AuditoriaID DESC;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spListarProveedoresGestion @UsuarioActorID int,@Buscar nvarchar(max)=NULL,@Activo bit=NULL AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    SET @Buscar=NULLIF(LTRIM(RTRIM(@Buscar)),N'');
++    IF DATALENGTH(@Buscar)>300 THROW 52000,N'La búsqueda admite hasta 150 caracteres.',1;
++    SELECT * FROM dbo.vProveedorGestion WHERE (@Activo IS NULL OR Activo=@Activo)
++      AND (@Buscar IS NULL OR CHARINDEX(@Buscar,NIT)>0 OR CHARINDEX(@Buscar,Nombre)>0 OR CHARINDEX(@Buscar,Email)>0 OR CHARINDEX(@Buscar,Telefono)>0)
++    ORDER BY Nombre,ProveedorID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spConsultarProveedorGestion @UsuarioActorID int,@ProveedorID int AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    IF @ProveedorID IS NULL OR @ProveedorID<=0 THROW 52000,N'El ID del proveedor no es válido.',1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Proveedor WHERE ProveedorID=@ProveedorID) THROW 52002,N'El proveedor no existe.',1;
++    SELECT * FROM dbo.vProveedorGestion WHERE ProveedorID=@ProveedorID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spGuardarProveedorGestion
++    @UsuarioActorID int,@ProveedorID int,@NIT nvarchar(max),@Nombre nvarchar(max),@Email nvarchar(max),
++    @Telefono nvarchar(max),@Direccion nvarchar(max),@Activo bit,@Revision nvarchar(max)=NULL
++AS
++BEGIN
++    SET NOCOUNT ON; SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIProveedorGestion;
++        EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++        SET @NIT=NULLIF(LTRIM(RTRIM(@NIT)),N''); SET @Nombre=NULLIF(LTRIM(RTRIM(@Nombre)),N'');
++        SET @Email=NULLIF(LTRIM(RTRIM(@Email)),N''); SET @Telefono=NULLIF(LTRIM(RTRIM(@Telefono)),N''); SET @Direccion=NULLIF(LTRIM(RTRIM(@Direccion)),N'');
++        IF @ProveedorID<=0 OR (@ProveedorID IS NULL AND @Revision IS NOT NULL) OR @Activo IS NULL
++           OR @NIT IS NULL OR DATALENGTH(@NIT)>40 OR @NIT COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9A-Za-z-]%'
++           OR @Nombre IS NULL OR DATALENGTH(@Nombre)>300 OR DATALENGTH(@Email)>508 OR DATALENGTH(@Telefono)>50 OR DATALENGTH(@Direccion)>500
++           OR (@Email IS NOT NULL AND (@Email NOT LIKE N'%_@_%._%' OR @Email LIKE N'% %'))
++           OR @Telefono COLLATE Latin1_General_100_BIN2 LIKE N'%[^ -~]%'
++            THROW 52000,N'Revisá NIT (20), nombre (150), correo (254), teléfono (25), dirección (250) y estado.',1;
++        IF @ProveedorID IS NULL
++        BEGIN
++            INSERT dbo.Proveedor(NIT,Nombre,Email,Telefono,Direccion,Activo) VALUES (@NIT,@Nombre,@Email,@Telefono,@Direccion,@Activo);
++            SET @ProveedorID=CONVERT(int,SCOPE_IDENTITY());
++        END
++        ELSE
++        BEGIN
++            DECLARE @Actual varchar(64);
++            SELECT @Actual=Revision FROM dbo.vProveedorGestion WITH (UPDLOCK,HOLDLOCK) WHERE ProveedorID=@ProveedorID;
++            EXEC dbo.spValidarRevisionAbastecimiento @Actual,@Revision;
++            UPDATE dbo.Proveedor SET NIT=@NIT,Nombre=@Nombre,Email=@Email,Telefono=@Telefono,Direccion=@Direccion,Activo=@Activo WHERE ProveedorID=@ProveedorID;
++        END;
++        IF @Propia=1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vProveedorGestion WHERE ProveedorID=@ProveedorID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APIProveedorGestion;
++        THROW;
++    END CATCH;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spOfertasProveedorGestion @UsuarioActorID int,@ProveedorID int AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    IF @ProveedorID IS NULL OR @ProveedorID<=0 THROW 52000,N'El ID del proveedor no es válido.',1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Proveedor WHERE ProveedorID=@ProveedorID) THROW 52002,N'El proveedor no existe.',1;
++    SELECT * FROM dbo.vOfertaProveedorGestion WHERE ProveedorID=@ProveedorID ORDER BY Nombre,RepuestoID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spGuardarOfertaProveedor
++    @UsuarioActorID int,@ProveedorID int,@RepuestoID int,@CodigoProveedor nvarchar(max),@Ofrecido bit,@Revision nvarchar(max)=NULL
++AS
++BEGIN
++    SET NOCOUNT ON; SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIOfertaProveedor;
++        EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++        SET @CodigoProveedor=NULLIF(LTRIM(RTRIM(@CodigoProveedor)),N'');
++        IF @ProveedorID IS NULL OR @ProveedorID<=0 OR @RepuestoID IS NULL OR @RepuestoID<=0 OR @Ofrecido IS NULL
++           OR DATALENGTH(@CodigoProveedor)>100 OR @CodigoProveedor COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9A-Za-z._/ -]%'
++            THROW 52000,N'Revisá proveedor, repuesto y código del proveedor (hasta 50 caracteres).',1;
++        DECLARE @ProveedorActivo bit,@RepuestoActivo bit,@Actual varchar(64);
++        SELECT @ProveedorActivo=Activo FROM dbo.Proveedor WITH (UPDLOCK,HOLDLOCK) WHERE ProveedorID=@ProveedorID;
++        SELECT @RepuestoActivo=Activo FROM dbo.Repuesto WITH (HOLDLOCK) WHERE RepuestoID=@RepuestoID;
++        IF @ProveedorActivo IS NULL OR @RepuestoActivo IS NULL THROW 52002,N'El proveedor o repuesto no existe.',1;
++        DECLARE @BloqueoOferta int;
++        SELECT @BloqueoOferta=RepuestoID FROM dbo.ProveedorRepuesto WITH (UPDLOCK,HOLDLOCK) WHERE ProveedorID=@ProveedorID AND RepuestoID=@RepuestoID;
++        SELECT @Actual=Revision FROM dbo.vOfertaProveedorGestion WHERE ProveedorID=@ProveedorID AND RepuestoID=@RepuestoID;
++        IF @Actual IS NULL AND (@Revision IS NOT NULL OR @Ofrecido=0)
++            THROW 52003,N'La asociación cambió o ya fue retirada. Actualizá el catálogo del proveedor.',1;
++        IF @Actual IS NOT NULL EXEC dbo.spValidarRevisionAbastecimiento @Actual,@Revision;
++        IF @Ofrecido=1
++        BEGIN
++            IF @ProveedorActivo=0 OR @RepuestoActivo=0 THROW 52001,N'El proveedor y el repuesto deben estar activos para ofrecerlo.',1;
++            IF @Actual IS NULL INSERT dbo.ProveedorRepuesto(ProveedorID,RepuestoID,CodigoProveedor) VALUES (@ProveedorID,@RepuestoID,@CodigoProveedor);
++            ELSE UPDATE dbo.ProveedorRepuesto SET CodigoProveedor=@CodigoProveedor WHERE ProveedorID=@ProveedorID AND RepuestoID=@RepuestoID;
++        END
++        ELSE
++        BEGIN
++            IF EXISTS (SELECT 1 FROM dbo.Compra c WITH (HOLDLOCK) JOIN dbo.DetalleCompra d WITH (HOLDLOCK) ON d.CompraID=c.CompraID
++                       WHERE c.ProveedorID=@ProveedorID AND c.Estado='PENDIENTE' AND d.RepuestoID=@RepuestoID)
++                THROW 52003,N'Hay compras pendientes de este repuesto con el proveedor. Resolvelas antes de retirar la asociación.',1;
++            DELETE FROM dbo.ProveedorRepuesto WHERE ProveedorID=@ProveedorID AND RepuestoID=@RepuestoID;
++        END;
++        IF @Propia=1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOfertaProveedorGestion WHERE ProveedorID=@ProveedorID AND RepuestoID=@RepuestoID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APIOfertaProveedor;
++        THROW;
++    END CATCH;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spListarBodegasGestion @UsuarioActorID int,@Buscar nvarchar(max)=NULL,@Activo bit=NULL AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    SET @Buscar=NULLIF(LTRIM(RTRIM(@Buscar)),N'');
++    IF DATALENGTH(@Buscar)>300 THROW 52000,N'La búsqueda admite hasta 150 caracteres.',1;
++    SELECT * FROM dbo.vBodegaGestion WHERE (@Activo IS NULL OR Activo=@Activo)
++      AND (@Buscar IS NULL OR CHARINDEX(@Buscar,Codigo)>0 OR CHARINDEX(@Buscar,Nombre)>0 OR CHARINDEX(@Buscar,Direccion)>0)
++    ORDER BY Nombre,BodegaID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spConsultarBodegaGestion @UsuarioActorID int,@BodegaID int AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    IF @BodegaID IS NULL OR @BodegaID<=0 THROW 52000,N'El ID de bodega no es válido.',1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Bodega WHERE BodegaID=@BodegaID) THROW 52002,N'La bodega no existe.',1;
++    SELECT * FROM dbo.vBodegaGestion WHERE BodegaID=@BodegaID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spGuardarBodegaGestion
++    @UsuarioActorID int,@BodegaID int,@Codigo nvarchar(max),@Nombre nvarchar(max),@Direccion nvarchar(max),@Activo bit,@Revision nvarchar(max)=NULL
++AS
++BEGIN
++    SET NOCOUNT ON; SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIBodegaGestion;
++        EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++        SET @Codigo=NULLIF(LTRIM(RTRIM(@Codigo)),N''); SET @Nombre=NULLIF(LTRIM(RTRIM(@Nombre)),N''); SET @Direccion=NULLIF(LTRIM(RTRIM(@Direccion)),N'');
++        IF @BodegaID<=0 OR (@BodegaID IS NULL AND @Revision IS NOT NULL) OR @Activo IS NULL
++           OR @Codigo IS NULL OR DATALENGTH(@Codigo)>40 OR @Codigo COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9A-Za-z._/-]%'
++           OR @Nombre IS NULL OR DATALENGTH(@Nombre)>200 OR DATALENGTH(@Direccion)>500
++            THROW 52000,N'Revisá código (20), nombre (100), dirección (250) y estado de la bodega.',1;
++        IF @BodegaID IS NULL
++        BEGIN
++            INSERT dbo.Bodega(Codigo,Nombre,Direccion,Activo) VALUES (@Codigo,@Nombre,@Direccion,@Activo); SET @BodegaID=CONVERT(int,SCOPE_IDENTITY());
++        END
++        ELSE
++        BEGIN
++            DECLARE @Actual varchar(64);
++            SELECT @Actual=Revision FROM dbo.vBodegaGestion WITH (UPDLOCK,HOLDLOCK) WHERE BodegaID=@BodegaID;
++            EXEC dbo.spValidarRevisionAbastecimiento @Actual,@Revision;
++            UPDATE dbo.Bodega SET Codigo=@Codigo,Nombre=@Nombre,Direccion=@Direccion,Activo=@Activo WHERE BodegaID=@BodegaID;
++        END;
++        IF @Propia=1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vBodegaGestion WHERE BodegaID=@BodegaID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APIBodegaGestion;
++        THROW;
++    END CATCH;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spRepuestosBodegaGestion @UsuarioActorID int,@BodegaID int AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    IF @BodegaID IS NULL OR @BodegaID<=0 THROW 52000,N'El ID de bodega no es válido.',1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Bodega WHERE BodegaID=@BodegaID) THROW 52002,N'La bodega no existe.',1;
++    SELECT * FROM dbo.vRepuestoBodegaGestion WHERE BodegaID=@BodegaID ORDER BY Nombre,RepuestoID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spGuardarRepuestoBodega
++    @UsuarioActorID int,@BodegaID int,@RepuestoID int,@StockMinimo decimal(19,4),@StockMinimoEsperado decimal(19,4)=NULL
++AS
++BEGIN
++    SET NOCOUNT ON; SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIRepuestoBodega;
++        EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++        IF @BodegaID IS NULL OR @BodegaID<=0 OR @RepuestoID IS NULL OR @RepuestoID<=0
++           OR @StockMinimo IS NULL OR @StockMinimo<0 OR @StockMinimo>2147483647 OR ROUND(@StockMinimo,0)<>@StockMinimo
++           OR (@StockMinimoEsperado IS NOT NULL AND (@StockMinimoEsperado<0 OR @StockMinimoEsperado>2147483647 OR ROUND(@StockMinimoEsperado,0)<>@StockMinimoEsperado))
++            THROW 52000,N'Ingresá IDs válidos y mínimos enteros desde cero hasta 2147483647.',1;
++        DECLARE @BodegaActiva bit,@RepuestoActivo bit,@Actual int;
++        SELECT @BodegaActiva=Activo FROM dbo.Bodega WITH (UPDLOCK,HOLDLOCK) WHERE BodegaID=@BodegaID;
++        SELECT @RepuestoActivo=Activo FROM dbo.Repuesto WITH (HOLDLOCK) WHERE RepuestoID=@RepuestoID;
++        IF @BodegaActiva IS NULL OR @RepuestoActivo IS NULL THROW 52002,N'La bodega o repuesto no existe.',1;
++        IF @BodegaActiva=0 OR @RepuestoActivo=0 THROW 52001,N'La bodega y el repuesto deben estar activos.',1;
++        SELECT @Actual=StockMinimo FROM dbo.Inventario WITH (UPDLOCK,HOLDLOCK) WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID;
++        IF (@Actual IS NULL AND @StockMinimoEsperado IS NOT NULL) OR (@Actual IS NOT NULL AND (@StockMinimoEsperado IS NULL OR @Actual<>@StockMinimoEsperado))
++            THROW 52003,N'El mínimo o la asociación cambió. Actualizá los repuestos de la bodega.',1;
++        IF @Actual IS NULL INSERT dbo.Inventario(BodegaID,RepuestoID,StockMinimo) VALUES (@BodegaID,@RepuestoID,@StockMinimo);
++        ELSE UPDATE dbo.Inventario SET StockMinimo=@StockMinimo WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID;
++        IF @Propia=1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vRepuestoBodegaGestion WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APIRepuestoBodega;
++        THROW;
++    END CATCH;
++END;
++GO
++IF DATABASE_PRINCIPAL_ID(N'techcare_app') IS NOT NULL
++BEGIN
++    GRANT EXECUTE ON SCHEMA::dbo TO techcare_app;
++    DENY INSERT,UPDATE,DELETE ON dbo.Repuesto TO techcare_app;
++    DENY INSERT,UPDATE,DELETE ON dbo.Proveedor TO techcare_app;
++    DENY INSERT,UPDATE,DELETE ON dbo.ProveedorRepuesto TO techcare_app;
++    DENY INSERT,UPDATE,DELETE ON dbo.Bodega TO techcare_app;
++    DENY INSERT,UPDATE,DELETE ON dbo.Inventario TO techcare_app;
++    DENY INSERT,UPDATE,DELETE ON dbo.CategoriaRepuesto TO techcare_app;
++END;
++GO
+diff --git a/27_Pruebas_Abastecimiento.sql b/27_Pruebas_Abastecimiento.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b1bd835340506e2ca139c1d9839c56c8af8c36a
+--- /dev/null
++++ b/27_Pruebas_Abastecimiento.sql
+@@ -0,0 +1,429 @@
++-- Ejecutar después del 26 en DESARROLLO, sin otras escrituras concurrentes.
++-- Datos propios por caso, ROLLBACK y verificación de cantidades antes/después.
++-- Las identidades pueden dejar huecos. No es prueba entre sesiones concurrentes.
++USE [TechCare];
++GO
++SET NOCOUNT ON; SET XACT_ABORT ON;
++IF @@TRANCOUNT<>0 THROW 52090,N'Ejecutá sin una transacción abierta.',1;
++IF OBJECT_ID(N'dbo.spGuardarRepuestoGestion',N'P') IS NULL
++    THROW 52090,N'Ejecutá primero 26_Abastecimiento_Procedimientos.sql.',1;
++DECLARE @Admin int=(SELECT TOP (1) UsuarioID FROM dbo.Usuario WHERE dbo.fnTieneRol(UsuarioID,'ADMIN')=1 ORDER BY UsuarioID);
++DECLARE @Modelo int=(SELECT TOP (1) ModeloEquipoID FROM dbo.ModeloEquipo ORDER BY ModeloEquipoID);
++DECLARE @Tipo int=(SELECT TOP (1) TipoClienteID FROM dbo.TipoCliente ORDER BY TipoClienteID);
++IF @Admin IS NULL OR @Modelo IS NULL OR @Tipo IS NULL THROW 52090,N'Se requiere ADMIN activo y catálogos base.',1;
++DECLARE @ContextoInicial sql_variant=SESSION_CONTEXT(N'UsuarioID');
++DECLARE @Casos TABLE (ID int PRIMARY KEY,Caso nvarchar(200),ErrorEsperado int);
++INSERT @Casos VALUES
++(1,N'Categoría conserva nombre Unicode',0),
++(2,N'Categoría obligatoria',52000),
++(3,N'Categoría larga no se trunca',52000),
++(4,N'Categoría duplicada rechazada',2627),
++(5,N'Renombrar categoría conserva sus repuestos',0),
++(6,N'Categoría desactualizada rechazada',52003),
++(7,N'Crear repuesto Unicode y precios cero no crea stock',0),
++(8,N'Código de repuesto duplicado rechazado',2627),
++(9,N'Categoría inexistente rechazada',52001),
++(10,N'Precio negativo rechazado',52000),
++(11,N'Precio con tres decimales rechazado',52000),
++(12,N'Costo fuera de límite rechazado',52000),
++(13,N'Nombre de repuesto largo rechazado',52000),
++(14,N'Descripción de repuesto larga rechazada',52000),
++(15,N'Código Unicode no se convierte a varchar',52000),
++(16,N'Auditoría de precios conserva actor y contexto anterior',0),
++(17,N'Cambiar solo el nombre no crea auditoría de precio',0),
++(18,N'Repuesto desactualizado rechazado',52003),
++(19,N'Desactivar repuesto conserva existencias e historia',0),
++(20,N'Proveedor conserva nombre y dirección Unicode',0),
++(21,N'NIT de proveedor duplicado rechazado',2627),
++(22,N'Correo de proveedor inválido rechazado',52000),
++(23,N'Teléfono largo rechazado',52000),
++(24,N'Nombre de proveedor largo rechazado',52000),
++(25,N'Proveedor desactualizado rechazado',52003),
++(26,N'Desactivar proveedor conserva compras y asociaciones',0),
++(27,N'Crear bodega no genera inventario ni movimientos',0),
++(28,N'Código de bodega duplicado rechazado',2627),
++(29,N'Dirección de bodega larga rechazada',52000),
++(30,N'Bodega desactualizada rechazada',52003),
++(31,N'Desactivar bodega conserva movimientos y existencias',0),
++(32,N'Asociar oferta conserva código del proveedor',0),
++(33,N'Oferta duplicada exige revisar la asociación',52003),
++(34,N'Código de proveedor largo rechazado',52000),
++(35,N'Proveedor inactivo no agrega ofertas',52001),
++(36,N'Repuesto inactivo no agrega ofertas',52001),
++(37,N'Editar referencia ofrecida conserva asociación única',0),
++(38,N'Retirar oferta conserva compra ya recibida',0),
++(39,N'Compra pendiente impide retirar oferta',52003),
++(40,N'Asociar a bodega con mínimo cero conserva stock cero',0),
++(41,N'Asociación existente exige mínimo esperado',52003),
++(42,N'Actualizar mínimo no altera stock ni movimientos',0),
++(43,N'Mínimo fraccionario rechazado',52000),
++(44,N'Mínimo negativo rechazado',52000),
++(45,N'Mínimo desactualizado rechazado',52003),
++(46,N'Bodega inactiva no agrega asociaciones',52001),
++(47,N'Técnico no consulta gestión de abastecimiento',52004),
++(48,N'Recepción no modifica catálogos de bodega',52004),
++(49,N'Caja no consulta catálogos de bodega',52004),
++(50,N'Bodeguero inactivo rechazado',52004),
++(51,N'ADMIN puede consultar abastecimiento',0),
++(52,N'Repuesto inexistente devuelve error controlado',52002),
++(53,N'Búsqueda trata porcentaje y guion bajo como texto literal',0),
++(54,N'Cambiar precios no reescribe consumo ni factura histórica',0),
++(55,N'Error de actualización restaura el contexto de auditoría',2627);
++DECLARE @Antes TABLE (Nombre sysname PRIMARY KEY,Cantidad bigint);
++INSERT @Antes
++SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Cliente UNION ALL
++SELECT 'Equipo' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Equipo UNION ALL
++SELECT 'Usuario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Usuario UNION ALL
++SELECT 'Empleado' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Bodega UNION ALL
++SELECT 'Inventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ProveedorRepuesto UNION ALL
++SELECT 'Compra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AuditoriaPrecioRepuesto UNION ALL
++SELECT 'Factura' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Factura UNION ALL
++SELECT 'FacturaDetalle' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.FacturaDetalle UNION ALL
++SELECT 'Pago' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Pago UNION ALL
++SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
++SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi;
++SELECT TOP (0) * INTO #ResultadoOrden FROM dbo.vOrdenAcceso;
++SELECT TOP (0) * INTO #Repuestos FROM dbo.vRepuestoGestion;
++SELECT TOP (0) * INTO #Categorias FROM dbo.vCategoriaRepuestoGestion;
++SELECT TOP (0) * INTO #Proveedores FROM dbo.vProveedorGestion;
++SELECT TOP (0) * INTO #Bodegas FROM dbo.vBodegaGestion;
++SELECT TOP (0) * INTO #Ofertas FROM dbo.vOfertaProveedorGestion;
++SELECT TOP (0) * INTO #Minimos FROM dbo.vRepuestoBodegaGestion;
++DECLARE @Resultados TABLE (ID int,Caso nvarchar(200),Resultado varchar(4),Detalle nvarchar(4000));
++DECLARE @Caso int=1,@Esperado int,@Nombre nvarchar(200),@Resultado varchar(4),@Detalle nvarchar(4000),@Preparado bit;
++DECLARE @Sufijo varchar(8),@Codigo varchar(30),@Usuario varchar(50),@Nit varchar(20),@Serie varchar(80),@Texto nvarchar(max);
++DECLARE @Cliente int,@Equipo int,@Empleado int,@Tec1 int,@Tec2 int,@Recepcion int,@Orden int,@Categoria int,@Repuesto int,@Bodega int,@Proveedor int,@Compra int,@Actividad int,@Reparacion int;
++DECLARE @Bodeguero int,@Caja int,@Extra int,@CompraPendiente int,@Factura int;
++DECLARE @RevR varchar(64),@RevP varchar(64),@RevB varchar(64),@RevC varchar(64),@RevO varchar(64),@CodigoR varchar(30),@CodigoB varchar(20),@NitP varchar(20),@CategoriaNombre nvarchar(80),@ExtraCodigo varchar(30);
++DECLARE @Movimientos bigint,@Inventarios bigint,@Auditorias bigint;
++DECLARE @Lineas dbo.TipoDetalleCompra;
++DECLARE @Hash varchar(255)='$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
++WHILE @Caso<=55
++BEGIN
++    SELECT @Nombre=Caso,@Esperado=ErrorEsperado FROM @Casos WHERE ID=@Caso;
++    SET @Resultado='PASS';SET @Detalle=NULL;SET @Preparado=0;
++    SET @Sufijo=LEFT(REPLACE(CONVERT(varchar(36),NEWID()),'-',''),8);
++    DELETE FROM #ResultadoOrden;DELETE FROM #Repuestos;DELETE FROM #Categorias;DELETE FROM #Proveedores;
++    DELETE FROM #Bodegas;DELETE FROM #Ofertas;DELETE FROM #Minimos;DELETE FROM @Lineas;
++    BEGIN TRY
++        BEGIN TRANSACTION;
++        SET @Nit = 'TCAB-C-' + @Sufijo; SET @Serie = 'TCAB-E-' + @Sufijo;
++        INSERT dbo.Cliente(TipoClienteID, NIT, Nombre, Activo) VALUES (@Tipo, @Nit, N'Cliente de prueba técnica', 1);
++        SET @Cliente = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Equipo(ClienteID, ModeloEquipoID, NumeroSerie, Descripcion, Activo)
++            VALUES (@Cliente, @Modelo, @Serie, N'Equipo de prueba técnica', 1);
++        SET @Equipo = CONVERT(int, SCOPE_IDENTITY());
++
++        SET @Codigo = 'TCABT1-' + @Sufijo; SET @Usuario = 'tcst1_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Uno', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec1 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCABT2-' + @Sufijo; SET @Usuario = 'tcst2_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Dos', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec2 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCABR-' + @Sufijo; SET @Usuario = 'tcsr_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Recepción', N'Prueba', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Recepcion = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.UsuarioRol VALUES (@Tec1, 'TECNICO'), (@Tec2, 'TECNICO'), (@Recepcion, 'RECEPCION');
++
++        SET @Codigo = 'TCAB-' + @Sufijo;
++        EXEC dbo.spCrearOrden @Codigo, @Equipo, @Admin, N'No enciende ñ 漢字', @Orden OUTPUT;
++        INSERT #ResultadoOrden EXEC dbo.spAsignarTecnicoOrden @Admin, @Orden, @Tec1;
++        DELETE FROM #ResultadoOrden;
++        SET @Texto = N'Categoría de prueba ' + @Sufijo;
++        INSERT dbo.CategoriaRepuesto(Nombre) VALUES (@Texto);
++        SET @Categoria = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Repuesto(CategoriaID, Codigo, Nombre, CostoReferencia, PrecioVenta, Activo)
++            VALUES (@Categoria, @Codigo, N'Fuente de prueba ñ', 12.25, 25.50, 1);
++        SET @Repuesto = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Bodega(Codigo, Nombre, Activo) VALUES (@Codigo, N'Bodega técnica de prueba', 1);
++        SET @Bodega = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Inventario(BodegaID, RepuestoID, StockMinimo) VALUES (@Bodega, @Repuesto, 2);
++        SET @Nit = 'TCAB-P-' + @Sufijo;
++        INSERT dbo.Proveedor(NIT, Nombre, Activo) VALUES (@Nit, N'Proveedor de prueba técnica', 1);
++        SET @Proveedor = CONVERT(int, SCOPE_IDENTITY());
++        -- El detalle de compra exige que el proveedor ofrezca este repuesto.
++        INSERT dbo.ProveedorRepuesto(ProveedorID, RepuestoID) VALUES (@Proveedor, @Repuesto);
++        INSERT @Lineas VALUES (1, @Bodega, @Repuesto, 10, 12.25);
++        EXEC dbo.spRegistrarCompra @Codigo, @Proveedor, @Admin, @Lineas, @Compra OUTPUT;
++        EXEC dbo.spRecibirCompra @Compra, @Admin;
++        SET @Texto = N'Prueba con carga ' + @Sufijo;
++        INSERT dbo.Actividad(Nombre, Activo) VALUES (@Texto, 1);
++        SET @Actividad = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo='TCABG-'+@Sufijo;SET @Usuario='tcabg_'+@Sufijo;
++        INSERT dbo.Empleado(Codigo,Nombres,Apellidos,Activo) VALUES (@Codigo,N'Bodega',N'Prueba',1);
++        SET @Empleado=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID,NombreUsuario,PasswordHash,Activo) VALUES (@Empleado,@Usuario,@Hash,1);
++        SET @Bodeguero=CONVERT(int,SCOPE_IDENTITY());INSERT dbo.UsuarioRol VALUES (@Bodeguero,'BODEGA');
++        SET @Codigo='TCABC-'+@Sufijo;SET @Usuario='tcabc_'+@Sufijo;
++        INSERT dbo.Empleado(Codigo,Nombres,Apellidos,Activo) VALUES (@Codigo,N'Caja',N'Prueba',1);
++        SET @Empleado=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID,NombreUsuario,PasswordHash,Activo) VALUES (@Empleado,@Usuario,@Hash,1);
++        SET @Caja=CONVERT(int,SCOPE_IDENTITY());INSERT dbo.UsuarioRol VALUES (@Caja,'CAJA');
++        SET @ExtraCodigo='EXTRA-'+@Sufijo;
++        INSERT dbo.Repuesto(CategoriaID,Codigo,Nombre,CostoReferencia,PrecioVenta,Activo) VALUES (@Categoria,@ExtraCodigo,N'Repuesto adicional',0,0,1);
++        SET @Extra=CONVERT(int,SCOPE_IDENTITY());
++        SELECT @RevR=Revision,@CodigoR=Codigo FROM dbo.vRepuestoGestion WHERE RepuestoID=@Repuesto;
++        SELECT @RevP=Revision,@NitP=NIT FROM dbo.vProveedorGestion WHERE ProveedorID=@Proveedor;
++        SELECT @RevB=Revision,@CodigoB=Codigo FROM dbo.vBodegaGestion WHERE BodegaID=@Bodega;
++        SELECT @RevC=Revision,@CategoriaNombre=Nombre FROM dbo.vCategoriaRepuestoGestion WHERE CategoriaID=@Categoria;
++        SELECT @RevO=Revision FROM dbo.vOfertaProveedorGestion WHERE ProveedorID=@Proveedor AND RepuestoID=@Repuesto;
++        SELECT @Movimientos=COUNT_BIG(*) FROM dbo.MovimientoInventario;
++        SELECT @Inventarios=COUNT_BIG(*) FROM dbo.Inventario;
++        SELECT @Auditorias=COUNT_BIG(*) FROM dbo.AuditoriaPrecioRepuesto;
++        EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@Admin;
++        SET @Preparado=1;
++
++        IF @Caso=1
++        BEGIN
++            SET @Texto=N'Categoría ñ 漢字 '+@Sufijo;
++            INSERT #Categorias EXEC dbo.spGuardarCategoriaRepuesto @Bodeguero,NULL,@Texto;
++            IF NOT EXISTS(SELECT 1 FROM #Categorias WHERE Nombre=@Texto) THROW 52091,N'La categoría no conservó Unicode.',1;
++        END;
++        IF @Caso=2 EXEC dbo.spGuardarCategoriaRepuesto @Bodeguero,NULL,N' ';
++        IF @Caso=3 BEGIN SET @Texto=REPLICATE(N'a',81);EXEC dbo.spGuardarCategoriaRepuesto @Bodeguero,NULL,@Texto;END;
++        IF @Caso=4 EXEC dbo.spGuardarCategoriaRepuesto @Bodeguero,NULL,@CategoriaNombre;
++        IF @Caso=5
++        BEGIN
++            SET @Texto=N'Categoría renombrada '+@Sufijo;
++            INSERT #Categorias EXEC dbo.spGuardarCategoriaRepuesto @Bodeguero,@Categoria,@Texto,@RevC;
++            IF NOT EXISTS(SELECT 1 FROM dbo.vRepuestoGestion WHERE RepuestoID=@Repuesto AND CategoriaID=@Categoria AND Categoria=@Texto)
++                THROW 52091,N'El cambio perdió la categoría del repuesto.',1;
++        END;
++        IF @Caso=6
++        BEGIN
++            SET @Texto=N'Categoría cambiada '+@Sufijo;UPDATE dbo.CategoriaRepuesto SET Nombre=@Texto WHERE CategoriaID=@Categoria;
++            EXEC dbo.spGuardarCategoriaRepuesto @Bodeguero,@Categoria,@CategoriaNombre,@RevC;
++        END;
++        IF @Caso=7
++        BEGIN
++            SET @Codigo='NUEVO-'+@Sufijo;
++            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,@Codigo,N'Fuente ñ 漢字',N'Descripción ñ 漢字',0,0,1;
++            IF NOT EXISTS(SELECT 1 FROM #Repuestos WHERE Nombre=N'Fuente ñ 漢字' AND Descripcion=N'Descripción ñ 漢字' AND CostoReferencia=0 AND PrecioVenta=0)
++               OR (SELECT COUNT_BIG(*) FROM dbo.Inventario)<>@Inventarios OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos
++                THROW 52091,N'El alta no conservó datos o creó existencias.',1;
++        END;
++        IF @Caso=8 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,@CodigoR,N'Duplicado',NULL,1,1,1;
++        IF @Caso=9 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,2147483647,N'INVALIDO',N'Prueba',NULL,1,1,1;
++        IF @Caso=10 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'INVALIDO',N'Prueba',NULL,1,-1,1;
++        IF @Caso=11 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'INVALIDO',N'Prueba',NULL,1,1.234,1;
++        IF @Caso=12 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'INVALIDO',N'Prueba',NULL,10000000000,1,1;
++        IF @Caso=13 BEGIN SET @Texto=REPLICATE(N'a',101);EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'INVALIDO',@Texto,NULL,1,1,1;END;
++        IF @Caso=14 BEGIN SET @Texto=REPLICATE(N'a',501);EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'INVALIDO',N'Prueba',@Texto,1,1,1;END;
++        IF @Caso=15 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'REP-漢字',N'Prueba',NULL,1,1,1;
++        IF @Caso=16
++        BEGIN
++            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,13.50,30,1,@RevR;
++            IF NOT EXISTS(SELECT 1 FROM dbo.AuditoriaPrecioRepuesto WHERE RepuestoID=@Repuesto AND CostoAnterior=12.25 AND CostoNuevo=13.50
++                          AND PrecioAnterior=25.50 AND PrecioNuevo=30 AND UsuarioAplicacionID=@Bodeguero)
++                THROW 52091,N'La auditoría no conservó valores y usuario.',1;
++        END;
++        IF @Caso=17
++        BEGIN
++            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Nombre corregido ñ',NULL,12.25,25.50,1,@RevR;
++            IF (SELECT COUNT_BIG(*) FROM dbo.AuditoriaPrecioRepuesto)<>@Auditorias THROW 52091,N'Se creó una auditoría sin cambio de precios.',1;
++        END;
++        IF @Caso=18
++        BEGIN
++            UPDATE dbo.Repuesto SET Nombre=N'Nombre cambiado' WHERE RepuestoID=@Repuesto;
++            EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Anterior',NULL,12.25,25.50,1,@RevR;
++        END;
++        IF @Caso=19
++        BEGIN
++            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,12.25,25.50,0,@RevR;
++            IF NOT EXISTS(SELECT 1 FROM dbo.vInventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto AND Existencia=10)
++               OR NOT EXISTS(SELECT 1 FROM dbo.DetalleCompra WHERE CompraID=@Compra AND RepuestoID=@Repuesto)
++                THROW 52091,N'La desactivación alteró existencias o compras.',1;
++        END;
++        IF @Caso=20
++        BEGIN
++            SET @Nit='NUEVO-'+@Sufijo;
++            INSERT #Proveedores EXEC dbo.spGuardarProveedorGestion @Bodeguero,NULL,@Nit,N'Proveedor ñ 漢字',N' ',N' ',N'Dirección ñ 漢字',1;
++            IF NOT EXISTS(SELECT 1 FROM #Proveedores WHERE Nombre=N'Proveedor ñ 漢字' AND Email IS NULL AND Telefono IS NULL AND Direccion=N'Dirección ñ 漢字')
++                THROW 52091,N'El proveedor no conservó sus datos.',1;
++        END;
++        IF @Caso=21 EXEC dbo.spGuardarProveedorGestion @Bodeguero,NULL,@NitP,N'Duplicado',NULL,NULL,NULL,1;
++        IF @Caso=22 EXEC dbo.spGuardarProveedorGestion @Bodeguero,NULL,N'INVALIDO',N'Prueba',N'correo-invalido',NULL,NULL,1;
++        IF @Caso=23 BEGIN SET @Texto=REPLICATE(N'1',26);EXEC dbo.spGuardarProveedorGestion @Bodeguero,NULL,N'INVALIDO',N'Prueba',NULL,@Texto,NULL,1;END;
++        IF @Caso=24 BEGIN SET @Texto=REPLICATE(N'a',151);EXEC dbo.spGuardarProveedorGestion @Bodeguero,NULL,N'INVALIDO',@Texto,NULL,NULL,NULL,1;END;
++        IF @Caso=25
++        BEGIN
++            UPDATE dbo.Proveedor SET Nombre=N'Nombre cambiado' WHERE ProveedorID=@Proveedor;
++            EXEC dbo.spGuardarProveedorGestion @Bodeguero,@Proveedor,@NitP,N'Anterior',NULL,NULL,NULL,1,@RevP;
++        END;
++        IF @Caso=26
++        BEGIN
++            INSERT #Proveedores EXEC dbo.spGuardarProveedorGestion @Bodeguero,@Proveedor,@NitP,N'Proveedor de prueba técnica',NULL,NULL,NULL,0,@RevP;
++            IF NOT EXISTS(SELECT 1 FROM dbo.Compra WHERE CompraID=@Compra AND ProveedorID=@Proveedor)
++               OR NOT EXISTS(SELECT 1 FROM dbo.ProveedorRepuesto WHERE ProveedorID=@Proveedor AND RepuestoID=@Repuesto)
++                THROW 52091,N'La desactivación borró historia o asociaciones.',1;
++        END;
++        IF @Caso=27
++        BEGIN
++            SET @Codigo='NUEVA-'+@Sufijo;
++            INSERT #Bodegas EXEC dbo.spGuardarBodegaGestion @Bodeguero,NULL,@Codigo,N'Bodega ñ 漢字',N'Dirección ñ',1;
++            IF NOT EXISTS(SELECT 1 FROM #Bodegas WHERE Nombre=N'Bodega ñ 漢字') OR (SELECT COUNT_BIG(*) FROM dbo.Inventario)<>@Inventarios
++               OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos THROW 52091,N'El alta de bodega alteró inventario.',1;
++        END;
++        IF @Caso=28 EXEC dbo.spGuardarBodegaGestion @Bodeguero,NULL,@CodigoB,N'Duplicado',NULL,1;
++        IF @Caso=29 BEGIN SET @Texto=REPLICATE(N'a',251);EXEC dbo.spGuardarBodegaGestion @Bodeguero,NULL,N'INVALIDO',N'Prueba',@Texto,1;END;
++        IF @Caso=30
++        BEGIN
++            UPDATE dbo.Bodega SET Nombre=N'Nombre cambiado' WHERE BodegaID=@Bodega;
++            EXEC dbo.spGuardarBodegaGestion @Bodeguero,@Bodega,@CodigoB,N'Anterior',NULL,1,@RevB;
++        END;
++        IF @Caso=31
++        BEGIN
++            INSERT #Bodegas EXEC dbo.spGuardarBodegaGestion @Bodeguero,@Bodega,@CodigoB,N'Bodega técnica de prueba',NULL,0,@RevB;
++            IF NOT EXISTS(SELECT 1 FROM dbo.vInventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto AND Existencia=10)
++               OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos THROW 52091,N'La desactivación alteró el inventario.',1;
++        END;
++        IF @Caso=32
++        BEGIN
++            INSERT #Ofertas EXEC dbo.spGuardarOfertaProveedor @Bodeguero,@Proveedor,@Extra,N'REF-123',1;
++            IF NOT EXISTS(SELECT 1 FROM #Ofertas WHERE RepuestoID=@Extra AND CodigoProveedor='REF-123') THROW 52091,N'La oferta no se registró.',1;
++        END;
++        IF @Caso=33 EXEC dbo.spGuardarOfertaProveedor @Bodeguero,@Proveedor,@Repuesto,N'DUPLICADO',1;
++        IF @Caso=34 BEGIN SET @Texto=REPLICATE(N'a',51);EXEC dbo.spGuardarOfertaProveedor @Bodeguero,@Proveedor,@Extra,@Texto,1;END;
++        IF @Caso=35 BEGIN UPDATE dbo.Proveedor SET Activo=0 WHERE ProveedorID=@Proveedor;EXEC dbo.spGuardarOfertaProveedor @Bodeguero,@Proveedor,@Extra,N'REF',1;END;
++        IF @Caso=36 BEGIN UPDATE dbo.Repuesto SET Activo=0 WHERE RepuestoID=@Extra;EXEC dbo.spGuardarOfertaProveedor @Bodeguero,@Proveedor,@Extra,N'REF',1;END;
++        IF @Caso=37
++        BEGIN
++            INSERT #Ofertas EXEC dbo.spGuardarOfertaProveedor @Bodeguero,@Proveedor,@Repuesto,N'NUEVA-REFERENCIA',1,@RevO;
++            IF (SELECT COUNT(*) FROM dbo.ProveedorRepuesto WHERE ProveedorID=@Proveedor AND RepuestoID=@Repuesto)<>1
++               OR NOT EXISTS(SELECT 1 FROM #Ofertas WHERE CodigoProveedor='NUEVA-REFERENCIA') THROW 52091,N'La edición duplicó o perdió la asociación.',1;
++        END;
++        IF @Caso=38
++        BEGIN
++            INSERT #Ofertas EXEC dbo.spGuardarOfertaProveedor @Bodeguero,@Proveedor,@Repuesto,NULL,0,@RevO;
++            IF EXISTS(SELECT 1 FROM dbo.ProveedorRepuesto WHERE ProveedorID=@Proveedor AND RepuestoID=@Repuesto)
++               OR NOT EXISTS(SELECT 1 FROM dbo.DetalleCompra WHERE CompraID=@Compra AND RepuestoID=@Repuesto)
++                THROW 52091,N'El retiro no conservó la compra recibida.',1;
++        END;
++        IF @Caso=39
++        BEGIN
++            DELETE FROM @Lineas;INSERT @Lineas VALUES(1,@Bodega,@Repuesto,1,12.25);SET @Codigo='PEND-'+@Sufijo;
++            EXEC dbo.spRegistrarCompra @Codigo,@Proveedor,@Admin,@Lineas,@CompraPendiente OUTPUT;
++            EXEC dbo.spGuardarOfertaProveedor @Bodeguero,@Proveedor,@Repuesto,NULL,0,@RevO;
++        END;
++        IF @Caso=40
++        BEGIN
++            INSERT #Minimos EXEC dbo.spGuardarRepuestoBodega @Bodeguero,@Bodega,@Extra,0,NULL;
++            IF NOT EXISTS(SELECT 1 FROM #Minimos WHERE RepuestoID=@Extra AND StockMinimo=0 AND Existencia=0)
++               OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos THROW 52091,N'La asociación creó existencias o perdió el mínimo cero.',1;
++        END;
++        IF @Caso=41 EXEC dbo.spGuardarRepuestoBodega @Bodeguero,@Bodega,@Repuesto,5,NULL;
++        IF @Caso=42
++        BEGIN
++            INSERT #Minimos EXEC dbo.spGuardarRepuestoBodega @Bodeguero,@Bodega,@Repuesto,5,2;
++            IF NOT EXISTS(SELECT 1 FROM #Minimos WHERE StockMinimo=5 AND Existencia=10)
++               OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos THROW 52091,N'El cambio de mínimo alteró el stock.',1;
++        END;
++        IF @Caso=43 EXEC dbo.spGuardarRepuestoBodega @Bodeguero,@Bodega,@Extra,1.5,NULL;
++        IF @Caso=44 EXEC dbo.spGuardarRepuestoBodega @Bodeguero,@Bodega,@Extra,-1,NULL;
++        IF @Caso=45 EXEC dbo.spGuardarRepuestoBodega @Bodeguero,@Bodega,@Repuesto,5,4;
++        IF @Caso=46 BEGIN UPDATE dbo.Bodega SET Activo=0 WHERE BodegaID=@Bodega;EXEC dbo.spGuardarRepuestoBodega @Bodeguero,@Bodega,@Extra,1,NULL;END;
++        IF @Caso=47 EXEC dbo.spListarRepuestosGestion @Tec1;
++        IF @Caso=48 EXEC dbo.spGuardarCategoriaRepuesto @Recepcion,NULL,N'NO AUTORIZADA';
++        IF @Caso=49 EXEC dbo.spListarProveedoresGestion @Caja;
++        IF @Caso=50 BEGIN UPDATE dbo.Usuario SET Activo=0 WHERE UsuarioID=@Bodeguero;EXEC dbo.spListarBodegasGestion @Bodeguero;END;
++        IF @Caso=51
++        BEGIN
++            INSERT #Repuestos EXEC dbo.spListarRepuestosGestion @Admin,@CodigoR;
++            IF NOT EXISTS(SELECT 1 FROM #Repuestos WHERE RepuestoID=@Repuesto) THROW 52091,N'ADMIN no pudo consultar el catálogo.',1;
++        END;
++        IF @Caso=52 EXEC dbo.spConsultarRepuestoGestion @Bodeguero,2147483647;
++        IF @Caso=53
++        BEGIN
++            SET @Texto=@Sufijo+N'%_';UPDATE dbo.Repuesto SET Nombre=@Texto WHERE RepuestoID=@Repuesto;
++            INSERT #Repuestos EXEC dbo.spListarRepuestosGestion @Bodeguero,@Texto;
++            IF (SELECT COUNT(*) FROM #Repuestos)<>1 OR NOT EXISTS(SELECT 1 FROM #Repuestos WHERE RepuestoID=@Repuesto)
++                THROW 52091,N'La búsqueda no trató el texto de forma literal.',1;
++        END;
++        IF @Caso=54
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spRegistrarDiagnosticoOrden @Tec1,@Orden,N'Diagnóstico ñ',100;
++            INSERT #ResultadoOrden EXEC dbo.spIniciarReparacionOrden @Tec1,@Orden,N'Cambiar fuente',100,N'Cliente autorizó';
++            INSERT #ResultadoOrden EXEC dbo.spUsarRepuestoOrden @Tec1,@Orden,@Bodega,@Repuesto,1,25.50;
++            INSERT #ResultadoOrden EXEC dbo.spFinalizarReparacionOrden @Tec1,@Orden;
++            SET @Codigo='FACT-'+@Sufijo;EXEC dbo.spGenerarFactura @Orden,@Codigo,@Admin,@Factura OUTPUT;
++            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,13.50,30,1,@RevR;
++            IF NOT EXISTS(SELECT 1 FROM dbo.ReparacionRepuesto rr JOIN dbo.Reparacion r ON r.ReparacionID=rr.ReparacionID JOIN dbo.Diagnostico d ON d.DiagnosticoID=r.DiagnosticoID
++                          WHERE d.OrdenID=@Orden AND rr.CostoUnitario=12.25 AND rr.PrecioUnitario=25.50)
++               OR NOT EXISTS(SELECT 1 FROM dbo.FacturaDetalle WHERE FacturaID=@Factura AND TipoConcepto='REP' AND PrecioUnitario=25.50)
++               OR NOT EXISTS(SELECT 1 FROM dbo.vInventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto AND Existencia=9)
++               OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos+1
++                THROW 52091,N'El cambio reescribió valores históricos.',1;
++        END;
++        IF @Caso=55 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@ExtraCodigo,N'Duplicado',NULL,13.50,30,1,@RevR;
++        IF @Esperado<>0 THROW 52091,N'La operación debía rechazarse y fue aceptada.',1;
++        ROLLBACK TRANSACTION;
++    END TRY
++    BEGIN CATCH
++        SET @Detalle=ERROR_MESSAGE();
++        IF @Preparado=0 OR @Esperado=0 OR ERROR_NUMBER()<>@Esperado SET @Resultado='FAIL';
++        IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
++    END CATCH;
++    IF @Preparado=1 AND (TRY_CONVERT(int,SESSION_CONTEXT(N'UsuarioID')) IS NULL OR TRY_CONVERT(int,SESSION_CONTEXT(N'UsuarioID'))<>@Admin)
++    BEGIN SET @Resultado='FAIL';SET @Detalle=COALESCE(@Detalle+N' | ',N'')+N'El contexto de auditoría no fue restaurado.';END;
++    EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@ContextoInicial;
++    ;WITH Despues AS (
++SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Cliente UNION ALL
++SELECT 'Equipo' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Equipo UNION ALL
++SELECT 'Usuario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Usuario UNION ALL
++SELECT 'Empleado' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Bodega UNION ALL
++SELECT 'Inventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ProveedorRepuesto UNION ALL
++SELECT 'Compra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AuditoriaPrecioRepuesto UNION ALL
++SELECT 'Factura' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Factura UNION ALL
++SELECT 'FacturaDetalle' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.FacturaDetalle UNION ALL
++SELECT 'Pago' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Pago UNION ALL
++SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
++SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi
++    )
++    SELECT @Resultado=CASE WHEN EXISTS(SELECT 1 FROM Despues d JOIN @Antes a ON a.Nombre=d.Nombre WHERE a.Cantidad<>d.Cantidad) THEN 'FAIL' ELSE @Resultado END;
++    IF @Resultado='FAIL' AND @Detalle IS NULL SET @Detalle=N'La prueba dejó cantidades persistentes diferentes.';
++    INSERT @Resultados VALUES(@Caso,@Nombre,@Resultado,@Detalle);SET @Caso+=1;
++END;
++DROP TABLE #ResultadoOrden;DROP TABLE #Repuestos;DROP TABLE #Categorias;DROP TABLE #Proveedores;DROP TABLE #Bodegas;DROP TABLE #Ofertas;DROP TABLE #Minimos;
++SELECT ID,Caso,Resultado,Detalle FROM @Resultados ORDER BY ID;
++IF EXISTS(SELECT 1 FROM @Resultados WHERE Resultado='FAIL') THROW 52092,N'Una o más pruebas de abastecimiento fallaron. Revisá los resultados.',1;
++GO
+diff --git a/INTEGRACION_ABASTECIMIENTO.md b/INTEGRACION_ABASTECIMIENTO.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..83f6f25bf75fdb3f2906d5167d7a3c9077699cd1
+--- /dev/null
++++ b/INTEGRACION_ABASTECIMIENTO.md
+@@ -0,0 +1,149 @@
++# Repuestos, proveedores y bodegas
++
++Continuación del commit `8adff57`, que contiene facturación, pagos, entrega y PDF.
++Esta entrega conecta la gestión de catálogos de abastecimiento: crear, editar,
++activar/desactivar, asociar repuestos y revisar cambios de precios.
++
++## Aplicar en IntelliJ y SSMS
++
++1. Guardar `28_Abastecimiento_API.patch` en la raíz de TechCare, junto a `backend`
++   y `frontend`. Ejecutar en la terminal de IntelliJ:
++
++   ```bash
++   git apply --check 28_Abastecimiento_API.patch
++   git apply 28_Abastecimiento_API.patch
++   ```
++
++   El patch se aplica una sola vez sobre el bloque de facturación ya instalado.
++   Si la comprobación informa conflicto, revisar la salida antes de aplicar.
++2. En SSMS ejecutar completo `26_Abastecimiento_Procedimientos.sql` en la base
++   TechCare habitual. Requiere el 23; es repetible y conserva datos. No volver
++   a ejecutar 01, 02 ni los scripts anteriores que ya están instalados.
++3. En DESARROLLO, sin transacciones abiertas ni otras escrituras concurrentes,
++   ejecutar `27_Pruebas_Abastecimiento.sql`. Incluye 55 casos con datos propios,
++   ROLLBACK y comprobación de cantidades antes/después. Las identidades pueden
++   dejar huecos; no se conservan registros de prueba.
++4. Reiniciar el backend y el frontend como de costumbre. Este bloque no agrega
++   dependencias de Maven/npm ni modifica credenciales o configuración local.
++
++## Recorrido desde la aplicación
++
++Entrar con BODEGA o ADMIN. En **Servicios**, dentro de **Inventario y compras**,
++aparecen Repuestos, Proveedores y la nueva opción Bodegas. Recepción, técnicos
++y caja mantienen sus módulos propios; el técnico consume desde su expediente.
++
++### Repuestos y categorías
++
++1. Abrir **Repuestos → Categorías**. Crear o renombrar categorías; las relaciones
++   de los repuestos se conservan al cambiar un nombre.
++2. Usar **Nuevo repuesto**. Elegir categoría, código único, nombre, descripción,
++   costo de referencia, precio de venta y estado. Se permiten precios en cero.
++3. Usar **Editar** para corregir los datos o activar/desactivar. Los cambios de
++   costo y precio quedan en **Historial de precios**, con valores anteriores,
++   nuevos, fecha y responsable. Los registros previos sin usuario de aplicación
++   aparecen identificados como tales; no se inventa un responsable histórico.
++4. Buscar por código, nombre o descripción, filtrar categoría/estado y paginar.
++
++Crear el repuesto no crea stock ni movimientos. El catálogo puede existir antes
++de que se compre la primera unidad. Los códigos admiten letras/números sin tildes,
++puntos, guiones, guiones bajos y barras, sin espacios; los nombres y descripciones
++conservan Unicode.
++
++### Proveedores y catálogo ofrecido
++
++1. Abrir **Proveedores → Nuevo proveedor**. Registrar NIT único, nombre o razón
++   social, correo, teléfono, dirección y estado. Los datos de contacto son opcionales.
++2. En la fila del proveedor usar **Catálogo ofrecido**. Elegir un repuesto activo
++   y, opcionalmente, el código que utiliza el proveedor para identificarlo.
++3. Usar **Editar código** para cambiar esa referencia. La asociación es única
++   por proveedor y repuesto.
++4. **Retirar** pide confirmar qué asociación se quitará. Una compra pendiente
++   de ese proveedor y repuesto impide retirarla. Las compras ya recibidas y sus
++   costos históricos se conservan al retirar una oferta del catálogo actual.
++5. Para dejar de utilizar un proveedor, editarlo y desmarcar **Proveedor activo**.
++
++### Bodegas y mínimos
++
++1. Abrir **Bodegas → Nueva bodega**. Registrar código único, nombre, dirección
++   opcional y estado.
++2. En **Repuestos y mínimos**, elegir repuesto y definir el stock mínimo local.
++   Puede ser cero. La misma pieza puede tener mínimos distintos por bodega.
++3. Al asociar una pieza nueva se muestra existencia cero. Si la bodega ya tiene
++   movimientos del repuesto, se conserva su existencia calculada.
++4. **Editar mínimo** cambia únicamente el nivel de reposición. La existencia es
++   de consulta: aumenta al recibir compras y disminuye al consumir en reparaciones.
++5. Se puede desactivar/reactivar una bodega; los registros y movimientos se conservan.
++
++El registro y recepción de compras es el siguiente bloque. Esta entrega prepara
++proveedor/repuesto y bodega/repuesto, que son requisitos del detalle de compra.
++La pantalla general de inventario y el kardex también siguen pendientes.
++
++## Reglas y compatibilidad
++
++- API y SQL exigen BODEGA o ADMIN activos. Cada operación usa el UsuarioID de
++  la sesión, nunca un actor enviado por el formulario. POST/PUT requieren CSRF.
++- Los tres catálogos principales se desactivan; no se borran sus registros.
++  Retirar una oferta elimina solo la relación actual ProveedorRepuesto, con el
++  control de compras pendientes. No elimina compras, detalles, consumos o pagos.
++- Las ediciones envían una revisión del registro. SQL bloquea, compara y rechaza
++  una versión desactualizada con 409. El formulario conserva lo escrito y permite
++  cargar los datos actuales para revisarlos antes de guardar.
++- Los mínimos comparan `stockMinimoEsperado`; un alta envía null. Se rechazan
++  asociaciones duplicadas y actualizaciones que omitan el mínimo anterior.
++- Se validan longitudes antes de convertir a varchar/nvarchar de las tablas.
++  Precios: decimal(12,2), de cero a 9999999999.99. Mínimos: enteros de cero a
++  2147483647. No se redondea un precio de tres decimales ni se trunca un mínimo.
++- `trAuditoriaPrecio` se reutiliza. Al editar un repuesto, el procedimiento fija
++  el usuario de aplicación durante el UPDATE y restaura el contexto anterior,
++  tanto al completar como al fallar. La conexión no conserva al último editor.
++- Consumos, precios facturados y costos de compras permanecen históricos.
++  El costo de referencia sigue siendo el criterio del modelo existente; no se
++  incorpora PEPS ni promedio ponderado.
++- El rol SQL `techcare_app` recibe DENY de DML directo sobre los seis catálogos
++  administrados aquí; los procedimientos dbo escriben mediante cadena de propiedad.
++  Los procedimientos transaccionales anteriores siguen funcionando con esa cadena.
++- No se añaden tablas ni columnas al modelo. El 26 agrega vistas y procedimientos
++  de gestión. La API devuelve DTO con campos explícitos; no expone LoginSQL,
++  contraseñas ni hashes al consultar la auditoría o los catálogos.
++
++## Rutas
++
++| Método | Ruta | Uso |
++|---|---|---|
++| GET / POST | `/api/repuestos` | Buscar o registrar |
++| GET / PUT | `/api/repuestos/{id}` | Consultar o editar |
++| GET | `/api/repuestos/{id}/precios` | Auditoría de costos y precios |
++| GET / POST | `/api/repuestos/categorias` | Consultar o crear categorías |
++| PUT | `/api/repuestos/categorias/{id}` | Renombrar categoría |
++| GET / POST | `/api/proveedores` | Buscar o registrar |
++| GET / PUT | `/api/proveedores/{id}` | Consultar o editar |
++| GET | `/api/proveedores/{id}/repuestos` | Consultar catálogo ofrecido |
++| PUT | `/api/proveedores/{id}/repuestos/{repuestoId}` | Asociar, editar referencia o retirar |
++| GET / POST | `/api/bodegas` | Buscar o registrar |
++| GET / PUT | `/api/bodegas/{id}` | Consultar o editar |
++| GET | `/api/bodegas/{id}/repuestos` | Consultar piezas, mínimos y existencias |
++| PUT | `/api/bodegas/{id}/repuestos/{repuestoId}` | Asociar o actualizar mínimo |
++
++Listados con `buscar?`, `activo?` y, para repuestos, `categoriaId?`. La búsqueda se
++aplica en SQL mediante parámetros y texto literal. Se pagina en el navegador
++sobre el conjunto completo devuelto por esos filtros.
++
++## Validación entregada
++
++- Backend: 195 pruebas sin fallos, incluidas 35 nuevas de abastecimiento. Las
++  pruebas HTTP simulan JDBC para comprobar permisos, actor, DTO, validaciones,
++  revisiones, importes exactos y parámetros enviados a cada procedimiento.
++- Frontend: comprobación de TypeScript y compilación de producción.
++- Navegador con API simulada: categorías, alta/edición de repuestos y proveedores,
++  rechazo de duplicados, edición desactualizada y recuperación, auditoría,
++  activación/desactivación, oferta y retiro, protección por compra pendiente,
++  bodegas, mínimos cero, conflicto de mínimos, roles y formulario móvil.
++- Los scripts 26 y 27 se analizaron con el dialecto T-SQL. El 27 reutiliza la
++  preparación corregida del 20, incluida la relación ProveedorRepuesto antes
++  de registrar la compra del escenario.
++- SQL Server no está disponible aquí. Los 55 casos del 27 se ejecutan en su
++  instancia; no se declaran aprobados aquí. Las pruebas entre dos sesiones
++  concurrentes permanecen dentro de la validación final del proyecto.
++
++Referencia de contexto de auditoría:
++https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-set-session-context-transact-sql
+diff --git a/README.md b/README.md
+index 14dcc8adad992b051d84dcf617583fe02c0a15f3..98168714449e7592118ae5ff3a4d5efb560e27b3 100644
+--- a/README.md
++++ b/README.md
+@@ -2,15 +2,16 @@
+ 
+ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional,
+ normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
+-Clientes, Equipos, Órdenes y servicio técnico hasta LISTO tienen API e interfaz conectadas. El acceso usa las cuentas y
+-roles de la BD, con login, sesión y cierre de sesión. Los demás módulos y manuales
+-con capturas aún deben completarse.
++Clientes, equipos, órdenes, servicio técnico, facturación, pagos, entrega y los catálogos de
++abastecimiento tienen API e interfaz conectadas. El acceso usa las cuentas y roles de la BD,
++con login, sesión y cierre de sesión. Compras, inventario general, reportes y manuales con
++capturas aún deben completarse.
+ 
+ Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
+ La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
+ las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
+ Una instalación nueva con un maestro anterior debe incluir también las
+-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes) y 19 (Servicio técnico).
++actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega) y 26 (Abastecimiento).
+ 
+ Administración permite consultar y registrar cuentas, empleados y roles desde
+ una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
+@@ -25,7 +26,12 @@ historial de Equipos. Diagnóstico, autorización e inicio de reparación, activ
+ consumo de repuestos y cierre en LISTO están conectados. Instalación:
+ [INTEGRACION_SERVICIO_TECNICO.md](INTEGRACION_SERVICIO_TECNICO.md).
+ En una base existente se ejecuta `19_Servicio_Tecnico_Procedimientos.sql`.
+-Facturación, cobros y entrega desde la API quedan pendientes.
++Facturación, abonos, entrega y factura PDF están conectados mediante el 23. Instalación:
++[INTEGRACION_FACTURACION_ENTREGA.md](INTEGRACION_FACTURACION_ENTREGA.md).
++
++Repuestos, categorías, proveedores y bodegas se administran desde la aplicación con el 26.
++Incluye catálogo ofrecido, asociación de repuestos a bodegas, mínimos y auditoría de precios.
++Instalación: [INTEGRACION_ABASTECIMIENTO.md](INTEGRACION_ABASTECIMIENTO.md).
+ 
+ ## Ejecución desde cero
+ 
+@@ -54,7 +60,7 @@ TasaImpuesto es una tasa de prueba configurable (0.1200); no constituye configur
+ 
+ ## Decisiones que debe conocer el equipo
+ 
+-- **35 tablas originales**, más AsignacionOrden en la actualización 16. Cliente -> Equipo -> Orden determina el propietario. Orden
++- **35 tablas originales**, más AsignacionOrden en la actualización 16 y SolicitudPagoApi en la 23. Cliente -> Equipo -> Orden determina el propietario. Orden
+   no repite ClienteID; `vOrdenResumen` lo presenta mediante JOIN y preserva 3FN.
+   No se permite cambiar propietario, serie ni modelo de un equipo con órdenes.
+ - **Un diagnóstico consolidado y una reparación por orden.** Las revisiones del
+@@ -184,6 +190,7 @@ el mensaje SQL concreto puede variar frente a la versión con INSTEAD OF.
+ Documentos para el equipo:
+ 
+ - `INTEGRACION_FACTURACION_ENTREGA.md`: caja, abonos, entrega y factura PDF detallada; scripts 23 y 24.
++- `INTEGRACION_ABASTECIMIENTO.md`: repuestos, categorías, proveedores, bodegas y asociaciones; scripts 26 y 27.
+ 
+ - `GUIA_TRIGGERS.md`: definición, inserted/deleted, ejemplo reversible y los 16 objetos.
+ - `GUIA_GITHUB.md`: publicación privada con GitHub Desktop y trabajo por ramas.
+diff --git a/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoController.java b/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoController.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..910959ac6eacd008230d02e003f5decfda4abf18
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoController.java
+@@ -0,0 +1,99 @@
++package com.techcare.backend.abastecimiento;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import jakarta.validation.Valid;
++import jakarta.validation.constraints.*;
++import org.springframework.http.ResponseEntity;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.web.bind.annotation.*;
++
++import java.math.BigDecimal;
++import java.net.URI;
++import java.util.List;
++
++@RestController
++@RequestMapping("/api")
++public class AbastecimientoController {
++    private final AbastecimientoServicio servicio;
++    public AbastecimientoController(AbastecimientoServicio servicio) { this.servicio=servicio; }
++    @GetMapping("/repuestos/categorias")
++    public List<AbastecimientoServicio.Categoria> categorias(@AuthenticationPrincipal UsuarioAutenticado actor) { return servicio.categorias(actor.getUsuarioId()); }
++    @PostMapping("/repuestos/categorias")
++    public ResponseEntity<AbastecimientoServicio.Categoria> crearCategoria(@AuthenticationPrincipal UsuarioAutenticado actor,@Valid @RequestBody CategoriaDatos d) {
++        var c=servicio.guardarCategoria(actor.getUsuarioId(),null,d);return ResponseEntity.created(URI.create("/api/repuestos/categorias")).body(c);
++    }
++    @PutMapping("/repuestos/categorias/{id}")
++    public AbastecimientoServicio.Categoria editarCategoria(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id,@Valid @RequestBody CategoriaDatos d) { return servicio.guardarCategoria(actor.getUsuarioId(),id,d); }
++    @GetMapping("/repuestos")
++    public List<AbastecimientoServicio.Repuesto> repuestos(@AuthenticationPrincipal UsuarioAutenticado actor,@RequestParam(required=false) String buscar,
++            @RequestParam(required=false) Integer categoriaId,@RequestParam(required=false) Boolean activo) { return servicio.repuestos(actor.getUsuarioId(),buscar,categoriaId,activo); }
++    @GetMapping("/repuestos/{id}")
++    public AbastecimientoServicio.Repuesto repuesto(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id) { return servicio.repuesto(actor.getUsuarioId(),id); }
++    @PostMapping("/repuestos")
++    public ResponseEntity<AbastecimientoServicio.Repuesto> crearRepuesto(@AuthenticationPrincipal UsuarioAutenticado actor,@Valid @RequestBody RepuestoDatos d) {
++        var r=servicio.guardarRepuesto(actor.getUsuarioId(),null,d);return ResponseEntity.created(URI.create("/api/repuestos/"+r.repuestoId())).body(r);
++    }
++    @PutMapping("/repuestos/{id}")
++    public AbastecimientoServicio.Repuesto editarRepuesto(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id,@Valid @RequestBody RepuestoDatos d) { return servicio.guardarRepuesto(actor.getUsuarioId(),id,d); }
++    @GetMapping("/repuestos/{id}/precios")
++    public List<AbastecimientoServicio.Precio> precios(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id) { return servicio.precios(actor.getUsuarioId(),id); }
++    @GetMapping("/proveedores")
++    public List<AbastecimientoServicio.Proveedor> proveedores(@AuthenticationPrincipal UsuarioAutenticado actor,@RequestParam(required=false) String buscar,@RequestParam(required=false) Boolean activo) { return servicio.proveedores(actor.getUsuarioId(),buscar,activo); }
++    @GetMapping("/proveedores/{id}")
++    public AbastecimientoServicio.Proveedor proveedor(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id) { return servicio.proveedor(actor.getUsuarioId(),id); }
++    @PostMapping("/proveedores")
++    public ResponseEntity<AbastecimientoServicio.Proveedor> crearProveedor(@AuthenticationPrincipal UsuarioAutenticado actor,@Valid @RequestBody ProveedorDatos d) {
++        var p=servicio.guardarProveedor(actor.getUsuarioId(),null,d);return ResponseEntity.created(URI.create("/api/proveedores/"+p.proveedorId())).body(p);
++    }
++    @PutMapping("/proveedores/{id}")
++    public AbastecimientoServicio.Proveedor editarProveedor(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id,@Valid @RequestBody ProveedorDatos d) { return servicio.guardarProveedor(actor.getUsuarioId(),id,d); }
++    @GetMapping("/proveedores/{id}/repuestos")
++    public List<AbastecimientoServicio.Oferta> ofertas(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id) { return servicio.ofertas(actor.getUsuarioId(),id); }
++    @PutMapping("/proveedores/{id}/repuestos/{repuestoId}")
++    public AbastecimientoServicio.Oferta oferta(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id,@PathVariable int repuestoId,@Valid @RequestBody OfertaDatos d) { return servicio.guardarOferta(actor.getUsuarioId(),id,repuestoId,d); }
++    @GetMapping("/bodegas")
++    public List<AbastecimientoServicio.Bodega> bodegas(@AuthenticationPrincipal UsuarioAutenticado actor,@RequestParam(required=false) String buscar,@RequestParam(required=false) Boolean activo) { return servicio.bodegas(actor.getUsuarioId(),buscar,activo); }
++    @GetMapping("/bodegas/{id}")
++    public AbastecimientoServicio.Bodega bodega(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id) { return servicio.bodega(actor.getUsuarioId(),id); }
++    @PostMapping("/bodegas")
++    public ResponseEntity<AbastecimientoServicio.Bodega> crearBodega(@AuthenticationPrincipal UsuarioAutenticado actor,@Valid @RequestBody BodegaDatos d) {
++        var b=servicio.guardarBodega(actor.getUsuarioId(),null,d);return ResponseEntity.created(URI.create("/api/bodegas/"+b.bodegaId())).body(b);
++    }
++    @PutMapping("/bodegas/{id}")
++    public AbastecimientoServicio.Bodega editarBodega(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id,@Valid @RequestBody BodegaDatos d) { return servicio.guardarBodega(actor.getUsuarioId(),id,d); }
++    @GetMapping("/bodegas/{id}/repuestos")
++    public List<AbastecimientoServicio.RepuestoBodega> repuestosBodega(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id) { return servicio.repuestosBodega(actor.getUsuarioId(),id); }
++    @PutMapping("/bodegas/{id}/repuestos/{repuestoId}")
++    public AbastecimientoServicio.RepuestoBodega minimo(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id,@PathVariable int repuestoId,@Valid @RequestBody MinimoDatos d) { return servicio.guardarRepuestoBodega(actor.getUsuarioId(),id,repuestoId,d); }
++
++    public record CategoriaDatos(@NotBlank @Size(max=80) String nombre,@Pattern(regexp="[A-F0-9]{64}") String revision) {
++        public CategoriaDatos { nombre=limpiar(nombre); }
++    }
++    public record RepuestoDatos(
++            @NotNull @DecimalMin("1") @DecimalMax("2147483647") @Digits(integer=10,fraction=0) BigDecimal categoriaId,
++            @NotBlank @Size(max=30) @Pattern(regexp="[0-9A-Za-z._/\\-]+") String codigo,
++            @NotBlank @Size(max=100) String nombre,@Size(max=500) String descripcion,
++            @NotNull @DecimalMin("0") @Digits(integer=10,fraction=2) BigDecimal costoReferencia,
++            @NotNull @DecimalMin("0") @Digits(integer=10,fraction=2) BigDecimal precioVenta,
++            @NotNull Boolean activo,@Pattern(regexp="[A-F0-9]{64}") String revision) {
++        public RepuestoDatos { codigo=limpiar(codigo);nombre=limpiar(nombre);descripcion=limpiar(descripcion); }
++    }
++    public record ProveedorDatos(@NotBlank @Size(max=20) @Pattern(regexp="[0-9A-Za-z\\-]+") String nit,
++            @NotBlank @Size(max=150) String nombre,@Email @Size(max=254) String email,
++            @Size(max=25) @Pattern(regexp="[ -~]*") String telefono,@Size(max=250) String direccion,
++            @NotNull Boolean activo,@Pattern(regexp="[A-F0-9]{64}") String revision) {
++        public ProveedorDatos { nit=limpiar(nit);nombre=limpiar(nombre);email=limpiar(email);telefono=limpiar(telefono);direccion=limpiar(direccion); }
++    }
++    public record BodegaDatos(@NotBlank @Size(max=20) @Pattern(regexp="[0-9A-Za-z._/\\-]+") String codigo,
++            @NotBlank @Size(max=100) String nombre,@Size(max=250) String direccion,
++            @NotNull Boolean activo,@Pattern(regexp="[A-F0-9]{64}") String revision) {
++        public BodegaDatos { codigo=limpiar(codigo);nombre=limpiar(nombre);direccion=limpiar(direccion); }
++    }
++    public record OfertaDatos(@Size(max=50) @Pattern(regexp="[0-9A-Za-z._/ \\-]*") String codigoProveedor,
++            @NotNull Boolean ofrecido,@Pattern(regexp="[A-F0-9]{64}") String revision) {
++        public OfertaDatos { codigoProveedor=limpiar(codigoProveedor); }
++    }
++    public record MinimoDatos(@NotNull @DecimalMin("0") @DecimalMax("2147483647") @Digits(integer=10,fraction=0) BigDecimal stockMinimo,
++            @DecimalMin("0") @DecimalMax("2147483647") @Digits(integer=10,fraction=0) BigDecimal stockMinimoEsperado) {}
++    private static String limpiar(String v) { return v==null||v.isBlank()?null:v.strip(); }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoErrores.java b/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoErrores.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..cdafaa863a78288a8d596751d8490649b9490257
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoErrores.java
+@@ -0,0 +1,49 @@
++package com.techcare.backend.abastecimiento;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.dao.DataAccessException;
++import org.springframework.http.MediaType;
++import org.springframework.http.ResponseEntity;
++import org.springframework.http.converter.HttpMessageNotReadableException;
++import org.springframework.web.bind.MethodArgumentNotValidException;
++import org.springframework.web.bind.annotation.ExceptionHandler;
++import org.springframework.web.bind.annotation.RestControllerAdvice;
++import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.sql.SQLException;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++@RestControllerAdvice(assignableTypes=AbastecimientoController.class)
++public class AbastecimientoErrores {
++    private static final Logger LOG=LoggerFactory.getLogger(AbastecimientoErrores.class);
++    @ExceptionHandler(MethodArgumentNotValidException.class)
++    public ResponseEntity<Map<String,Object>> validacion(MethodArgumentNotValidException ex) {
++        Map<String,String> campos=new LinkedHashMap<>();ex.getBindingResult().getFieldErrors().forEach(e->campos.putIfAbsent(e.getField(),e.getDefaultMessage()));
++        return ResponseEntity.badRequest().contentType(MediaType.APPLICATION_JSON).body(Map.of("estado",400,"mensaje","Revisá los datos del catálogo.","errores",campos));
++    }
++    @ExceptionHandler({HttpMessageNotReadableException.class,MethodArgumentTypeMismatchException.class})
++    public ResponseEntity<Map<String,Object>> entrada(Exception ex) { return error(400,"La solicitud contiene datos inválidos."); }
++    @ExceptionHandler(ResponseStatusException.class)
++    public ResponseEntity<Map<String,Object>> estado(ResponseStatusException ex) { return error(ex.getStatusCode().value(),ex.getReason()); }
++    @ExceptionHandler(DataAccessException.class)
++    public ResponseEntity<Map<String,Object>> sql(DataAccessException ex) {
++        for(Throwable c=ex;c!=null;c=c.getCause())if(c instanceof SQLException sql)
++            for(SQLException s=sql;s!=null;s=s.getNextException())switch(s.getErrorCode()) {
++                case 52000,52001: return error(400,s.getMessage());
++                case 52002: return error(404,"El registro no existe o ya no está disponible.");
++                case 52003: return error(409,s.getMessage());
++                case 52004: return error(403,"Se requiere un usuario activo de bodega o administración.");
++                case 2601,2627: return error(409,"Ese código, NIT o nombre de categoría ya está registrado. Revisá el listado.");
++                case 547,1205,51120: return error(409,"Los datos o sus relaciones cambiaron. Actualizá el listado y volvé a revisar.");
++                default: break;
++            }
++        LOG.error("No se pudo completar una operación de abastecimiento.",ex);
++        return error(503,"No se pudo completar la operación. Revisá el backend e intentá nuevamente.");
++    }
++    private static ResponseEntity<Map<String,Object>> error(int estado,String mensaje) {
++        return ResponseEntity.status(estado).contentType(MediaType.APPLICATION_JSON).body(Map.of("estado",estado,"mensaje",mensaje));
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoServicio.java b/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoServicio.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..75216be0e1d75f516305b7e09611a6f3088a656d
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoServicio.java
+@@ -0,0 +1,110 @@
++package com.techcare.backend.abastecimiento;
++
++import org.springframework.http.HttpStatus;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.stereotype.Service;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.math.BigDecimal;
++import java.sql.Timestamp;
++import java.time.LocalDateTime;
++import java.time.OffsetDateTime;
++import java.time.ZoneOffset;
++import java.util.List;
++import java.util.Map;
++import java.util.function.Function;
++
++@Service
++public class AbastecimientoServicio {
++    private final JdbcTemplate jdbc;
++    public AbastecimientoServicio(JdbcTemplate jdbc) { this.jdbc=jdbc; }
++    public List<Categoria> categorias(int actor) {
++        return jdbc.queryForList("EXEC dbo.spListarCategoriasRepuesto ?",actor).stream().map(AbastecimientoServicio::categoria).toList();
++    }
++    public Categoria guardarCategoria(int actor,Integer id,AbastecimientoController.CategoriaDatos d) {
++        revision(id,d.revision());
++        return una(jdbc.queryForList("EXEC dbo.spGuardarCategoriaRepuesto ?, ?, ?, ?",actor,id,d.nombre(),d.revision()),AbastecimientoServicio::categoria);
++    }
++    public List<Repuesto> repuestos(int actor,String buscar,Integer categoria,Boolean activo) {
++        filtro(buscar); if(categoria!=null) idValido(categoria);
++        return jdbc.queryForList("EXEC dbo.spListarRepuestosGestion ?, ?, ?, ?",actor,buscar,categoria,activo).stream().map(AbastecimientoServicio::repuesto).toList();
++    }
++    public Repuesto repuesto(int actor,int id) {
++        idValido(id);return una(jdbc.queryForList("EXEC dbo.spConsultarRepuestoGestion ?, ?",actor,id),AbastecimientoServicio::repuesto);
++    }
++    public Repuesto guardarRepuesto(int actor,Integer id,AbastecimientoController.RepuestoDatos d) {
++        revision(id,d.revision());
++        return una(jdbc.queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",actor,id,d.categoriaId().intValueExact(),
++                d.codigo(),d.nombre(),d.descripcion(),d.costoReferencia(),d.precioVenta(),d.activo(),d.revision()),AbastecimientoServicio::repuesto);
++    }
++    public List<Precio> precios(int actor,int id) {
++        idValido(id);return jdbc.queryForList("EXEC dbo.spPreciosRepuestoGestion ?, ?",actor,id).stream().map(r->new Precio(
++                largo(r,"AuditoriaID"),fecha(r,"Fecha"),decimal(r,"CostoAnterior"),decimal(r,"CostoNuevo"),decimal(r,"PrecioAnterior"),decimal(r,"PrecioNuevo"),texto(r,"RegistradoPor"))).toList();
++    }
++    public List<Proveedor> proveedores(int actor,String buscar,Boolean activo) {
++        filtro(buscar);return jdbc.queryForList("EXEC dbo.spListarProveedoresGestion ?, ?, ?",actor,buscar,activo).stream().map(AbastecimientoServicio::proveedor).toList();
++    }
++    public Proveedor proveedor(int actor,int id) {
++        idValido(id);return una(jdbc.queryForList("EXEC dbo.spConsultarProveedorGestion ?, ?",actor,id),AbastecimientoServicio::proveedor);
++    }
++    public Proveedor guardarProveedor(int actor,Integer id,AbastecimientoController.ProveedorDatos d) {
++        revision(id,d.revision());
++        return una(jdbc.queryForList("EXEC dbo.spGuardarProveedorGestion ?, ?, ?, ?, ?, ?, ?, ?, ?",actor,id,d.nit(),d.nombre(),d.email(),d.telefono(),d.direccion(),d.activo(),d.revision()),AbastecimientoServicio::proveedor);
++    }
++    public List<Oferta> ofertas(int actor,int id) {
++        idValido(id);return jdbc.queryForList("EXEC dbo.spOfertasProveedorGestion ?, ?",actor,id).stream().map(AbastecimientoServicio::oferta).toList();
++    }
++    public Oferta guardarOferta(int actor,int id,int repuesto,AbastecimientoController.OfertaDatos d) {
++        idValido(id);idValido(repuesto);
++        var filas=jdbc.queryForList("EXEC dbo.spGuardarOfertaProveedor ?, ?, ?, ?, ?, ?",actor,id,repuesto,d.codigoProveedor(),d.ofrecido(),d.revision());
++        return filas.isEmpty()?null:oferta(filas.get(0));
++    }
++    public List<Bodega> bodegas(int actor,String buscar,Boolean activo) {
++        filtro(buscar);return jdbc.queryForList("EXEC dbo.spListarBodegasGestion ?, ?, ?",actor,buscar,activo).stream().map(AbastecimientoServicio::bodega).toList();
++    }
++    public Bodega bodega(int actor,int id) {
++        idValido(id);return una(jdbc.queryForList("EXEC dbo.spConsultarBodegaGestion ?, ?",actor,id),AbastecimientoServicio::bodega);
++    }
++    public Bodega guardarBodega(int actor,Integer id,AbastecimientoController.BodegaDatos d) {
++        revision(id,d.revision());
++        return una(jdbc.queryForList("EXEC dbo.spGuardarBodegaGestion ?, ?, ?, ?, ?, ?, ?",actor,id,d.codigo(),d.nombre(),d.direccion(),d.activo(),d.revision()),AbastecimientoServicio::bodega);
++    }
++    public List<RepuestoBodega> repuestosBodega(int actor,int id) {
++        idValido(id);return jdbc.queryForList("EXEC dbo.spRepuestosBodegaGestion ?, ?",actor,id).stream().map(AbastecimientoServicio::repuestoBodega).toList();
++    }
++    public RepuestoBodega guardarRepuestoBodega(int actor,int id,int repuesto,AbastecimientoController.MinimoDatos d) {
++        idValido(id);idValido(repuesto);
++        return una(jdbc.queryForList("EXEC dbo.spGuardarRepuestoBodega ?, ?, ?, ?, ?",actor,id,repuesto,d.stockMinimo(),d.stockMinimoEsperado()),AbastecimientoServicio::repuestoBodega);
++    }
++    private static <T>T una(List<Map<String,Object>> filas,Function<Map<String,Object>,T> mapper) {
++        if(filas.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"El registro no existe.");return mapper.apply(filas.get(0));
++    }
++    private static void revision(Integer id,String revision) {
++        if(id!=null)idValido(id);
++        if((id!=null)!=(revision!=null))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Para editar, abrí el registro actualizado; para crear, no envíes una revisión anterior.");
++    }
++    private static void idValido(int id) { if(id<=0)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"El identificador debe ser positivo."); }
++    private static void filtro(String buscar) { if(buscar!=null&&buscar.length()>150)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"La búsqueda admite hasta 150 caracteres."); }
++    private static Categoria categoria(Map<String,Object> r) { return new Categoria(entero(r,"CategoriaID"),texto(r,"Nombre"),texto(r,"Revision")); }
++    private static Repuesto repuesto(Map<String,Object> r) { return new Repuesto(entero(r,"RepuestoID"),entero(r,"CategoriaID"),texto(r,"Categoria"),texto(r,"Codigo"),texto(r,"Nombre"),texto(r,"Descripcion"),decimal(r,"CostoReferencia"),decimal(r,"PrecioVenta"),activo(r),texto(r,"Revision")); }
++    private static Proveedor proveedor(Map<String,Object> r) { return new Proveedor(entero(r,"ProveedorID"),texto(r,"NIT"),texto(r,"Nombre"),texto(r,"Email"),texto(r,"Telefono"),texto(r,"Direccion"),activo(r),texto(r,"Revision")); }
++    private static Bodega bodega(Map<String,Object> r) { return new Bodega(entero(r,"BodegaID"),texto(r,"Codigo"),texto(r,"Nombre"),texto(r,"Direccion"),activo(r),texto(r,"Revision")); }
++    private static Oferta oferta(Map<String,Object> r) { return new Oferta(entero(r,"ProveedorID"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Nombre"),entero(r,"CategoriaID"),texto(r,"Categoria"),activo(r),decimal(r,"PrecioVenta"),texto(r,"CodigoProveedor"),texto(r,"Revision")); }
++    private static RepuestoBodega repuestoBodega(Map<String,Object> r) { return new RepuestoBodega(entero(r,"BodegaID"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Nombre"),activo(r),entero(r,"StockMinimo"),largo(r,"Existencia")); }
++    private static String texto(Map<String,Object> r,String k) { return r.get(k)==null?null:r.get(k).toString(); }
++    private static Integer entero(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.intValue():null; }
++    private static Long largo(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.longValue():null; }
++    private static BigDecimal decimal(Map<String,Object> r,String k) { return r.get(k) instanceof BigDecimal n?n:r.get(k) instanceof Number n?new BigDecimal(n.toString()):null; }
++    private static boolean activo(Map<String,Object> r) { return Boolean.TRUE.equals(r.get("Activo"))||(r.get("Activo") instanceof Number n&&n.intValue()!=0); }
++    private static OffsetDateTime fecha(Map<String,Object> r,String k) {
++        Object v=r.get(k);if(v instanceof Timestamp t)return t.toLocalDateTime().atOffset(ZoneOffset.UTC);
++        if(v instanceof LocalDateTime t)return t.atOffset(ZoneOffset.UTC);return v instanceof OffsetDateTime t?t:null;
++    }
++    public record Categoria(Integer categoriaId,String nombre,String revision) {}
++    public record Repuesto(Integer repuestoId,Integer categoriaId,String categoria,String codigo,String nombre,String descripcion,BigDecimal costoReferencia,BigDecimal precioVenta,boolean activo,String revision) {}
++    public record Proveedor(Integer proveedorId,String nit,String nombre,String email,String telefono,String direccion,boolean activo,String revision) {}
++    public record Bodega(Integer bodegaId,String codigo,String nombre,String direccion,boolean activo,String revision) {}
++    public record Oferta(Integer proveedorId,Integer repuestoId,String codigo,String nombre,Integer categoriaId,String categoria,boolean activo,BigDecimal precioVenta,String codigoProveedor,String revision) {}
++    public record RepuestoBodega(Integer bodegaId,Integer repuestoId,String codigo,String nombre,boolean activo,Integer stockMinimo,Long existencia) {}
++    public record Precio(Long auditoriaId,OffsetDateTime fecha,BigDecimal costoAnterior,BigDecimal costoNuevo,BigDecimal precioAnterior,BigDecimal precioNuevo,String registradoPor) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+index 134f476f2c5b95973d6a7c599dc289f7a43124e2..bfe258452f61df7721d6f5588a6528e6508c7203 100644
+--- a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
++++ b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+@@ -58,6 +58,12 @@ public class SeguridadConfig {
+                         .requestMatchers(HttpMethod.GET,"/api/admin/usuarios","/api/admin/usuarios/*",
+                                 "/api/admin/roles","/api/admin/empleados-disponibles").hasRole("ADMIN")
+                         .requestMatchers(HttpMethod.POST,"/api/admin/usuarios").hasRole("ADMIN")
++                        .requestMatchers(HttpMethod.GET,"/api/repuestos","/api/repuestos/**","/api/proveedores","/api/proveedores/**","/api/bodegas","/api/bodegas/**")
++                            .hasAnyRole("ADMIN","BODEGA")
++                        .requestMatchers(HttpMethod.POST,"/api/repuestos","/api/repuestos/categorias","/api/proveedores","/api/bodegas")
++                            .hasAnyRole("ADMIN","BODEGA")
++                        .requestMatchers(HttpMethod.PUT,"/api/repuestos/*","/api/repuestos/categorias/*","/api/proveedores/*","/api/proveedores/*/repuestos/*","/api/bodegas/*","/api/bodegas/*/repuestos/*")
++                            .hasAnyRole("ADMIN","BODEGA")
+                         .requestMatchers(HttpMethod.GET,"/api/ordenes/catalogos/tecnicos").hasAnyRole("ADMIN","RECEPCION")
+                         .requestMatchers(HttpMethod.GET,"/api/facturas","/api/caja/metodos-pago",
+                                 "/api/ordenes/*/factura/previa").hasAnyRole("ADMIN","CAJA")
+diff --git a/backend/src/test/java/com/techcare/backend/abastecimiento/AbastecimientoApiTests.java b/backend/src/test/java/com/techcare/backend/abastecimiento/AbastecimientoApiTests.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b0c144d3026e6967f0dc4be4233024de43a496e
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/abastecimiento/AbastecimientoApiTests.java
+@@ -0,0 +1,163 @@
++package com.techcare.backend.abastecimiento;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.junit.jupiter.params.provider.ValueSource;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.jdbc.UncategorizedSQLException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.request.RequestPostProcessor;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.web.context.WebApplicationContext;
++
++import java.math.BigDecimal;
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.not;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.*;
++import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(properties="spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class AbastecimientoApiTests {
++    private static final String REV="A".repeat(64);
++    private static final String REP="{\"categoriaId\":3,\"codigo\":\" REP-9 \",\"nombre\":\" Fuente ñ 漢字 \",\"descripcion\":\" Descripción ñ \",\"costoReferencia\":12.25,\"precioVenta\":25.50,\"activo\":true,\"usuarioActorId\":999}";
++    private static final String PROV="{\"nit\":\" 1234-5 \",\"nombre\":\" Proveedor ñ \",\"email\":\"  \",\"telefono\":\"  \",\"direccion\":\" Dirección ñ \",\"activo\":true,\"usuarioActorId\":999}";
++    @Autowired WebApplicationContext context;
++    @MockitoBean JdbcTemplate jdbc;
++    private MockMvc mvc;
++    @BeforeEach void preparar() {
++        reset(jdbc);mvc=MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
++        var r=new HashMap<String,Object>();
++        r.put("RepuestoID",9);r.put("CategoriaID",3);r.put("ProveedorID",5);r.put("BodegaID",2);r.put("Nombre","Fuente ñ 漢字");r.put("Codigo","REP-9");
++        r.put("Activo",true);r.put("Revision",REV);r.put("CostoReferencia",new BigDecimal("12.25"));r.put("PrecioVenta",new BigDecimal("25.50"));
++        r.put("PasswordHash","PRIVADO");r.put("LoginSQL","LOGIN_PRIVADO");
++        when(jdbc.queryForList(anyString(),any(Object[].class))).thenReturn(List.of(r));
++    }
++    private RequestPostProcessor actor(String rol) {
++        var u=new UsuarioAutenticado(42,"bodega","Bodega prueba","EMP-42",List.of(rol),true,null);
++        return authentication(UsernamePasswordAuthenticationToken.authenticated(u,null,u.getAuthorities()));
++    }
++    private String revisado(String body) { return body.substring(0,body.length()-1)+",\"revision\":\""+REV+"\"}"; }
++    @ParameterizedTest @ValueSource(strings={"TECNICO","CAJA","RECEPCION"})
++    void otrosRolesNoConsultanNiMantienenCatalogosDeBodega(String rol) throws Exception {
++        for(String path:List.of("/repuestos","/repuestos/9","/repuestos/9/precios","/repuestos/categorias","/proveedores","/proveedores/5/repuestos","/bodegas","/bodegas/2/repuestos"))
++            mvc.perform(get("/api"+path).with(actor(rol))).andExpect(status().isForbidden());
++        for(String path:List.of("/repuestos","/proveedores","/bodegas","/repuestos/categorias"))
++            mvc.perform(post("/api"+path).with(actor(rol)).with(csrf()).contentType("application/json").content(REP)).andExpect(status().isForbidden());
++        for(String path:List.of("/repuestos/9","/proveedores/5","/bodegas/2","/repuestos/categorias/3","/proveedores/5/repuestos/9","/bodegas/2/repuestos/9"))
++            mvc.perform(put("/api"+path).with(actor(rol)).with(csrf()).contentType("application/json").content(REP)).andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void todasLasEscriturasExigenSesionYCsrf() throws Exception {
++        for(String path:List.of("/repuestos","/proveedores","/bodegas","/repuestos/categorias")) {
++            mvc.perform(post("/api"+path).with(csrf()).contentType("application/json").content(REP)).andExpect(status().isUnauthorized());
++            mvc.perform(post("/api"+path).with(actor("BODEGA")).contentType("application/json").content(REP)).andExpect(status().isForbidden());
++        }
++        for(String path:List.of("/repuestos/9","/proveedores/5","/bodegas/2","/repuestos/categorias/3","/proveedores/5/repuestos/9","/bodegas/2/repuestos/9")) {
++            mvc.perform(put("/api"+path).with(csrf()).contentType("application/json").content(REP)).andExpect(status().isUnauthorized());
++            mvc.perform(put("/api"+path).with(actor("BODEGA")).contentType("application/json").content(REP)).andExpect(status().isForbidden());
++        }
++        verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings={"ADMIN","BODEGA"})
++    void crearRepuestoUsaActorAutenticadoYConservaUnicodeYCentavos(String rol) throws Exception {
++        mvc.perform(post("/api/repuestos").with(actor(rol)).with(csrf()).contentType("application/json").content(REP))
++                .andExpect(status().isCreated()).andExpect(header().string("Location","/api/repuestos/9"))
++                .andExpect(jsonPath("$.nombre").value("Fuente ñ 漢字")).andExpect(jsonPath("$.precioVenta").value(25.5))
++                .andExpect(content().string(not(containsString("PRIVADO"))));
++        verify(jdbc).queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",42,null,3,"REP-9","Fuente ñ 漢字","Descripción ñ",new BigDecimal("12.25"),new BigDecimal("25.50"),true,null);
++    }
++    @Test void actualizacionEnviaLaRevisionLeida() throws Exception {
++        mvc.perform(put("/api/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(revisado(REP))).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",42,9,3,"REP-9","Fuente ñ 漢字","Descripción ñ",new BigDecimal("12.25"),new BigDecimal("25.50"),true,REV);
++    }
++    @Test void proveedorLimpiaOpcionalesYTomaActorDeSesion() throws Exception {
++        mvc.perform(post("/api/proveedores").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(PROV)).andExpect(status().isCreated());
++        verify(jdbc).queryForList("EXEC dbo.spGuardarProveedorGestion ?, ?, ?, ?, ?, ?, ?, ?, ?",42,null,"1234-5","Proveedor ñ",null,null,"Dirección ñ",true,null);
++    }
++    @Test void bodegaYCategoriaSeGuardanPorSusProcedimientos() throws Exception {
++        mvc.perform(post("/api/bodegas").with(actor("BODEGA")).with(csrf()).contentType("application/json")
++                .content("{\"codigo\":\" B-2 \",\"nombre\":\" Bodega ñ \",\"direccion\":\" Zona 1 \",\"activo\":true}")).andExpect(status().isCreated());
++        mvc.perform(post("/api/repuestos/categorias").with(actor("BODEGA")).with(csrf()).contentType("application/json").content("{\"nombre\":\" Categoría ñ 漢字 \"}")).andExpect(status().isCreated());
++        verify(jdbc).queryForList("EXEC dbo.spGuardarBodegaGestion ?, ?, ?, ?, ?, ?, ?",42,null,"B-2","Bodega ñ","Zona 1",true,null);
++        verify(jdbc).queryForList("EXEC dbo.spGuardarCategoriaRepuesto ?, ?, ?, ?",42,null,"Categoría ñ 漢字",null);
++    }
++    @Test void asociarYRetirarOfertaPreservanRevisionYNoAceptanOtroActor() throws Exception {
++        mvc.perform(put("/api/proveedores/5/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json")
++                .content("{\"codigoProveedor\":\" REF-9 \",\"ofrecido\":true,\"usuarioActorId\":999}")).andExpect(status().isOk());
++        mvc.perform(put("/api/proveedores/5/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json")
++                .content("{\"codigoProveedor\":null,\"ofrecido\":false,\"revision\":\""+REV+"\"}")).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spGuardarOfertaProveedor ?, ?, ?, ?, ?, ?",42,5,9,"REF-9",true,null);
++        verify(jdbc).queryForList("EXEC dbo.spGuardarOfertaProveedor ?, ?, ?, ?, ?, ?",42,5,9,null,false,REV);
++    }
++    @Test void configurarMinimoNoEnviaNiModificaExistenciaDesdeElCliente() throws Exception {
++        mvc.perform(put("/api/bodegas/2/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json")
++                .content("{\"stockMinimo\":0,\"stockMinimoEsperado\":5,\"existencia\":9999,\"usuarioActorId\":999}")).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spGuardarRepuestoBodega ?, ?, ?, ?, ?",42,2,9,new BigDecimal("0"),new BigDecimal("5"));verifyNoMoreInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings={"-0.01","1.234","10000000000","null"})
++    void preciosInvalidosSeRechazanSinLlegarASql(String valor) throws Exception {
++        for(String body:List.of(REP.replace("12.25",valor),REP.replace("25.50",valor)))
++            mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(body)).andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void costoYPrecioCeroSonValidos() throws Exception {
++        mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(REP.replace("12.25","0").replace("25.50","0"))).andExpect(status().isCreated());
++    }
++    @ParameterizedTest @ValueSource(strings={"-1","1.5","2147483648","null"})
++    void minimoFraccionarioOInvalidoNoSeTrunca(String valor) throws Exception {
++        mvc.perform(put("/api/bodegas/2/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json").content("{\"stockMinimo\":"+valor+"}")).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void categoriaFraccionariaNoSeCoaccionaAEntero() throws Exception {
++        mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(REP.replace("\"categoriaId\":3","\"categoriaId\":3.5"))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void cadenasFueraDeLimiteOCodigosUnicodeNoSeTruncan() throws Exception {
++        for(String body:List.of(REP.replace("REP-9","x".repeat(31)),REP.replace("Fuente ñ 漢字","x".repeat(101)),REP.replace("Descripción ñ","x".repeat(501)),REP.replace("REP-9","REP-漢字"),REP.replace("REP-9","REP 9")))
++            mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(body)).andExpect(status().isBadRequest());
++        for(String body:List.of(PROV.replace("1234-5","x".repeat(21)),PROV.replace("Proveedor ñ","x".repeat(151)),PROV.replace("Dirección ñ","x".repeat(251)),PROV.replace("\"email\":\"  \"","\"email\":\"correo-invalido\"")))
++            mvc.perform(post("/api/proveedores").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(body)).andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void editarSinRevisionYCrearConRevisionAnteriorSeRechazan() throws Exception {
++        mvc.perform(put("/api/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(REP)).andExpect(status().isBadRequest());
++        mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(revisado(REP))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void filtrosSeEnvianComoParametrosSinConstruirSql() throws Exception {
++        mvc.perform(get("/api/repuestos").with(actor("BODEGA")).param("buscar","%_' OR 1=1").param("categoriaId","3").param("activo","false")).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spListarRepuestosGestion ?, ?, ?, ?",42,"%_' OR 1=1",3,false);
++    }
++    @Test void consultasDeAsociacionesYPreciosSoloExponenSusDtos() throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spPreciosRepuestoGestion ?, ?",42,9)).thenReturn(List.of(Map.of("AuditoriaID",10000000000L,"Fecha",Timestamp.valueOf("2026-10-21 18:30:00"),"LoginSQL","PRIVADO","PrecioNuevo",new BigDecimal("25.50"))));
++        when(jdbc.queryForList("EXEC dbo.spRepuestosBodegaGestion ?, ?",42,2)).thenReturn(List.of(Map.of("RepuestoID",9,"Existencia",10000000000L,"StockMinimo",0)));
++        mvc.perform(get("/api/repuestos/9/precios").with(actor("BODEGA"))).andExpect(status().isOk()).andExpect(jsonPath("$[0].fecha").value("2026-10-21T18:30:00Z")).andExpect(content().string(not(containsString("PRIVADO"))));
++        mvc.perform(get("/api/bodegas/2/repuestos").with(actor("BODEGA"))).andExpect(status().isOk()).andExpect(jsonPath("$[0].existencia").value(10000000000L));
++        mvc.perform(get("/api/proveedores/5/repuestos").with(actor("BODEGA"))).andExpect(status().isOk()).andExpect(content().string(not(containsString("LOGIN_PRIVADO"))));
++    }
++    @ParameterizedTest @CsvSource({"52000,400","52001,400","52002,404","52003,409","52004,403","2627,409","547,409","1205,409","2812,503"})
++    void erroresConservanContratoSinExponerDetallesInternos(int codigo,int esperado) throws Exception {
++        when(jdbc.queryForList(anyString(),any(Object[].class))).thenThrow(new UncategorizedSQLException("abastecimiento","EXEC",new SQLException("INTERNO_SQL","S0001",codigo)));
++        var r=mvc.perform(get("/api/repuestos").with(actor("BODEGA"))).andExpect(status().is(esperado));
++        if(esperado==403||esperado==404||esperado==503||codigo==2627||codigo==547||codigo==1205)r.andExpect(content().string(not(containsString("INTERNO_SQL"))));
++    }
++    @Test void idsInvalidosYBusquedaLargaNoSeEnvianASql() throws Exception {
++        mvc.perform(get("/api/repuestos/0").with(actor("BODEGA"))).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/repuestos").with(actor("BODEGA")).param("categoriaId","1.5")).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/proveedores").with(actor("BODEGA")).param("buscar","x".repeat(151))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++}
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 8e50d91e6489b3a8728b82eb99007385e2e32390..ad2ee3feff2fe408a56b2b5a325430419ee43e1b 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -11,9 +11,7 @@ import { OrdenesListPage } from "./features/ordenes/OrdenesListPage";
+ import { OrdenNuevaPage } from "./features/ordenes/OrdenNuevaPage";
+ import { OrdenExpedientePage } from "./features/ordenes/OrdenExpedientePage";
+ import { InventarioPage } from "./features/inventario/InventarioPage";
+-import { RepuestosPage } from "./features/repuestos/RepuestosPage";
+ import { ComprasPage } from "./features/compras/ComprasPage";
+-import { ProveedoresPage } from "./features/proveedores/ProveedoresPage";
+ import { ReportesPage } from "./features/reportes/ReportesPage";
+ import { AdministracionPage } from "./features/administracion/AdministracionPage";
+ import { IntegracionPage } from "./features/integracion/IntegracionPage";
+@@ -21,6 +19,10 @@ import { LoginPage } from "./features/auth/LoginPage";
+ 
+ const FacturacionPage = lazy(() => import("./features/facturacion/FacturacionPage").then(m => ({ default: m.FacturacionPage })));
+ 
++const RepuestosPage = lazy(() => import("./features/repuestos/RepuestosPage").then(m => ({ default: m.RepuestosPage })));
++const ProveedoresPage = lazy(() => import("./features/proveedores/ProveedoresPage").then(m => ({ default: m.ProveedoresPage })));
++const BodegasPage = lazy(() => import("./features/bodegas/BodegasPage").then(m => ({ default: m.BodegasPage })));
++
+ export default function App() {
+   return (
+     <Routes>
+@@ -41,9 +43,10 @@ export default function App() {
+         <Route path="/equipos" element={<EquiposPage />} />
+ 
+         <Route path="/inventario" element={<InventarioPage />} />
+-        <Route path="/repuestos" element={<RepuestosPage />} />
++        <Route path="/repuestos" element={<Suspense fallback={<LoadingState titulo="Cargando repuestos…" />}><RepuestosPage /></Suspense>} />
++        <Route path="/bodegas" element={<Suspense fallback={<LoadingState titulo="Cargando bodegas…" />}><BodegasPage /></Suspense>} />
+         <Route path="/compras" element={<ComprasPage />} />
+-        <Route path="/proveedores" element={<ProveedoresPage />} />
++        <Route path="/proveedores" element={<Suspense fallback={<LoadingState titulo="Cargando proveedores…" />}><ProveedoresPage /></Suspense>} />
+ 
+         <Route path="/facturacion" element={<Suspense fallback={<LoadingState titulo="Cargando caja…" />}><FacturacionPage /></Suspense>} />
+ 
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index caaada4574f9df5628054da9a2460a28311d89ab..5902e610c212f060841d21850a6bbee7bfd57007 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -1,7 +1,7 @@
+ /**
+- * Capacidades de acceso, clientes, equipos, órdenes y servicio técnico.
++ * Capacidades conectadas de acceso, servicio, caja y abastecimiento.
+  * Las rutas disponibles requieren sesión y permisos del servidor.
+- * El inventario general y la caja conservan su estado pendiente.
++ * Las compras, el kardex general y los reportes conservan su estado pendiente.
+  */
+ 
+ export type EstadoCapacidad = "disponible" | "incompleta" | "ausente";
+@@ -269,7 +269,7 @@ export const OPERACIONES: OperacionApi[] = [
+   {
+     id: "ordenes.expediente", modulo: "Ordenes", operacion: "Consultar expediente de la orden",
+     metodo: "GET", ruta: "/api/ordenes/{id}", entrada: "id", respuesta: "Orden",
+-    roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "incompleta", procedimiento: "spConsultarOrden",
++    roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "disponible", procedimiento: "spConsultarOrden",
+     nota: "Recepción, diagnóstico, reparación, consumos, facturación, pagos y entrega conectados.",
+   },
+   {
+@@ -422,38 +422,95 @@ export const OPERACIONES: OperacionApi[] = [
+     id: "repuestos.catalogo",
+     modulo: "Repuestos",
+     operacion: "Catalogo de repuestos",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/repuestos)",
+-    entrada: "categoriaId, texto, activo",
++    metodo: "GET",
++    ruta: "/api/repuestos",
++    entrada: "buscar?, categoriaId?, activo?",
+     respuesta: "Repuesto[]",
+     roles: "BODEGA, ADMIN",
+-    estado: "ausente",
++    estado: "disponible",
+     nota: "Editar costo/precio no altera consumos ni facturas anteriores (AuditoriaPrecioRepuesto).",
++    procedimiento: "spListarRepuestosGestion",
+   },
+   {
+     id: "bodegas.listar",
+     modulo: "Bodegas",
+     operacion: "Administrar bodegas",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/bodegas)",
+-    entrada: "Datos",
++    metodo: "GET",
++    ruta: "/api/bodegas",
++    entrada: "buscar?, activo?",
+     respuesta: "Bodega[]",
+     roles: "ADMIN, BODEGA",
+-    estado: "ausente",
++    estado: "disponible",
++    procedimiento: "spListarBodegasGestion",
+   },
+ 
++
++  // ---- Gestión de abastecimiento conectada ----
++  { id: "repuestos.consultar", modulo: "Repuestos", operacion: "Consultar un repuesto", metodo: "GET",
++    ruta: "/api/repuestos/{id}", entrada: "ID", respuesta: "Repuesto", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spConsultarRepuestoGestion" },
++  { id: "repuestos.crear", modulo: "Repuestos", operacion: "Registrar repuesto sin generar stock", metodo: "POST",
++    ruta: "/api/repuestos", entrada: "RepuestoDatos", respuesta: "Repuesto", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarRepuestoGestion" },
++  { id: "repuestos.editar", modulo: "Repuestos", operacion: "Editar o activar/desactivar repuesto", metodo: "PUT",
++    ruta: "/api/repuestos/{id}", entrada: "RepuestoDatos + revision", respuesta: "Repuesto", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarRepuestoGestion" },
++  { id: "repuestos.precios", modulo: "Repuestos", operacion: "Consultar auditoría de costos y precios", metodo: "GET",
++    ruta: "/api/repuestos/{id}/precios", entrada: "ID", respuesta: "PrecioRepuesto[]", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spPreciosRepuestoGestion" },
++  { id: "repuestos.categorias", modulo: "Repuestos", operacion: "Consultar categorías de repuestos", metodo: "GET",
++    ruta: "/api/repuestos/categorias", entrada: "-", respuesta: "CategoriaRepuesto[]", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spListarCategoriasRepuesto" },
++  { id: "repuestos.categoria.crear", modulo: "Repuestos", operacion: "Crear categoría", metodo: "POST",
++    ruta: "/api/repuestos/categorias", entrada: "nombre", respuesta: "CategoriaRepuesto", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarCategoriaRepuesto" },
++  { id: "repuestos.categoria.editar", modulo: "Repuestos", operacion: "Renombrar categoría", metodo: "PUT",
++    ruta: "/api/repuestos/categorias/{id}", entrada: "nombre, revision", respuesta: "CategoriaRepuesto", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarCategoriaRepuesto" },
++  { id: "proveedores.consultar", modulo: "Proveedores", operacion: "Consultar proveedor", metodo: "GET",
++    ruta: "/api/proveedores/{id}", entrada: "ID", respuesta: "Proveedor", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spConsultarProveedorGestion" },
++  { id: "proveedores.crear", modulo: "Proveedores", operacion: "Registrar proveedor", metodo: "POST",
++    ruta: "/api/proveedores", entrada: "ProveedorDatos", respuesta: "Proveedor", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarProveedorGestion" },
++  { id: "proveedores.editar", modulo: "Proveedores", operacion: "Editar o activar/desactivar proveedor", metodo: "PUT",
++    ruta: "/api/proveedores/{id}", entrada: "ProveedorDatos + revision", respuesta: "Proveedor", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarProveedorGestion" },
++  { id: "proveedores.ofertas", modulo: "Proveedores", operacion: "Consultar repuestos ofrecidos", metodo: "GET",
++    ruta: "/api/proveedores/{id}/repuestos", entrada: "ID", respuesta: "OfertaProveedor[]", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spOfertasProveedorGestion" },
++  { id: "proveedores.oferta.guardar", modulo: "Proveedores", operacion: "Asociar, editar o retirar repuesto ofrecido", metodo: "PUT",
++    ruta: "/api/proveedores/{id}/repuestos/{repuestoId}", entrada: "codigoProveedor, ofrecido, revision?", respuesta: "OfertaProveedor | null", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarOfertaProveedor" },
++  { id: "bodegas.consultar", modulo: "Bodegas", operacion: "Consultar bodega", metodo: "GET",
++    ruta: "/api/bodegas/{id}", entrada: "ID", respuesta: "Bodega", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spConsultarBodegaGestion" },
++  { id: "bodegas.crear", modulo: "Bodegas", operacion: "Registrar bodega", metodo: "POST",
++    ruta: "/api/bodegas", entrada: "BodegaDatos", respuesta: "Bodega", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarBodegaGestion" },
++  { id: "bodegas.editar", modulo: "Bodegas", operacion: "Editar o activar/desactivar bodega", metodo: "PUT",
++    ruta: "/api/bodegas/{id}", entrada: "BodegaDatos + revision", respuesta: "Bodega", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarBodegaGestion" },
++  { id: "bodegas.repuestos", modulo: "Bodegas", operacion: "Consultar repuestos y mínimos de una bodega", metodo: "GET",
++    ruta: "/api/bodegas/{id}/repuestos", entrada: "ID", respuesta: "RepuestoBodega[]", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spRepuestosBodegaGestion" },
++  { id: "bodegas.minimos", modulo: "Bodegas", operacion: "Asociar repuesto y configurar mínimo sin editar existencias", metodo: "PUT",
++    ruta: "/api/bodegas/{id}/repuestos/{repuestoId}", entrada: "stockMinimo, stockMinimoEsperado?", respuesta: "RepuestoBodega", roles: "BODEGA, ADMIN",
++    estado: "disponible", procedimiento: "spGuardarRepuestoBodega" },
++
+   // ---- Proveedores / compras ----
+   {
+     id: "proveedores.listar",
+     modulo: "Proveedores",
+     operacion: "Administrar proveedores",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/proveedores)",
+-    entrada: "Datos, repuestos asociados",
++    metodo: "GET",
++    ruta: "/api/proveedores",
++    entrada: "buscar?, activo?",
+     respuesta: "Proveedor[]",
+     roles: "BODEGA, ADMIN",
+-    estado: "ausente",
++    estado: "disponible",
+     nota: "ProveedorRepuesto conserva el catalogo ofrecido por cada proveedor.",
++    procedimiento: "spListarProveedoresGestion",
+   },
+   {
+     id: "compras.listar",
+diff --git a/frontend/src/app/navigation.ts b/frontend/src/app/navigation.ts
+index d87fd201e449ca4620603c2c4ba4ce3dfa8e3484..7b247f3fa1b2697f805d86488e56be24444a242a 100644
+--- a/frontend/src/app/navigation.ts
++++ b/frontend/src/app/navigation.ts
+@@ -84,6 +84,14 @@ export const NAVEGACION: NavGrupo[] = [
+         ruta: "/repuestos",
+         icono: Package,
+         descripcion: "Catalogo de repuestos y costos vigentes.",
++        roles: ["BODEGA", "ADMIN"],
++      },
++      {
++        etiqueta: "Bodegas",
++        ruta: "/bodegas",
++        icono: Boxes,
++        descripcion: "Ubicaciones, repuestos y minimos de reposicion.",
++        roles: ["BODEGA", "ADMIN"],
+       },
+       {
+         etiqueta: "Compras",
+diff --git a/frontend/src/features/abastecimiento/CatalogoForm.tsx b/frontend/src/features/abastecimiento/CatalogoForm.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..300132b0686eb021b2c8bec1b560752c8273ca73
+--- /dev/null
++++ b/frontend/src/features/abastecimiento/CatalogoForm.tsx
+@@ -0,0 +1,75 @@
++import { useRef, useState, type FormEvent } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { Field, TextInput, TextArea, SelectInput, Switch } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { abastecimientoApi as api, idCatalogo, type TipoCatalogo, type RegistroCatalogo } from "../../services/abastecimiento";
++import { esApiError, mensajeDeError } from "../../services/errors";
++import { useActualizarAbastecimiento } from "./compartidos";
++
++export function CatalogoForm({ tipo, registro, onGuardado, onCancelar, onRecargar, onOcupado }: {
++  tipo: TipoCatalogo; registro: RegistroCatalogo | null; onGuardado: (r: RegistroCatalogo) => void; onCancelar: () => void; onRecargar: (r: RegistroCatalogo) => void;
++  onOcupado: (v: boolean) => void;
++}) {
++  const [codigo, setCodigo] = useState(registro && "codigo" in registro ? registro.codigo : "");
++  const [nombre, setNombre] = useState(registro?.nombre ?? ""), [activo, setActivo] = useState(registro?.activo ?? true);
++  const [categoria, setCategoria] = useState(registro && "categoriaId" in registro ? String(registro.categoriaId) : "");
++  const [descripcion, setDescripcion] = useState(registro && "descripcion" in registro ? registro.descripcion ?? "" : "");
++  const [costo, setCosto] = useState(registro && "costoReferencia" in registro ? String(registro.costoReferencia) : "0.00");
++  const [precio, setPrecio] = useState(registro && "precioVenta" in registro ? String(registro.precioVenta) : "0.00");
++  const [nit, setNit] = useState(registro && "nit" in registro ? registro.nit : "");
++  const [email, setEmail] = useState(registro && "email" in registro ? registro.email ?? "" : "");
++  const [telefono, setTelefono] = useState(registro && "telefono" in registro ? registro.telefono ?? "" : "");
++  const [direccion, setDireccion] = useState(registro && "direccion" in registro ? registro.direccion ?? "" : "");
++  const [error, setError] = useState(""), [conflicto, setConflicto] = useState(false), [guardando, setGuardando] = useState(false);
++  const bloqueo = useRef(false), actualizar = useActualizarAbastecimiento();
++  const categorias = useQuery({ queryKey: ["abastecimiento", "categorias"], queryFn: ({ signal }) => api.categorias(signal), enabled: tipo === "repuestos" });
++  const id = registro ? idCatalogo(registro) : null;
++  async function guardar(e: FormEvent) {
++    e.preventDefault(); if (bloqueo.current) return;
++    if (tipo !== "proveedores" && !/^[0-9A-Za-z._/\-]+$/.test(codigo.trim())) { setError("El código admite letras, números, puntos, guiones, guiones bajos y barras, sin espacios."); return; }
++    if (tipo === "proveedores" && !/^[0-9A-Za-z-]+$/.test(nit.trim())) { setError("El NIT admite letras, números y guiones."); return; }
++    if (tipo === "repuestos" && (![costo, precio].every(v => /^\d{1,10}(?:\.\d{1,2})?$/.test(v.trim())) || !categoria)) { setError("Elegí categoría e ingresá costo y precio desde cero, con hasta dos decimales."); return; }
++    bloqueo.current = true; setGuardando(true); onOcupado(true); setError(""); setConflicto(false);
++    const revision = registro?.revision ?? null;
++    try {
++      const datos = { nombre: nombre.trim(), activo, revision };
++      const r = tipo === "repuestos" ? await api.guardarRepuesto(id, { ...datos, codigo: codigo.trim(), categoriaId: Number(categoria), descripcion: descripcion.trim() || null, costoReferencia: costo.trim(), precioVenta: precio.trim() })
++        : tipo === "proveedores" ? await api.guardarProveedor(id, { ...datos, nit: nit.trim(), email: email.trim() || null, telefono: telefono.trim() || null, direccion: direccion.trim() || null })
++          : await api.guardarBodega(id, { ...datos, codigo: codigo.trim(), direccion: direccion.trim() || null });
++      await actualizar(); onGuardado(r);
++    } catch (e) { setError(mensajeDeError(e)); setConflicto(esApiError(e) && e.status === 409); }
++    finally { bloqueo.current = false; setGuardando(false); onOcupado(false); }
++  }
++  async function recargar() {
++    if (!id || bloqueo.current) return; bloqueo.current = true; setGuardando(true); onOcupado(true);
++    try { onRecargar(tipo === "repuestos" ? await api.repuesto(id) : tipo === "proveedores" ? await api.proveedor(id) : await api.bodega(id)); }
++    catch (e) { setError(mensajeDeError(e)); } finally { bloqueo.current = false; setGuardando(false); onOcupado(false); }
++  }
++  return <form className="tc-stack" style={{ marginTop: 16 }} onSubmit={e => void guardar(e)}>
++    {error ? <Alert tono="danger">{error}</Alert> : null}
++    {conflicto && registro ? <Alert tono="warn" accion={<Button type="button" disabled={guardando} onClick={() => void recargar()}>Cargar datos actuales</Button>}>Podés conservar lo escrito o cargar la versión guardada para revisarla. Cargarla reemplaza este formulario.</Alert> : null}
++    {tipo === "repuestos" ? categorias.isLoading ? <LoadingState titulo="Cargando categorías…" /> : categorias.isError ? <Alert tono="danger" accion={<Button type="button" onClick={() => categorias.refetch()}>Reintentar</Button>}>{mensajeDeError(categorias.error)}</Alert> :
++      <Field label="Categoría" htmlFor="cat-categoria" requerido><SelectInput id="cat-categoria" required disabled={guardando} value={categoria} onChange={e => setCategoria(e.target.value)}><option value="">Elegir categoría</option>{categorias.data?.map(c => <option key={c.categoriaId} value={c.categoriaId}>{c.nombre}</option>)}</SelectInput></Field> : null}
++    <div className="tc-grid tc-grid--2">
++      {tipo === "proveedores" ? <Field label="NIT" htmlFor="cat-nit" requerido><TextInput id="cat-nit" required maxLength={20} disabled={guardando} value={nit} onChange={e => setNit(e.target.value)} data-autofocus /></Field> :
++        <Field label="Código" htmlFor="cat-codigo" requerido hint="Código único, sin espacios."><TextInput id="cat-codigo" required maxLength={tipo === "repuestos" ? 30 : 20} disabled={guardando} value={codigo} onChange={e => setCodigo(e.target.value)} data-autofocus /></Field>}
++      <Field label="Nombre" htmlFor="cat-nombre" requerido><TextInput id="cat-nombre" required maxLength={tipo === "proveedores" ? 150 : 100} disabled={guardando} value={nombre} onChange={e => setNombre(e.target.value)} /></Field>
++    </div>
++    {tipo === "repuestos" ? <>
++      <Field label="Descripción" htmlFor="cat-descripcion"><TextArea id="cat-descripcion" maxLength={500} rows={3} disabled={guardando} value={descripcion} onChange={e => setDescripcion(e.target.value)} /></Field>
++      <div className="tc-grid tc-grid--2"><Field label="Costo de referencia (Q)" htmlFor="cat-costo" requerido><TextInput id="cat-costo" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={costo} onChange={e => setCosto(e.target.value)} /></Field>
++        <Field label="Precio de venta (Q)" htmlFor="cat-precio" requerido><TextInput id="cat-precio" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={precio} onChange={e => setPrecio(e.target.value)} /></Field></div>
++      <p className="tc-field__hint">Los cambios de costo y precio quedan en el historial. Los consumos y facturas anteriores conservan sus importes.</p>
++    </> : <>
++      {tipo === "proveedores" ? <div className="tc-grid tc-grid--2"><Field label="Correo" htmlFor="cat-email"><TextInput id="cat-email" type="email" maxLength={254} disabled={guardando} value={email} onChange={e => setEmail(e.target.value)} /></Field>
++        <Field label="Teléfono" htmlFor="cat-telefono"><TextInput id="cat-telefono" maxLength={25} disabled={guardando} value={telefono} onChange={e => setTelefono(e.target.value)} /></Field></div> : null}
++      <Field label="Dirección" htmlFor="cat-direccion"><TextArea id="cat-direccion" maxLength={250} rows={3} disabled={guardando} value={direccion} onChange={e => setDireccion(e.target.value)} /></Field>
++    </>}
++    <Switch id="cat-activo" etiqueta={tipo === "repuestos" ? "Repuesto activo" : tipo === "proveedores" ? "Proveedor activo" : "Bodega activa"} checked={activo} onChange={setActivo} disabled={guardando} />
++    {!activo ? <Alert tono="warn">Se conserva el historial. Reactivá el registro para utilizarlo en nuevas operaciones.</Alert> : null}
++    <div className="tc-row tc-row--end" style={{ flexWrap: "wrap" }}><Button type="button" disabled={guardando} onClick={onCancelar}>Volver</Button>
++      <Button type="submit" variante="primario" disabled={guardando || (tipo === "repuestos" && (!categorias.data?.length || categorias.isError))}>{guardando ? "Guardando…" : registro ? "Guardar cambios" : "Registrar"}</Button></div>
++  </form>;
++}
+diff --git a/frontend/src/features/abastecimiento/CategoriasPanel.tsx b/frontend/src/features/abastecimiento/CategoriasPanel.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbc3f04abedde844b8fd27ff0e5df1b5ab8ba715
+--- /dev/null
++++ b/frontend/src/features/abastecimiento/CategoriasPanel.tsx
+@@ -0,0 +1,31 @@
++import { useRef, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { Field, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { abastecimientoApi as api, type CategoriaRepuesto } from "../../services/abastecimiento";
++import { esApiError, mensajeDeError } from "../../services/errors";
++import { TablaCatalogo, useActualizarAbastecimiento } from "./compartidos";
++
++export function CategoriasPanel({ onOcupado }: { onOcupado: (v: boolean) => void }) {
++  const categorias = useQuery({ queryKey: ["abastecimiento", "categorias"], queryFn: ({ signal }) => api.categorias(signal) });
++  const [actual, setActual] = useState<CategoriaRepuesto | null>(null), [nombre, setNombre] = useState("");
++  const [guardando, setGuardando] = useState(false), [error, setError] = useState(""), [ok, setOk] = useState("");
++  const bloqueo = useRef(false), actualizar = useActualizarAbastecimiento();
++  async function guardar() {
++    if (bloqueo.current || !nombre.trim()) return; bloqueo.current = true; setGuardando(true); onOcupado(true); setError("");
++    try { await api.guardarCategoria(actual?.categoriaId ?? null, nombre.trim(), actual?.revision ?? null); await actualizar(); setActual(null); setNombre(""); setOk("Categoría guardada."); }
++    catch (e) { setError(mensajeDeError(e)); if (esApiError(e) && e.status === 409) void categorias.refetch(); } finally { bloqueo.current = false; setGuardando(false); onOcupado(false); }
++  }
++  return <div className="tc-stack" style={{ marginTop: 16 }}>
++    {error ? <Alert tono="danger">{error}</Alert> : null}{ok ? <Alert tono="ok">{ok}</Alert> : null}
++    <form className="tc-row" style={{ flexWrap: "wrap", alignItems: "end" }} onSubmit={e => { e.preventDefault(); void guardar(); }}>
++      <Field label={actual ? "Editar categoría" : "Nueva categoría"} htmlFor="categoria-nombre" requerido><TextInput id="categoria-nombre" required maxLength={80} disabled={guardando} value={nombre} onChange={e => setNombre(e.target.value)} data-autofocus /></Field>
++      <Button type="submit" variante="primario" disabled={guardando}>{guardando ? "Guardando…" : actual ? "Guardar categoría" : "Crear categoría"}</Button>
++      {actual ? <Button type="button" disabled={guardando} onClick={() => { setActual(null); setNombre(""); setError(""); }}>Cancelar edición</Button> : null}
++    </form>
++    {categorias.isLoading ? <LoadingState /> : categorias.isError ? <Alert tono="danger" accion={<Button onClick={() => categorias.refetch()}>Reintentar</Button>}>{mensajeDeError(categorias.error)}</Alert> :
++      <TablaCatalogo filas={categorias.data ?? []} clave={c => c.categoriaId} columnas={[{ clave: "nombre", encabezado: "Categoría", render: c => c.nombre }, { clave: "editar", encabezado: "Acción", render: c => <Button tamano="sm" disabled={guardando} onClick={() => { setActual(c); setNombre(c.nombre); setError(""); }}>Editar</Button> }]} />}
++  </div>;
++}
+diff --git a/frontend/src/features/abastecimiento/GestionCatalogo.tsx b/frontend/src/features/abastecimiento/GestionCatalogo.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..622c5a29cc7346be8b27b37c14d56ac97a711433
+--- /dev/null
++++ b/frontend/src/features/abastecimiento/GestionCatalogo.tsx
+@@ -0,0 +1,83 @@
++import { useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Plus, RefreshCw } from "lucide-react";
++import { Card, PageHeader } from "../../components/ui/Card";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { Dialog } from "../../components/ui/Dialog";
++import { Field, SelectInput, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { type Columna } from "../../components/ui/DataTable";
++import { abastecimientoApi as api, idCatalogo, type TipoCatalogo, type RegistroCatalogo, type PrecioRepuesto } from "../../services/abastecimiento";
++import { mensajeDeError } from "../../services/errors";
++import { fechaHora, moneda } from "../../utils/format";
++import { EstadoCatalogo, TablaCatalogo } from "./compartidos";
++import { CatalogoForm } from "./CatalogoForm";
++import { CategoriasPanel } from "./CategoriasPanel";
++import { RelacionesPanel } from "./RelacionesPanel";
++
++type Modal = { tipo: "editor" | "relaciones" | "precios"; registro: RegistroCatalogo | null } | { tipo: "categorias" };
++const NOMBRES = { repuestos: { titulo: "Repuestos", singular: "repuesto", descripcion: "Catálogo, precios actuales y categorías de los repuestos del taller." },
++  proveedores: { titulo: "Proveedores", singular: "proveedor", descripcion: "Datos de contacto y repuestos que ofrece cada proveedor." },
++  bodegas: { titulo: "Bodegas", singular: "bodega", descripcion: "Ubicaciones de almacenamiento, repuestos asociados y mínimos de reposición." } };
++
++export function GestionCatalogo({ tipo }: { tipo: TipoCatalogo }) {
++  const textos = NOMBRES[tipo];
++  const [buscar, setBuscar] = useState(""), [activo, setActivo] = useState(""), [categoria, setCategoria] = useState("");
++  const [filtros, setFiltros] = useState({ buscar: "", activo: "", categoria: "" });
++  const [modal, setModal] = useState<Modal | null>(null), [ocupado, setOcupado] = useState(false), [ok, setOk] = useState(""), [version, setVersion] = useState(0);
++  const listado = useQuery({ queryKey: ["abastecimiento", tipo, filtros], queryFn: ({ signal }): Promise<RegistroCatalogo[]> => {
++    const estado = filtros.activo === "" ? undefined : filtros.activo === "true";
++    return tipo === "repuestos" ? api.repuestos(filtros.buscar, estado, filtros.categoria ? Number(filtros.categoria) : undefined, signal) : tipo === "proveedores" ? api.proveedores(filtros.buscar, estado, signal) : api.bodegas(filtros.buscar, estado, signal);
++  } });
++  const categorias = useQuery({ queryKey: ["abastecimiento", "categorias"], queryFn: ({ signal }) => api.categorias(signal), enabled: tipo === "repuestos" });
++  function abrir(m: Modal) { setVersion(v => v + 1); setModal(m); }
++  const columnas: Columna<RegistroCatalogo>[] = [
++    { clave: "codigo", encabezado: tipo === "proveedores" ? "NIT" : "Código", render: r => <strong>{"nit" in r ? r.nit : r.codigo}</strong> },
++    { clave: "nombre", encabezado: "Nombre", render: r => <div style={{ overflowWrap: "anywhere" }}>{r.nombre}{"categoria" in r ? <div className="tc-field__hint">{r.categoria}</div> : null}</div> },
++    ...(tipo === "repuestos" ? [{ clave: "costo", encabezado: "Costo de referencia", numerica: true, render: (r: RegistroCatalogo) => "costoReferencia" in r ? moneda(r.costoReferencia) : "—" },
++      { clave: "precio", encabezado: "Precio de venta", numerica: true, render: (r: RegistroCatalogo) => "precioVenta" in r ? moneda(r.precioVenta) : "—" }] :
++      [{ clave: "contacto", encabezado: tipo === "proveedores" ? "Contacto" : "Dirección", render: (r: RegistroCatalogo) => "email" in r ? <>{r.email || "—"}<div>{r.telefono || "—"}</div></> : "direccion" in r ? r.direccion || "—" : "—" }]),
++    { clave: "estado", encabezado: "Estado", render: r => <EstadoCatalogo activo={r.activo} /> },
++    { clave: "acciones", encabezado: "Acciones", render: r => <div className="tc-row" style={{ flexWrap: "wrap" }}>
++      <Button tamano="sm" onClick={() => abrir({ tipo: "editor", registro: r })}>Editar</Button>
++      <Button tamano="sm" onClick={() => abrir({ tipo: tipo === "repuestos" ? "precios" : "relaciones", registro: r })}>{tipo === "repuestos" ? "Historial de precios" : tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"}</Button></div> },
++  ];
++  return <>
++    <PageHeader eyebrow="Inventario y compras" titulo={textos.titulo} descripcion={textos.descripcion} acciones={<>
++      {tipo === "repuestos" ? <Button onClick={() => abrir({ tipo: "categorias" })}>Categorías</Button> : null}
++      <Button variante="primario" icono={<Plus size={16} />} onClick={() => abrir({ tipo: "editor", registro: null })}>{tipo === "bodegas" ? "Nueva bodega" : `Nuevo ${textos.singular}`}</Button>
++      <Button icono={<RefreshCw size={16} />} disabled={listado.isFetching} onClick={() => listado.refetch()}>Actualizar</Button>
++    </>} />
++    <div className="tc-stack">{ok ? <Alert tono="ok">{ok}</Alert> : null}
++      {tipo === "repuestos" ? <Alert tono="info">Registrar un repuesto crea su catálogo y precio. Asociá los repuestos a sus proveedores y bodegas para preparar el abastecimiento.</Alert> : null}
++      <Card><form className="tc-row" style={{ flexWrap: "wrap", alignItems: "end" }} onSubmit={e => { e.preventDefault(); setFiltros({ buscar: buscar.trim(), activo, categoria }); }}>
++        <Field label="Buscar" htmlFor="gestion-buscar"><TextInput id="gestion-buscar" maxLength={150} value={buscar} onChange={e => setBuscar(e.target.value)} placeholder={tipo === "proveedores" ? "NIT, nombre o contacto" : "Código o nombre"} /></Field>
++        <Field label="Estado" htmlFor="gestion-estado"><SelectInput id="gestion-estado" value={activo} onChange={e => setActivo(e.target.value)}><option value="">Todos</option><option value="true">Activos</option><option value="false">Inactivos</option></SelectInput></Field>
++        {tipo === "repuestos" ? <Field label="Categoría" htmlFor="gestion-categoria"><SelectInput id="gestion-categoria" disabled={categorias.isLoading || categorias.isError} value={categoria} onChange={e => setCategoria(e.target.value)}><option value="">Todas</option>{categorias.data?.map(c => <option key={c.categoriaId} value={c.categoriaId}>{c.nombre}</option>)}</SelectInput></Field> : null}
++        <Button type="submit" variante="primario">Buscar</Button><Button type="button" onClick={() => { setBuscar(""); setActivo(""); setCategoria(""); setFiltros({ buscar: "", activo: "", categoria: "" }); }}>Limpiar</Button>
++      </form></Card>
++      {categorias.isError && tipo === "repuestos" ? <Alert tono="danger" accion={<Button onClick={() => categorias.refetch()}>Reintentar categorías</Button>}>{mensajeDeError(categorias.error)}</Alert> : null}
++      {listado.isLoading ? <LoadingState titulo={`Cargando ${tipo}…`} /> : listado.isError ? <Alert tono="danger" accion={<Button onClick={() => listado.refetch()}>Reintentar</Button>}>{mensajeDeError(listado.error)}</Alert> :
++        <TablaCatalogo key={JSON.stringify(filtros)} filas={listado.data ?? []} columnas={columnas} clave={idCatalogo} vacio="No hay registros para estos filtros." />}
++    </div>
++    {modal ? <Dialog abierto ancho={modal.tipo === "editor" ? 720 : 1050} titulo={modal.tipo === "categorias" ? "Categorías de repuestos" : modal.tipo === "editor" ? `${modal.registro ? "Editar" : "Registrar"} ${textos.singular}` : modal.tipo === "precios" ? `Historial de precios · ${modal.registro?.nombre}` : `${tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"} · ${modal.registro?.nombre}`}
++      onCerrar={() => { if (!ocupado) setModal(null); }}>
++      {modal.tipo === "editor" ? <CatalogoForm key={version} tipo={tipo} registro={modal.registro} onOcupado={setOcupado}
++        onCancelar={() => { if (!ocupado) setModal(null); }} onGuardado={r => { setOk(`${r.nombre} guardado.`); setModal(null); }}
++        onRecargar={r => { setVersion(v => v + 1); setModal({ tipo: "editor", registro: r }); }} /> : modal.tipo === "categorias" ? <CategoriasPanel onOcupado={setOcupado} /> : modal.tipo === "precios" && modal.registro ?
++          <PreciosPanel id={idCatalogo(modal.registro)} /> : modal.tipo === "relaciones" && modal.registro && !("repuestoId" in modal.registro) ? <RelacionesPanel padre={modal.registro} onOcupado={setOcupado} /> : null}
++    </Dialog> : null}
++  </>;
++}
++function PreciosPanel({ id }: { id: number }) {
++  const datos = useQuery({ queryKey: ["abastecimiento", "precios", id], queryFn: ({ signal }) => api.precios(id, signal) });
++  const columnas: Columna<PrecioRepuesto>[] = [
++    { clave: "fecha", encabezado: "Fecha", render: p => fechaHora(p.fecha) },
++    { clave: "costo", encabezado: "Costo anterior → nuevo", render: p => `${moneda(p.costoAnterior)} → ${moneda(p.costoNuevo)}` },
++    { clave: "precio", encabezado: "Precio anterior → nuevo", render: p => `${moneda(p.precioAnterior)} → ${moneda(p.precioNuevo)}` },
++    { clave: "usuario", encabezado: "Registró", render: p => p.registradoPor || "Registro previo sin usuario de aplicación" },
++  ];
++  return <div style={{ marginTop: 16 }}>{datos.isLoading ? <LoadingState /> : datos.isError ? <Alert tono="danger" accion={<Button onClick={() => datos.refetch()}>Reintentar</Button>}>{mensajeDeError(datos.error)}</Alert> :
++    <TablaCatalogo filas={datos.data ?? []} columnas={columnas} clave={r => r.auditoriaId} vacio="No hay cambios de costo o precio registrados." />}</div>;
++}
+diff --git a/frontend/src/features/abastecimiento/RelacionesPanel.tsx b/frontend/src/features/abastecimiento/RelacionesPanel.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..ecfde252468da89747e6b26c0a551d18352da73c
+--- /dev/null
++++ b/frontend/src/features/abastecimiento/RelacionesPanel.tsx
+@@ -0,0 +1,76 @@
++import { useRef, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { Field, SelectInput, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { type Columna } from "../../components/ui/DataTable";
++import { abastecimientoApi as api, type Bodega, type Proveedor, type OfertaProveedor, type RepuestoBodega } from "../../services/abastecimiento";
++import { esApiError, mensajeDeError } from "../../services/errors";
++import { numero } from "../../utils/format";
++import { EstadoCatalogo, TablaCatalogo, useActualizarAbastecimiento } from "./compartidos";
++
++type Relacion = OfertaProveedor | RepuestoBodega;
++export function RelacionesPanel({ padre, onOcupado }: { padre: Bodega | Proveedor; onOcupado: (v: boolean) => void }) {
++  const proveedor = "proveedorId" in padre, id = proveedor ? padre.proveedorId : padre.bodegaId;
++  const relaciones = useQuery({ queryKey: ["abastecimiento", proveedor ? "ofertas" : "minimos", id],
++    queryFn: ({ signal }): Promise<Relacion[]> => proveedor ? api.ofertas(id, signal) : api.repuestosBodega(id, signal) });
++  const repuestos = useQuery({ queryKey: ["abastecimiento", "repuestos", "seleccion"], queryFn: ({ signal }) => api.repuestos("", undefined, undefined, signal) });
++  const [actual, setActual] = useState<Relacion | null>(null), [repuesto, setRepuesto] = useState("");
++  const [codigo, setCodigo] = useState(""), [minimo, setMinimo] = useState("5"), [retirar, setRetirar] = useState<OfertaProveedor | null>(null);
++  const [error, setError] = useState(""), [ok, setOk] = useState(""), [guardando, setGuardando] = useState(false);
++  const bloqueo = useRef(false), actualizar = useActualizarAbastecimiento();
++  const filas = relaciones.data ?? [];
++  const opciones = (repuestos.data ?? []).filter(r => r.repuestoId === actual?.repuestoId || (r.activo && !filas.some(f => f.repuestoId === r.repuestoId)));
++  function editar(r: Relacion) {
++    setActual(r); setRepuesto(String(r.repuestoId)); setCodigo("codigoProveedor" in r ? r.codigoProveedor ?? "" : ""); setMinimo("stockMinimo" in r ? String(r.stockMinimo) : "5"); setError(""); setRetirar(null);
++  }
++  function limpiar() { setActual(null); setRepuesto(""); setCodigo(""); setMinimo("5"); setRetirar(null); }
++  async function guardar(quitar = false) {
++    const objetivo = quitar ? retirar : actual;
++    if (bloqueo.current || (!quitar && !repuesto) || (quitar && !retirar)) return;
++    if (!proveedor && (!/^\d{1,10}$/.test(minimo) || Number(minimo) > 2147483647)) { setError("El mínimo debe ser un número entero desde cero hasta 2147483647."); return; }
++    if (proveedor && codigo.trim() && !/^[0-9A-Za-z._/ \-]+$/.test(codigo.trim())) { setError("Revisá el código del proveedor: letras, números, espacios, puntos, guiones y barras."); return; }
++    bloqueo.current = true; setGuardando(true); onOcupado(true); setError("");
++    try {
++      if (proveedor) await api.guardarOferta(id, quitar ? retirar!.repuestoId : Number(repuesto), quitar ? retirar!.codigoProveedor : codigo.trim() || null, !quitar, objetivo && "revision" in objetivo ? objetivo.revision : null);
++      else await api.guardarMinimo(id, Number(repuesto), Number(minimo), actual && "stockMinimo" in actual ? actual.stockMinimo : null);
++      await actualizar(); limpiar(); setOk(quitar ? "Repuesto retirado del catálogo ofrecido. Las compras anteriores se conservan." : proveedor ? "Catálogo del proveedor actualizado." : "Repuesto y mínimo guardados. La existencia se conserva.");
++    } catch (e) { setError(mensajeDeError(e)); if (esApiError(e) && e.status === 409) void relaciones.refetch(); }
++    finally { bloqueo.current = false; setGuardando(false); onOcupado(false); }
++  }
++  async function cargarActual() {
++    if (!actual) return;
++    const resultado = await relaciones.refetch(), r = resultado.data?.find(f => f.repuestoId === actual.repuestoId);
++    if (r) editar(r); else setError(resultado.isError ? mensajeDeError(resultado.error) : "La asociación ya no existe. Cancelá la edición y revisá la lista.");
++  }
++  const columnas: Columna<Relacion>[] = [
++    { clave: "repuesto", encabezado: "Repuesto", render: r => <><strong>{r.codigo}</strong><div style={{ overflowWrap: "anywhere" }}>{r.nombre}</div></> },
++    ...(proveedor ? [{ clave: "referencia", encabezado: "Código del proveedor", render: (r: Relacion) => "codigoProveedor" in r ? r.codigoProveedor || "—" : "—" }] : [
++      { clave: "minimo", encabezado: "Mínimo", numerica: true, render: (r: Relacion) => "stockMinimo" in r ? numero(r.stockMinimo) : "—" },
++      { clave: "existencia", encabezado: "Existencia", numerica: true, render: (r: Relacion) => "existencia" in r ? numero(r.existencia) : "—" },
++    ]),
++    { clave: "activo", encabezado: "Estado", render: r => <EstadoCatalogo activo={r.activo} /> },
++    { clave: "acciones", encabezado: "Acciones", render: r => <div className="tc-row" style={{ flexWrap: "wrap" }}>
++      <Button tamano="sm" disabled={guardando || !padre.activo || !r.activo} onClick={() => editar(r)}>{proveedor ? "Editar código" : "Editar mínimo"}</Button>
++      {proveedor && "codigoProveedor" in r ? <Button tamano="sm" disabled={guardando} onClick={() => { setRetirar(r); setError(""); }}>Retirar</Button> : null}</div> },
++  ];
++  return <div className="tc-stack" style={{ marginTop: 16 }}>
++    {error ? <Alert tono="danger">{error}</Alert> : null}{ok ? <Alert tono="ok">{ok}</Alert> : null}
++    {!padre.activo ? <Alert tono="warn">Este registro está inactivo. Reactivalo para agregar o editar asociaciones.</Alert> : null}
++    {!proveedor ? <Alert tono="info">El mínimo indica cuándo reponer. La existencia aumenta al recibir compras y disminuye al utilizar repuestos en reparaciones.</Alert> : null}
++    {repuestos.isError ? <Alert tono="danger" accion={<Button onClick={() => repuestos.refetch()}>Reintentar</Button>}>{mensajeDeError(repuestos.error)}</Alert> : null}
++    <form className="tc-stack" onSubmit={e => { e.preventDefault(); void guardar(); }}>
++      <h3 className="tc-section-title">{actual ? "Editar asociación" : proveedor ? "Agregar repuesto ofrecido" : "Asociar repuesto a la bodega"}</h3>
++      <Field label="Repuesto" htmlFor="asociacion-repuesto" requerido><SelectInput id="asociacion-repuesto" required disabled={guardando || !!actual || !padre.activo || repuestos.isLoading} value={repuesto} onChange={e => setRepuesto(e.target.value)}>
++        <option value="">Elegir repuesto activo</option>{opciones.map(r => <option key={r.repuestoId} value={r.repuestoId}>{r.codigo} · {r.nombre}</option>)}</SelectInput></Field>
++      {proveedor ? <Field label="Código del proveedor" htmlFor="asociacion-codigo" hint="Opcional: referencia que utiliza el proveedor para este repuesto."><TextInput id="asociacion-codigo" maxLength={50} disabled={guardando || !padre.activo} value={codigo} onChange={e => setCodigo(e.target.value)} /></Field> :
++        <Field label="Stock mínimo" htmlFor="asociacion-minimo" requerido><TextInput id="asociacion-minimo" type="number" min="0" max="2147483647" step="1" required disabled={guardando || !padre.activo} value={minimo} onChange={e => setMinimo(e.target.value)} /></Field>}
++      <div className="tc-row" style={{ flexWrap: "wrap" }}><Button type="submit" variante="primario" disabled={guardando || !padre.activo || !repuesto || repuestos.isError}>{guardando ? "Guardando…" : actual ? "Guardar asociación" : "Agregar repuesto"}</Button>
++        {actual ? <><Button type="button" disabled={guardando} onClick={limpiar}>Cancelar edición</Button><Button type="button" disabled={guardando} onClick={() => void cargarActual()}>Cargar asociación actual</Button></> : null}</div>
++    </form>
++    {retirar ? <Alert tono="warn" titulo={`Retirar ${retirar.codigo}`} accion={<div className="tc-row" style={{ flexWrap: "wrap" }}><Button disabled={guardando} onClick={() => setRetirar(null)}>Volver</Button><Button disabled={guardando} onClick={() => void guardar(true)}>Confirmar retiro</Button></div>}>Se quitará del catálogo ofrecido por {padre.nombre}. Las compras registradas se conservan; una compra pendiente impide retirarlo.</Alert> : null}
++    {relaciones.isLoading ? <LoadingState titulo="Cargando asociaciones…" /> : relaciones.isError ? <Alert tono="danger" accion={<Button onClick={() => relaciones.refetch()}>Reintentar</Button>}>{mensajeDeError(relaciones.error)}</Alert> :
++      <TablaCatalogo filas={filas} columnas={columnas} clave={r => r.repuestoId} vacio="No hay repuestos asociados." />}
++  </div>;
++}
+diff --git a/frontend/src/features/abastecimiento/compartidos.tsx b/frontend/src/features/abastecimiento/compartidos.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..a12658dce8c4a3f6ddba6d80851dde96f373a805
+--- /dev/null
++++ b/frontend/src/features/abastecimiento/compartidos.tsx
+@@ -0,0 +1,15 @@
++import { useState } from "react";
++import { useQueryClient } from "@tanstack/react-query";
++import { DataTable, Paginacion, type Columna } from "../../components/ui/DataTable";
++import { Badge } from "../../components/ui/Badge";
++
++export function EstadoCatalogo({ activo }: { activo: boolean }) { return <Badge tono={activo ? "ok" : "neutral"}>{activo ? "Activo" : "Inactivo"}</Badge>; }
++export function TablaCatalogo<T>({ filas, columnas, clave, vacio }: { filas: T[]; columnas: Columna<T>[]; clave: (r: T) => number; vacio?: string }) {
++  const [pagina, setPagina] = useState(1), paginas = Math.max(1, Math.ceil(filas.length / 10)), actual = Math.min(pagina, paginas);
++  return <><DataTable columnas={columnas} filas={filas.slice((actual - 1) * 10, actual * 10)} claveFila={clave} vacio={vacio} />
++    <Paginacion pagina={actual} totalPaginas={paginas} total={filas.length} onCambiar={setPagina} /></>;
++}
++export function useActualizarAbastecimiento() {
++  const qc = useQueryClient();
++  return () => Promise.all([qc.invalidateQueries({ queryKey: ["abastecimiento"] }), qc.invalidateQueries({ queryKey: ["orden"] }), qc.invalidateQueries({ queryKey: ["inventario"] })]);
++}
+diff --git a/frontend/src/features/bodegas/BodegasPage.tsx b/frontend/src/features/bodegas/BodegasPage.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..15e33faceb7bbc8bf805fead9c3b2dd19d80f143
+--- /dev/null
++++ b/frontend/src/features/bodegas/BodegasPage.tsx
+@@ -0,0 +1,3 @@
++import { GestionCatalogo } from "../abastecimiento/GestionCatalogo";
++
++export function BodegasPage() { return <GestionCatalogo tipo="bodegas" />; }
+diff --git a/frontend/src/features/integracion/IntegracionPage.tsx b/frontend/src/features/integracion/IntegracionPage.tsx
+index b00500a3845b4832e189de8273540f0f4ef078ca..a7e628eaf74705cdee16dcb8517bcd811ef1415d 100644
+--- a/frontend/src/features/integracion/IntegracionPage.tsx
++++ b/frontend/src/features/integracion/IntegracionPage.tsx
+@@ -63,7 +63,7 @@ export function IntegracionPage() {
+ 
+       <div className="tc-stack">
+         <Alert tono="info" titulo="Contrato verificado">
+-          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF y entrega tienen rutas bajo <code>{API_BASE_URL}</code>.
++          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF, entrega y abastecimiento tienen rutas bajo <code>{API_BASE_URL}</code>.
+           Las operaciones requieren sesión, rol y protección CSRF al escribir. El servicio técnico valida además
+           el responsable asignado. Los errores mantienen la forma <code>{"{ estado, mensaje, errores? }"}</code>.
+         </Alert>
+diff --git a/frontend/src/features/proveedores/ProveedoresPage.tsx b/frontend/src/features/proveedores/ProveedoresPage.tsx
+index 483b708ec34feefe073d54d09432d9e6e491c357..3f77edb757f2adf3bdeaaa4077e729aa60ee2428 100644
+--- a/frontend/src/features/proveedores/ProveedoresPage.tsx
++++ b/frontend/src/features/proveedores/ProveedoresPage.tsx
+@@ -1,11 +1,3 @@
+-import { PendingModule } from "../../components/ui/PendingModule";
++import { GestionCatalogo } from "../abastecimiento/GestionCatalogo";
+ 
+-export function ProveedoresPage() {
+-  return (
+-    <PendingModule
+-      modulo="Proveedores"
+-      titulo="Proveedores"
+-      descripcion="Contactos de proveedores y el catalogo de repuestos que ofrece cada uno."
+-    />
+-  );
+-}
++export function ProveedoresPage() { return <GestionCatalogo tipo="proveedores" />; }
+diff --git a/frontend/src/features/repuestos/RepuestosPage.tsx b/frontend/src/features/repuestos/RepuestosPage.tsx
+index ec5cdadfb152686b250c528cc1d92182bf67ce0e..36ec86ea7d2650f7ecb675c3a23b0627c8149d6e 100644
+--- a/frontend/src/features/repuestos/RepuestosPage.tsx
++++ b/frontend/src/features/repuestos/RepuestosPage.tsx
+@@ -1,11 +1,3 @@
+-import { PendingModule } from "../../components/ui/PendingModule";
++import { GestionCatalogo } from "../abastecimiento/GestionCatalogo";
+ 
+-export function RepuestosPage() {
+-  return (
+-    <PendingModule
+-      modulo="Repuestos"
+-      titulo="Catalogo de repuestos"
+-      descripcion="Catalogo de repuestos con codigo, categoria, descripcion, costo de referencia, precio de venta y estado."
+-    />
+-  );
+-}
++export function RepuestosPage() { return <GestionCatalogo tipo="repuestos" />; }
+diff --git a/frontend/src/services/abastecimiento.ts b/frontend/src/services/abastecimiento.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f7f3d68a9e741b62ff344245d75e9965e7dd311
+--- /dev/null
++++ b/frontend/src/services/abastecimiento.ts
+@@ -0,0 +1,37 @@
++import { http } from "./http";
++export interface CategoriaRepuesto { categoriaId: number; nombre: string; revision: string }
++export interface Repuesto { repuestoId: number; categoriaId: number; categoria: string; codigo: string; nombre: string; descripcion: string | null; costoReferencia: number; precioVenta: number; activo: boolean; revision: string }
++export interface Proveedor { proveedorId: number; nit: string; nombre: string; email: string | null; telefono: string | null; direccion: string | null; activo: boolean; revision: string }
++export interface Bodega { bodegaId: number; codigo: string; nombre: string; direccion: string | null; activo: boolean; revision: string }
++export interface OfertaProveedor { proveedorId: number; repuestoId: number; codigo: string; nombre: string; categoriaId: number; categoria: string; activo: boolean; precioVenta: number; codigoProveedor: string | null; revision: string }
++export interface RepuestoBodega { bodegaId: number; repuestoId: number; codigo: string; nombre: string; activo: boolean; stockMinimo: number; existencia: number }
++export interface PrecioRepuesto { auditoriaId: number; fecha: string; costoAnterior: number; costoNuevo: number; precioAnterior: number; precioNuevo: number; registradoPor: string | null }
++export type RepuestoDatos = { categoriaId: number; codigo: string; nombre: string; descripcion: string | null; costoReferencia: string; precioVenta: string; activo: boolean; revision: string | null };
++export type ProveedorDatos = Omit<Proveedor, "proveedorId" | "revision"> & { revision: string | null };
++export type BodegaDatos = Omit<Bodega, "bodegaId" | "revision"> & { revision: string | null };
++export type TipoCatalogo = "repuestos" | "proveedores" | "bodegas";
++export type RegistroCatalogo = Repuesto | Proveedor | Bodega;
++export const idCatalogo = (r: RegistroCatalogo) => "repuestoId" in r ? r.repuestoId : "proveedorId" in r ? r.proveedorId : r.bodegaId;
++function filtros(buscar: string, activo?: boolean, categoriaId?: number) {
++  const p = new URLSearchParams(); if (buscar) p.set("buscar", buscar);
++  if (activo !== undefined) p.set("activo", String(activo)); if (categoriaId) p.set("categoriaId", String(categoriaId));
++  return p.size ? `?${p}` : "";
++}
++export const abastecimientoApi = {
++  categorias: (signal?: AbortSignal) => http.get<CategoriaRepuesto[]>("/repuestos/categorias", signal),
++  guardarCategoria: (id: number | null, nombre: string, revision: string | null) => id ? http.put<CategoriaRepuesto>(`/repuestos/categorias/${id}`, { nombre, revision }) : http.post<CategoriaRepuesto>("/repuestos/categorias", { nombre, revision }),
++  repuestos: (buscar = "", activo?: boolean, categoriaId?: number, signal?: AbortSignal) => http.get<Repuesto[]>(`/repuestos${filtros(buscar, activo, categoriaId)}`, signal),
++  repuesto: (id: number) => http.get<Repuesto>(`/repuestos/${id}`),
++  guardarRepuesto: (id: number | null, datos: RepuestoDatos) => id ? http.put<Repuesto>(`/repuestos/${id}`, datos) : http.post<Repuesto>("/repuestos", datos),
++  precios: (id: number, signal?: AbortSignal) => http.get<PrecioRepuesto[]>(`/repuestos/${id}/precios`, signal),
++  proveedores: (buscar = "", activo?: boolean, signal?: AbortSignal) => http.get<Proveedor[]>(`/proveedores${filtros(buscar, activo)}`, signal),
++  proveedor: (id: number) => http.get<Proveedor>(`/proveedores/${id}`),
++  guardarProveedor: (id: number | null, datos: ProveedorDatos) => id ? http.put<Proveedor>(`/proveedores/${id}`, datos) : http.post<Proveedor>("/proveedores", datos),
++  ofertas: (id: number, signal?: AbortSignal) => http.get<OfertaProveedor[]>(`/proveedores/${id}/repuestos`, signal),
++  guardarOferta: (id: number, repuesto: number, codigoProveedor: string | null, ofrecido: boolean, revision: string | null) => http.put<OfertaProveedor | null>(`/proveedores/${id}/repuestos/${repuesto}`, { codigoProveedor, ofrecido, revision }),
++  bodegas: (buscar = "", activo?: boolean, signal?: AbortSignal) => http.get<Bodega[]>(`/bodegas${filtros(buscar, activo)}`, signal),
++  bodega: (id: number) => http.get<Bodega>(`/bodegas/${id}`),
++  guardarBodega: (id: number | null, datos: BodegaDatos) => id ? http.put<Bodega>(`/bodegas/${id}`, datos) : http.post<Bodega>("/bodegas", datos),
++  repuestosBodega: (id: number, signal?: AbortSignal) => http.get<RepuestoBodega[]>(`/bodegas/${id}/repuestos`, signal),
++  guardarMinimo: (id: number, repuesto: number, stockMinimo: number, stockMinimoEsperado: number | null) => http.put<RepuestoBodega>(`/bodegas/${id}/repuestos/${repuesto}`, { stockMinimo, stockMinimoEsperado }),
++};

@@ -84,6 +84,14 @@ export const NAVEGACION: NavGrupo[] = [
         ruta: "/repuestos",
         icono: Package,
         descripcion: "Catalogo de repuestos y costos vigentes.",
+        roles: ["BODEGA", "ADMIN"],
+      },
+      {
+        etiqueta: "Bodegas",
+        ruta: "/bodegas",
+        icono: Boxes,
+        descripcion: "Ubicaciones, repuestos y minimos de reposicion.",
+        roles: ["BODEGA", "ADMIN"],
       },
       {
         etiqueta: "Compras",
