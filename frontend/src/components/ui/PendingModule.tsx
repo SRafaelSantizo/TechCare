@@ -1,13 +1,9 @@
-import { Link } from "react-router-dom";
+﻿import { Link } from "react-router-dom";
 import { Clock } from "lucide-react";
 import { Card, PageHeader } from "./Card";
 import { Button } from "./Button";
 import { Reveal } from "../motion/Reveal";
 
-/**
- * Pagina generica para un modulo cuya API aun no existe. No simula datos ni
- * muestra el detalle tecnico: explica el estado y enlaza al mapa de integracion.
- */
 export function PendingModule({
   modulo,
   titulo,
