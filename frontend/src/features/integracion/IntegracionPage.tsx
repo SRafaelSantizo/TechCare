@@ -63,10 +63,9 @@ export function IntegracionPage() {
 
       <div className="tc-stack">
         <Alert tono="info" titulo="Contrato verificado">
-          El unico controlador presente es <code>ClienteController</code> bajo <code>{API_BASE_URL}/clientes</code>.
-          Devuelve columnas en PascalCase (JdbcTemplate <code>queryForList</code>) y errores con forma{" "}
-          <code>{"{ estado, mensaje, errores? }"}</code>. No hay autenticacion ni CORS configurado; el desarrollo usa
-          el proxy de Vite.
+          Acceso, administración, clientes, equipos, órdenes y servicio técnico tienen rutas bajo <code>{API_BASE_URL}</code>.
+          Las operaciones requieren sesión, rol y protección CSRF al escribir. El servicio técnico valida además
+          el responsable asignado. Los errores mantienen la forma <code>{"{ estado, mensaje, errores? }"}</code>.
         </Alert>
 
         <div className="tc-grid tc-grid--cards">

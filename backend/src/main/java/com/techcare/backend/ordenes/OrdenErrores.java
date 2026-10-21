@@ -15,7 +15,7 @@ import java.sql.SQLException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-@RestControllerAdvice(assignableTypes = OrdenController.class)
+@RestControllerAdvice(assignableTypes = {OrdenController.class, ServicioTecnicoController.class})
 public class OrdenErrores {
     private static final Logger LOG = LoggerFactory.getLogger(OrdenErrores.class);
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -34,12 +34,15 @@ public class OrdenErrores {
             if (!(causa instanceof SQLException sql)) continue;
             for (SQLException actual = sql; actual != null; actual = actual.getNextException()) {
                 switch (actual.getErrorCode()) {
-                    case 51600, 51601: return error(400, actual.getMessage());
-                    case 51602: return error(404, "La orden no existe o no está disponible para tu usuario.");
-                    case 51603: return error(409, actual.getMessage());
+                    case 51600, 51601, 51700, 51701: return error(400, actual.getMessage());
+                    case 51602, 51702: return error(404, "La orden no existe o no está disponible para tu usuario.");
+                    case 51603, 51703: return error(409, actual.getMessage());
                     case 51604: return error(403, "Tu usuario no tiene permiso para esta operación de órdenes.");
+                    case 51704: return error(403, "Solo el técnico activo asignado puede realizar esta operación.");
+                    case 51019: return error(409, "Stock insuficiente. No se aplicaron cambios; actualizá las existencias.");
                     case 2601, 2627: return error(409, "La orden ya está registrada. Actualizá el listado.");
-                    case 547, 51102, 51104, 51105, 51106, 51107, 51108:
+                    case 547, 51008, 51011, 51013, 51016, 51017, 51018, 51021, 51022,
+                         51102, 51104, 51105, 51106, 51107, 51108, 51110, 51111, 51112, 51113, 51114, 51115:
                         return error(409, "Los datos o el estado de la orden cambiaron. Actualizá y volvé a intentar.");
                     default: break;
                 }

@@ -63,6 +63,10 @@ public class SeguridadConfig {
                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
                         .requestMatchers(HttpMethod.POST,"/api/ordenes","/api/ordenes/*/cancelacion")
                             .hasAnyRole("ADMIN","RECEPCION")
+                        .requestMatchers(HttpMethod.POST,"/api/ordenes/*/diagnostico/inicio",
+                                "/api/ordenes/*/diagnostico","/api/ordenes/*/reparacion",
+                                "/api/ordenes/*/actividades","/api/ordenes/*/repuestos",
+                                "/api/ordenes/*/reparacion/cierre").hasAnyRole("ADMIN","TECNICO")
                         .requestMatchers(HttpMethod.PUT,"/api/ordenes/*/tecnico").hasAnyRole("ADMIN","RECEPCION")
                         .requestMatchers(HttpMethod.GET,"/api/clientes","/api/clientes/**")
                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")

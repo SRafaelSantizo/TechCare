@@ -1,0 +1,28 @@
+diff --git a/20_Pruebas_Servicio_Tecnico.sql b/20_Pruebas_Servicio_Tecnico.sql
+--- a/20_Pruebas_Servicio_Tecnico.sql
++++ b/20_Pruebas_Servicio_Tecnico.sql
+@@ -77,6 +77,7 @@
+ SELECT 'Bodega', COUNT_BIG(*) FROM dbo.Bodega UNION ALL
+ SELECT 'Inventario', COUNT_BIG(*) FROM dbo.Inventario UNION ALL
+ SELECT 'Proveedor', COUNT_BIG(*) FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto', COUNT_BIG(*) FROM dbo.ProveedorRepuesto UNION ALL
+ SELECT 'Compra', COUNT_BIG(*) FROM dbo.Compra UNION ALL
+ SELECT 'DetalleCompra', COUNT_BIG(*) FROM dbo.DetalleCompra UNION ALL
+ SELECT 'Actividad', COUNT_BIG(*) FROM dbo.Actividad UNION ALL
+@@ -138,6 +139,8 @@
+         SET @Nit = 'TCS-P-' + @Sufijo;
+         INSERT dbo.Proveedor(NIT, Nombre, Activo) VALUES (@Nit, N'Proveedor de prueba técnica', 1);
+         SET @Proveedor = CONVERT(int, SCOPE_IDENTITY());
++        -- El detalle de compra exige que el proveedor ofrezca este repuesto.
++        INSERT dbo.ProveedorRepuesto(ProveedorID, RepuestoID) VALUES (@Proveedor, @Repuesto);
+         INSERT @Lineas VALUES (1, @Bodega, @Repuesto, 10, 12.25);
+         EXEC dbo.spRegistrarCompra @Codigo, @Proveedor, @Admin, @Lineas, @Compra OUTPUT;
+         EXEC dbo.spRecibirCompra @Compra, @Admin;
+@@ -302,6 +305,7 @@
+         SELECT 'Bodega', COUNT_BIG(*) FROM dbo.Bodega UNION ALL
+         SELECT 'Inventario', COUNT_BIG(*) FROM dbo.Inventario UNION ALL
+         SELECT 'Proveedor', COUNT_BIG(*) FROM dbo.Proveedor UNION ALL
++        SELECT 'ProveedorRepuesto', COUNT_BIG(*) FROM dbo.ProveedorRepuesto UNION ALL
+         SELECT 'Compra', COUNT_BIG(*) FROM dbo.Compra UNION ALL
+         SELECT 'DetalleCompra', COUNT_BIG(*) FROM dbo.DetalleCompra UNION ALL
+         SELECT 'Actividad', COUNT_BIG(*) FROM dbo.Actividad UNION ALL

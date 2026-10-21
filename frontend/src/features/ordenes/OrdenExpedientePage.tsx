@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useParams } from "react-router-dom";
 import { ArrowLeft, RefreshCw } from "lucide-react";
@@ -9,14 +9,15 @@ import { EstadoOrdenBadge } from "../../components/ui/Badge";
 import { Alert } from "../../components/ui/Alert";
 import { Dialog } from "../../components/ui/Dialog";
 import { Field, SelectInput, TextArea } from "../../components/ui/inputs";
-import { EmptyState, LoadingState, PendingState } from "../../components/ui/StateView";
+import { LoadingState, PendingState } from "../../components/ui/StateView";
 import { DataTable, type Columna } from "../../components/ui/DataTable";
 import { ordenesApi, type EventoOrden } from "../../services/ordenes";
 import { esApiError, mensajeDeError } from "../../services/errors";
-import { fechaHora, moneda } from "../../utils/format";
+import { fechaHora } from "../../utils/format";
 import { nombreEstado } from "../../services/catalogos";
 import "./ordenes.css";
 
+const ServicioTecnicoPanel = lazy(() => import("./ServicioTecnicoPanel").then(m => ({ default: m.ServicioTecnicoPanel })));
 const SECCIONES = ["Recepción", "Diagnóstico", "Reparación", "Repuestos", "Factura y pagos", "Entrega", "Historial"] as const;
 type Seccion = typeof SECCIONES[number];
 export function OrdenExpedientePage() {
@@ -70,7 +71,7 @@ export function OrdenExpedientePage() {
     <PageHeader eyebrow="Servicio / Órdenes / Expediente" titulo={o ? o.numeroOrden : "Expediente de la orden"}
       descripcion="Ingreso, responsable y seguimiento del servicio."
       acciones={<><Link to="/ordenes"><Button variante="fantasma" icono={<ArrowLeft size={16} />}>Volver</Button></Link>
-        {valido ? <Button disabled={orden.isFetching || guardando} icono={<RefreshCw size={16} />} onClick={() => { void orden.refetch(); if (seccion === "Historial") void historial.refetch(); }}>Actualizar</Button> : null}</>} />
+        {valido ? <Button disabled={orden.isFetching || guardando} icono={<RefreshCw size={16} />} onClick={() => { void qc.invalidateQueries({ queryKey: ["orden", ordenId] }); }}>Actualizar</Button> : null}</>} />
     {!valido ? <Alert tono="danger">El número de expediente no es válido.</Alert> : orden.isLoading ? <LoadingState titulo="Cargando expediente…" /> : orden.isError ?
       <Alert tono="danger" titulo="No se pudo consultar la orden" accion={<Button onClick={() => orden.refetch()}>Reintentar</Button>}>{mensajeDeError(orden.error)}</Alert> : o ?
       <div className="tc-stack tc-ordenes">
@@ -99,17 +100,12 @@ export function OrdenExpedientePage() {
             <dt>Problema reportado</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.problemaReportado}</dd>
             <dt>Descripción del equipo</dt><dd style={{ overflowWrap: "anywhere" }}>{o.equipoDescripcion}</dd>
             <dt>Observaciones</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.observaciones || "Sin observaciones"}</dd></dl> : null}
-          {seccion === "Diagnóstico" ? o.diagnosticoId ? <dl className="tc-dl"><dt>Fecha</dt><dd>{fechaHora(o.fechaDiagnostico)}</dd>
-            <dt>Descripción</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.descripcionDiagnostico}</dd><dt>Mano de obra estimada</dt><dd>{moneda(o.costoEstimado)}</dd></dl> :
-            <EmptyState titulo="Sin diagnóstico registrado" descripcion="La orden conserva la falla reportada durante la recepción." /> : null}
-          {seccion === "Reparación" ? o.reparacionId ? <dl className="tc-dl"><dt>Estado</dt><dd>{o.estadoReparacion}</dd>
-            <dt>Inicio</dt><dd>{fechaHora(o.fechaInicioReparacion)}</dd><dt>Finalización</dt><dd>{fechaHora(o.fechaFinReparacion)}</dd>
-            <dt>Trabajo realizado</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.descripcionTrabajo}</dd><dt>Mano de obra</dt><dd>{moneda(o.costoManoObra)}</dd></dl> :
-            <EmptyState titulo="Sin reparación registrada" descripcion="La reparación requiere un diagnóstico y la autorización del cliente." /> : null}
+          {seccion === "Diagnóstico" || seccion === "Reparación" || seccion === "Repuestos" ?
+            <Suspense fallback={<LoadingState titulo="Cargando servicio técnico…" />}><ServicioTecnicoPanel key={`${ordenId}-${seccion}`} orden={o} seccion={seccion} /></Suspense> : null}
           {seccion === "Historial" ? historial.isLoading ? <LoadingState titulo="Cargando historial…" /> : historial.isError ?
             <Alert tono="danger" accion={<Button onClick={() => historial.refetch()}>Reintentar</Button>}>{mensajeDeError(historial.error)}</Alert> :
             <DataTable columnas={columnas} filas={historial.data ?? []} claveFila={e => e.eventoId} vacio="Sin eventos registrados." /> : null}
-          {["Repuestos", "Factura y pagos", "Entrega"].includes(seccion) ? <PendingState titulo="Sección pendiente" descripcion="Esta parte del expediente todavía no está disponible." /> : null}
+          {["Factura y pagos", "Entrega"].includes(seccion) ? <PendingState titulo="Sección pendiente" descripcion="Esta parte del expediente todavía no está disponible." /> : null}
         </div></Card>
       </div> : null}
     {accion && o ? <Dialog abierto titulo={accion === "asignar" ? "Asignar técnico" : "Cancelar orden"}

@@ -72,7 +72,7 @@ public class OrdenesServicio {
         return filas.stream().map(r -> new Catalogo(texto(r, "Codigo"), texto(r, "Nombre"),
                 numero(r, "Nivel"), r.get("EsFinal") instanceof Boolean b ? b : null)).toList();
     }
-    private static void idValido(int id) {
+    static void idValido(int id) {
         if (id <= 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El ID de orden debe ser mayor que cero.");
     }
     private static LocalDateTime inicioUtc(LocalDate fecha, boolean diaSiguiente) {
@@ -82,7 +82,7 @@ public class OrdenesServicio {
         return (diaSiguiente ? fecha.plusDays(1) : fecha).atStartOfDay(GUATEMALA)
                 .withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
     }
-    private Orden una(List<Map<String, Object>> filas) {
+    Orden una(List<Map<String, Object>> filas) {
         if (filas.size() != 1 || !(filas.get(0).get("OrdenID") instanceof Number))
             throw new DataRetrievalFailureException("El procedimiento no devolvió una orden válida.");
         return orden(filas.get(0));

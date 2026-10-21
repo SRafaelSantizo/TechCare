@@ -1,0 +1,1796 @@
+diff --git a/19_Servicio_Tecnico_Procedimientos.sql b/19_Servicio_Tecnico_Procedimientos.sql
+new file mode 100644
+index 0000000..cc614d8
+--- /dev/null
++++ b/19_Servicio_Tecnico_Procedimientos.sql
+@@ -0,0 +1,314 @@
++-- Continuación de Órdenes: diagnóstico, reparación, actividades y consumos.
++-- Ejecutar completo en SSMS después del 16. No borra ni reinserta datos.
++USE [TechCare];
++GO
++SET NOCOUNT ON;
++SET XACT_ABORT ON;
++IF OBJECT_ID(N'dbo.vOrdenAcceso', N'V') IS NULL
++   OR OBJECT_ID(N'dbo.spAsignarTecnicoOrden', N'P') IS NULL
++   OR OBJECT_ID(N'dbo.spConsumirRepuesto', N'P') IS NULL
++    THROW 51790, N'Primero instalá TechCare y ejecutá 16_Ordenes_Procedimientos.sql.', 1;
++GO
++
++-- Los procedimientos de escritura llaman este control DENTRO de su transacción.
++-- Primero se bloquea OrdenServicio, igual que al asignar/cancelar en el script 16.
++-- Aunque ADMIN pueda consultar todo, el trabajo técnico pertenece al asignado.
++CREATE OR ALTER PROCEDURE dbo.spValidarTecnicoAsignado
++    @UsuarioActorID int, @OrdenID int
++AS
++BEGIN
++    SET NOCOUNT ON;
++    IF @OrdenID IS NULL OR @OrdenID <= 0
++        THROW 51700, N'El ID de orden debe ser mayor que cero.', 1;
++    IF dbo.fnTieneRol(@UsuarioActorID, 'TECNICO') = 0
++        THROW 51704, N'Se requiere un técnico activo para realizar esta operación.', 1;
++    DECLARE @Estado varchar(30);
++    SELECT @Estado = EstadoCodigo FROM dbo.OrdenServicio WITH (UPDLOCK, HOLDLOCK)
++    WHERE OrdenID = @OrdenID;
++    IF @Estado IS NULL OR dbo.fnPuedeConsultarOrden(@UsuarioActorID, @OrdenID) = 0
++        THROW 51702, N'La orden no existe o no está disponible para tu usuario.', 1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.vOrdenAcceso
++                   WHERE OrdenID = @OrdenID AND UsuarioTecnicoID = @UsuarioActorID)
++        THROW 51704, N'Solo el técnico asignado puede trabajar esta orden.', 1;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spIniciarDiagnosticoOrden
++    @UsuarioActorID int, @OrdenID int
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIInicioDiagnostico;
++        EXEC dbo.spValidarTecnicoAsignado @UsuarioActorID, @OrdenID;
++        IF NOT EXISTS (SELECT 1 FROM dbo.OrdenServicio WHERE OrdenID = @OrdenID AND EstadoCodigo = 'RECIBIDO')
++            THROW 51703, N'El diagnóstico solo se inicia en una orden recibida.', 1;
++        EXEC dbo.spCambiarEstadoOrden @OrdenID, 'DIAGNOSTICO', @UsuarioActorID, N'El técnico inició la revisión del equipo';
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APIInicioDiagnostico;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spRegistrarDiagnosticoOrden
++    @UsuarioActorID int, @OrdenID int, @Descripcion nvarchar(max), @CostoEstimado decimal(19,4)
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @DiagnosticoID int;
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIDiagnostico;
++        EXEC dbo.spValidarTecnicoAsignado @UsuarioActorID, @OrdenID;
++        SET @Descripcion = NULLIF(LTRIM(RTRIM(@Descripcion)), N'');
++        IF @Descripcion IS NULL OR DATALENGTH(@Descripcion) > 4000
++            THROW 51700, N'El diagnóstico es obligatorio y admite hasta 2000 caracteres.', 1;
++        IF @CostoEstimado IS NULL OR @CostoEstimado < 0 OR @CostoEstimado > 9999999999.99
++           OR ROUND(@CostoEstimado, 2) <> @CostoEstimado
++            THROW 51700, N'Ingresá una mano de obra estimada válida, con hasta dos decimales.', 1;
++        IF NOT EXISTS (SELECT 1 FROM dbo.OrdenServicio WHERE OrdenID = @OrdenID AND EstadoCodigo IN ('RECIBIDO', 'DIAGNOSTICO'))
++           OR EXISTS (SELECT 1 FROM dbo.Diagnostico WHERE OrdenID = @OrdenID)
++            THROW 51703, N'La orden ya tiene diagnóstico o su estado cambió. Actualizá el expediente.', 1;
++        EXEC dbo.spRegistrarDiagnostico @OrdenID, @UsuarioActorID, @Descripcion,
++            @CostoEstimado, @DiagnosticoID OUTPUT;
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APIDiagnostico;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spIniciarReparacionOrden
++    @UsuarioActorID int, @OrdenID int, @DescripcionTrabajo nvarchar(max),
++    @CostoManoObra decimal(19,4), @Autorizacion nvarchar(max)
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @DiagnosticoID int, @ReparacionID int;
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIInicioReparacion;
++        EXEC dbo.spValidarTecnicoAsignado @UsuarioActorID, @OrdenID;
++        SET @DescripcionTrabajo = NULLIF(LTRIM(RTRIM(@DescripcionTrabajo)), N'');
++        SET @Autorizacion = NULLIF(LTRIM(RTRIM(@Autorizacion)), N'');
++        IF @DescripcionTrabajo IS NULL OR DATALENGTH(@DescripcionTrabajo) > 4000
++            THROW 51700, N'El trabajo autorizado es obligatorio y admite hasta 2000 caracteres.', 1;
++        IF @Autorizacion IS NULL OR DATALENGTH(@Autorizacion) > 1000
++            THROW 51700, N'Documentá la autorización del cliente, hasta 500 caracteres.', 1;
++        IF @CostoManoObra IS NULL OR @CostoManoObra < 0 OR @CostoManoObra > 9999999999.99
++           OR ROUND(@CostoManoObra, 2) <> @CostoManoObra
++            THROW 51700, N'Ingresá una mano de obra válida, con hasta dos decimales.', 1;
++        SELECT @DiagnosticoID = d.DiagnosticoID FROM dbo.Diagnostico d
++        JOIN dbo.OrdenServicio o ON o.OrdenID = d.OrdenID
++        WHERE d.OrdenID = @OrdenID AND o.EstadoCodigo = 'ESPERANDO_AUTORIZACION';
++        IF @DiagnosticoID IS NULL OR EXISTS (SELECT 1 FROM dbo.Reparacion WHERE DiagnosticoID = @DiagnosticoID)
++            THROW 51703, N'La reparación requiere diagnóstico y una orden esperando autorización.', 1;
++        EXEC dbo.spIniciarReparacion @DiagnosticoID, @UsuarioActorID, @DescripcionTrabajo,
++            @CostoManoObra, @ReparacionID OUTPUT, @Autorizacion;
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APIInicioReparacion;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spAgregarActividadOrden
++    @UsuarioActorID int, @OrdenID int, @ActividadID int, @Observacion nvarchar(max) = NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @ReparacionID int;
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIActividad;
++        EXEC dbo.spValidarTecnicoAsignado @UsuarioActorID, @OrdenID;
++        SET @Observacion = NULLIF(LTRIM(RTRIM(@Observacion)), N'');
++        IF DATALENGTH(@Observacion) > 1000
++            THROW 51700, N'La observación admite hasta 500 caracteres.', 1;
++        SELECT @ReparacionID = r.ReparacionID FROM dbo.Reparacion r WITH (UPDLOCK, HOLDLOCK)
++        JOIN dbo.Diagnostico d ON d.DiagnosticoID = r.DiagnosticoID
++        JOIN dbo.OrdenServicio o ON o.OrdenID = d.OrdenID
++        WHERE d.OrdenID = @OrdenID AND o.EstadoCodigo = 'REPARACION' AND r.Estado = 'EN_PROCESO';
++        IF @ReparacionID IS NULL THROW 51703, N'La reparación no está en proceso.', 1;
++        IF NOT EXISTS (SELECT 1 FROM dbo.Actividad WITH (HOLDLOCK) WHERE ActividadID = @ActividadID AND Activo = 1)
++            THROW 51701, N'Elegí una actividad activa del catálogo.', 1;
++        IF EXISTS (SELECT 1 FROM dbo.ReparacionActividad WHERE ReparacionID = @ReparacionID AND ActividadID = @ActividadID)
++            THROW 51703, N'Esta actividad ya está registrada en la reparación.', 1;
++        EXEC dbo.spRegistrarActividad @ReparacionID, @ActividadID, @UsuarioActorID, @Observacion;
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APIActividad;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spUsarRepuestoOrden
++    @UsuarioActorID int, @OrdenID int, @BodegaID int, @RepuestoID int, @Cantidad int,
++    @PrecioUnitarioEsperado decimal(19,4)
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @ReparacionID int, @Precio decimal(12,2), @Inventario int;
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIRepuesto;
++        EXEC dbo.spValidarTecnicoAsignado @UsuarioActorID, @OrdenID;
++        IF @Cantidad IS NULL OR @Cantidad <= 0
++            THROW 51700, N'La cantidad debe ser un entero mayor que cero.', 1;
++        IF @PrecioUnitarioEsperado IS NULL OR @PrecioUnitarioEsperado < 0
++           OR @PrecioUnitarioEsperado > 9999999999.99 OR ROUND(@PrecioUnitarioEsperado, 2) <> @PrecioUnitarioEsperado
++            THROW 51700, N'El precio mostrado no es válido. Actualizá el catálogo.', 1;
++        SELECT @ReparacionID = r.ReparacionID FROM dbo.Reparacion r WITH (UPDLOCK, HOLDLOCK)
++        JOIN dbo.Diagnostico d ON d.DiagnosticoID = r.DiagnosticoID
++        JOIN dbo.OrdenServicio o ON o.OrdenID = d.OrdenID
++        WHERE d.OrdenID = @OrdenID AND o.EstadoCodigo = 'REPARACION' AND r.Estado = 'EN_PROCESO';
++        IF @ReparacionID IS NULL THROW 51703, N'La reparación no está en proceso.', 1;
++        -- Orden de bloqueo del procedimiento original: reparación, inventario, repuesto.
++        SELECT @Inventario = RepuestoID FROM dbo.Inventario WITH (UPDLOCK, HOLDLOCK)
++        WHERE BodegaID = @BodegaID AND RepuestoID = @RepuestoID;
++        IF @Inventario IS NULL THROW 51701, N'El repuesto no está registrado en esa bodega.', 1;
++        SELECT @Precio = PrecioVenta FROM dbo.Repuesto WITH (HOLDLOCK) WHERE RepuestoID = @RepuestoID AND Activo = 1;
++        IF @Precio IS NULL OR NOT EXISTS (SELECT 1 FROM dbo.Bodega WITH (HOLDLOCK) WHERE BodegaID = @BodegaID AND Activo = 1)
++            THROW 51701, N'El repuesto o la bodega están inactivos.', 1;
++        IF @Precio <> @PrecioUnitarioEsperado
++            THROW 51703, N'El precio cambió. Actualizá el catálogo y revisá el importe antes de confirmar.', 1;
++        EXEC dbo.spConsumirRepuesto @ReparacionID, @BodegaID, @RepuestoID, @Cantidad, @UsuarioActorID;
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APIRepuesto;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spFinalizarReparacionOrden
++    @UsuarioActorID int, @OrdenID int
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @ReparacionID int;
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APICierreReparacion;
++        EXEC dbo.spValidarTecnicoAsignado @UsuarioActorID, @OrdenID;
++        SELECT @ReparacionID = r.ReparacionID FROM dbo.Reparacion r WITH (UPDLOCK, HOLDLOCK)
++        JOIN dbo.Diagnostico d ON d.DiagnosticoID = r.DiagnosticoID
++        JOIN dbo.OrdenServicio o ON o.OrdenID = d.OrdenID
++        WHERE d.OrdenID = @OrdenID AND o.EstadoCodigo = 'REPARACION' AND r.Estado = 'EN_PROCESO';
++        IF @ReparacionID IS NULL THROW 51703, N'La reparación no está en proceso o ya fue finalizada.', 1;
++        EXEC dbo.spCerrarReparacion @ReparacionID, @UsuarioActorID;
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APICierreReparacion;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spActividadesOrden @UsuarioActorID int, @OrdenID int AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarActorOrden @UsuarioActorID;
++    IF @OrdenID IS NULL OR @OrdenID <= 0 THROW 51700, N'El ID de orden debe ser mayor que cero.', 1;
++    IF dbo.fnPuedeConsultarOrden(@UsuarioActorID, @OrdenID) = 0
++        THROW 51702, N'La orden no existe o no está disponible para tu usuario.', 1;
++    SELECT a.ActividadID, a.Nombre, ra.Fecha, ra.Observacion
++    FROM dbo.ReparacionActividad ra JOIN dbo.Actividad a ON a.ActividadID = ra.ActividadID
++    JOIN dbo.Reparacion r ON r.ReparacionID = ra.ReparacionID JOIN dbo.Diagnostico d ON d.DiagnosticoID = r.DiagnosticoID
++    WHERE d.OrdenID = @OrdenID AND dbo.fnPuedeConsultarOrden(@UsuarioActorID, d.OrdenID) = 1
++    ORDER BY ra.Fecha, a.ActividadID;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spRepuestosOrden @UsuarioActorID int, @OrdenID int AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarActorOrden @UsuarioActorID;
++    IF @OrdenID IS NULL OR @OrdenID <= 0 THROW 51700, N'El ID de orden debe ser mayor que cero.', 1;
++    IF dbo.fnPuedeConsultarOrden(@UsuarioActorID, @OrdenID) = 0
++        THROW 51702, N'La orden no existe o no está disponible para tu usuario.', 1;
++    SELECT rr.Linea, rr.RepuestoID, p.Codigo, p.Nombre, rr.BodegaID, b.Nombre AS Bodega,
++           rr.Cantidad, rr.PrecioUnitario,
++           CONVERT(decimal(22,2), CONVERT(decimal(22,2), rr.Cantidad) * rr.PrecioUnitario) AS Importe,
++           m.MovimientoID, m.Fecha
++    FROM dbo.ReparacionRepuesto rr JOIN dbo.Repuesto p ON p.RepuestoID = rr.RepuestoID
++    JOIN dbo.Bodega b ON b.BodegaID = rr.BodegaID JOIN dbo.Reparacion r ON r.ReparacionID = rr.ReparacionID
++    JOIN dbo.Diagnostico d ON d.DiagnosticoID = r.DiagnosticoID
++    LEFT JOIN dbo.MovimientoInventario m ON m.ReparacionID = rr.ReparacionID AND m.LineaReparacion = rr.Linea
++    WHERE d.OrdenID = @OrdenID AND dbo.fnPuedeConsultarOrden(@UsuarioActorID, d.OrdenID) = 1
++    ORDER BY rr.Linea;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spCatalogoActividadesOrden @UsuarioActorID int, @OrdenID int AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarActorOrden @UsuarioActorID;
++    IF @OrdenID IS NULL OR @OrdenID <= 0 THROW 51700, N'El ID de orden debe ser mayor que cero.', 1;
++    IF dbo.fnPuedeConsultarOrden(@UsuarioActorID, @OrdenID) = 0
++        THROW 51702, N'La orden no existe o no está disponible para tu usuario.', 1;
++    SELECT ActividadID, Nombre FROM dbo.Actividad WHERE Activo = 1 ORDER BY Nombre, ActividadID;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spCatalogoRepuestosOrden @UsuarioActorID int, @OrdenID int AS
++BEGIN
++    SET NOCOUNT ON;
++    -- Consulta acotada a una orden propia; no habilita el módulo general de Bodega.
++    IF @OrdenID IS NULL OR @OrdenID <= 0 THROW 51700, N'El ID de orden debe ser mayor que cero.', 1;
++    IF dbo.fnTieneRol(@UsuarioActorID, 'TECNICO') = 0
++        THROW 51704, N'Se requiere un técnico activo para consultar repuestos disponibles.', 1;
++    IF dbo.fnPuedeConsultarOrden(@UsuarioActorID, @OrdenID) = 0
++        THROW 51702, N'La orden no existe o no está disponible para tu usuario.', 1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID AND UsuarioTecnicoID = @UsuarioActorID)
++        THROW 51704, N'Solo el técnico asignado puede consultar repuestos para esta orden.', 1;
++    SELECT i.BodegaID, b.Nombre AS Bodega, i.RepuestoID, p.Codigo, p.Nombre, i.Existencia, p.PrecioVenta AS PrecioUnitario
++    FROM dbo.vInventario i JOIN dbo.Bodega b ON b.BodegaID = i.BodegaID
++    JOIN dbo.Repuesto p ON p.RepuestoID = i.RepuestoID
++    WHERE b.Activo = 1 AND p.Activo = 1
++      AND EXISTS (SELECT 1 FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID AND UsuarioTecnicoID = @UsuarioActorID)
++    ORDER BY p.Nombre, b.Nombre, i.BodegaID, i.RepuestoID;
++END;
++GO
++
++GRANT EXECUTE ON dbo.spIniciarDiagnosticoOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spRegistrarDiagnosticoOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spIniciarReparacionOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spAgregarActividadOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spUsarRepuestoOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spFinalizarReparacionOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spActividadesOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spRepuestosOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spCatalogoActividadesOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spCatalogoRepuestosOrden TO techcare_app;
++GO
+diff --git a/20_Pruebas_Servicio_Tecnico.sql b/20_Pruebas_Servicio_Tecnico.sql
+new file mode 100644
+index 0000000..cc88d73
+--- /dev/null
++++ b/20_Pruebas_Servicio_Tecnico.sql
+@@ -0,0 +1,320 @@
++-- Ejecutar después del 19 en la base de desarrollo, sin escrituras concurrentes.
++-- Cada caso crea sus propios datos y hace ROLLBACK. No usa órdenes reales.
++-- Las identidades pueden dejar huecos. No equivale a una prueba de concurrencia.
++USE [TechCare];
++GO
++SET NOCOUNT ON;
++SET XACT_ABORT ON;
++IF @@TRANCOUNT <> 0 THROW 51790, N'Ejecutá estas pruebas sin una transacción abierta.', 1;
++IF OBJECT_ID(N'dbo.spFinalizarReparacionOrden', N'P') IS NULL
++    THROW 51790, N'Ejecutá primero 19_Servicio_Tecnico_Procedimientos.sql.', 1;
++DECLARE @Admin int = (SELECT TOP (1) UsuarioID FROM dbo.Usuario WHERE dbo.fnTieneRol(UsuarioID, 'ADMIN') = 1 ORDER BY UsuarioID);
++DECLARE @Modelo int = (SELECT TOP (1) ModeloEquipoID FROM dbo.ModeloEquipo ORDER BY ModeloEquipoID);
++DECLARE @Tipo int = (SELECT TOP (1) TipoClienteID FROM dbo.TipoCliente ORDER BY TipoClienteID);
++IF @Admin IS NULL OR @Modelo IS NULL OR @Tipo IS NULL
++    THROW 51790, N'Las pruebas requieren un ADMIN activo y catálogos de cliente y equipo.', 1;
++
++DECLARE @Casos TABLE (ID int PRIMARY KEY, Caso nvarchar(200), ErrorEsperado int);
++INSERT @Casos VALUES
++(1, N'Iniciar revisión registra DIAGNOSTICO y el técnico de la sesión', 0),
++(2, N'Técnico ajeno no inicia diagnóstico', 51702),
++(3, N'ADMIN sin asignación no sustituye al técnico', 51704),
++(4, N'RECEPCION no realiza el trabajo técnico', 51704),
++(5, N'No se inicia dos veces el diagnóstico', 51703),
++(6, N'Diagnóstico Unicode, costo cero y espera de autorización', 0),
++(7, N'Diagnóstico obligatorio', 51700),
++(8, N'Diagnóstico largo no se trunca', 51700),
++(9, N'Costo negativo rechazado', 51700),
++(10, N'Costo con tres decimales rechazado', 51700),
++(11, N'Un solo diagnóstico por orden', 51703),
++(12, N'Técnico ajeno no registra diagnóstico', 51702),
++(13, N'No se repara sin diagnóstico', 51703),
++(14, N'No se repara sin autorización documentada', 51700),
++(15, N'Inicio conserva trabajo, costo y autorización Unicode', 0),
++(16, N'Una sola reparación por orden', 51703),
++(17, N'Actividad conserva observación Unicode', 0),
++(18, N'Una actividad no se duplica', 51703),
++(19, N'Actividad inactiva rechazada', 51701),
++(20, N'No se agregan actividades antes de reparar', 51703),
++(21, N'Consumo genera salida, saldo y precio histórico', 0),
++(22, N'Stock insuficiente rechaza la transacción', 51019),
++(23, N'Cantidad cero rechazada', 51700),
++(24, N'Precio desactualizado exige volver a confirmar', 51703),
++(25, N'Repuesto inactivo rechazado', 51701),
++(26, N'Cierre termina reparación y deja LISTO', 0),
++(27, N'No se finaliza dos veces', 51703),
++(28, N'No se agregan actividades después del cierre', 51703),
++(29, N'No se consumen repuestos después del cierre', 51703),
++(30, N'Se permite reparar únicamente con mano de obra', 0),
++(31, N'Orden cancelada no admite diagnóstico', 51703),
++(32, N'Cambiar catálogo no reescribe el precio consumido', 0),
++(33, N'Técnico ajeno no consume repuestos', 51702),
++(34, N'Técnico ajeno no consulta repuestos usados', 51702),
++(35, N'Costo por encima del límite rechazado', 51700),
++(36, N'Técnico con cuenta inactiva rechazado', 51704),
++(37, N'Reasignación retira permiso al técnico anterior', 51702),
++(38, N'Observación larga de actividad rechazada', 51700),
++(39, N'Trabajo autorizado largo rechazado', 51700),
++(40, N'Diagnóstico histórico no se modifica', 51140);
++
++DECLARE @Antes TABLE (Nombre sysname PRIMARY KEY, Cantidad bigint);
++INSERT @Antes
++SELECT 'OrdenServicio', COUNT_BIG(*) FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico', COUNT_BIG(*) FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion', COUNT_BIG(*) FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad', COUNT_BIG(*) FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto', COUNT_BIG(*) FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario', COUNT_BIG(*) FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden', COUNT_BIG(*) FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden', COUNT_BIG(*) FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente', COUNT_BIG(*) FROM dbo.Cliente UNION ALL
++SELECT 'Equipo', COUNT_BIG(*) FROM dbo.Equipo UNION ALL
++SELECT 'Usuario', COUNT_BIG(*) FROM dbo.Usuario UNION ALL
++SELECT 'Empleado', COUNT_BIG(*) FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol', COUNT_BIG(*) FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto', COUNT_BIG(*) FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto', COUNT_BIG(*) FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega', COUNT_BIG(*) FROM dbo.Bodega UNION ALL
++SELECT 'Inventario', COUNT_BIG(*) FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor', COUNT_BIG(*) FROM dbo.Proveedor UNION ALL
++SELECT 'Compra', COUNT_BIG(*) FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra', COUNT_BIG(*) FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad', COUNT_BIG(*) FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto', COUNT_BIG(*) FROM dbo.AuditoriaPrecioRepuesto;
++
++SELECT TOP (0) * INTO #ResultadoOrden FROM dbo.vOrdenAcceso;
++DECLARE @Resultados TABLE (ID int, Caso nvarchar(200), Resultado varchar(4), Detalle nvarchar(4000));
++DECLARE @Caso int = 1, @Esperado int, @Nombre nvarchar(200), @Resultado varchar(4), @Detalle nvarchar(4000), @Preparado bit;
++DECLARE @Sufijo varchar(8), @Codigo varchar(30), @Usuario varchar(50), @Nit varchar(20), @Serie varchar(80), @Texto nvarchar(max);
++DECLARE @Cliente int, @Equipo int, @Empleado int, @Tec1 int, @Tec2 int, @Recepcion int, @Orden int,
++        @Categoria int, @Repuesto int, @Bodega int, @Proveedor int, @Compra int, @Actividad int, @Reparacion int;
++DECLARE @Lineas dbo.TipoDetalleCompra;
++DECLARE @Hash varchar(255) = '$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
++WHILE @Caso <= 40
++BEGIN
++    SELECT @Nombre = Caso, @Esperado = ErrorEsperado FROM @Casos WHERE ID = @Caso;
++    SET @Resultado = 'PASS'; SET @Detalle = NULL; SET @Preparado = 0;
++    SET @Sufijo = LEFT(REPLACE(CONVERT(varchar(36), NEWID()), '-', ''), 8);
++    DELETE FROM #ResultadoOrden; DELETE FROM @Lineas;
++    BEGIN TRY
++        BEGIN TRANSACTION;
++        SET @Nit = 'TCS-C-' + @Sufijo; SET @Serie = 'TCS-E-' + @Sufijo;
++        INSERT dbo.Cliente(TipoClienteID, NIT, Nombre, Activo) VALUES (@Tipo, @Nit, N'Cliente de prueba técnica', 1);
++        SET @Cliente = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Equipo(ClienteID, ModeloEquipoID, NumeroSerie, Descripcion, Activo)
++            VALUES (@Cliente, @Modelo, @Serie, N'Equipo de prueba técnica', 1);
++        SET @Equipo = CONVERT(int, SCOPE_IDENTITY());
++
++        SET @Codigo = 'TCST1-' + @Sufijo; SET @Usuario = 'tcst1_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Uno', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec1 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCST2-' + @Sufijo; SET @Usuario = 'tcst2_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Dos', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec2 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCSR-' + @Sufijo; SET @Usuario = 'tcsr_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Recepción', N'Prueba', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Recepcion = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.UsuarioRol VALUES (@Tec1, 'TECNICO'), (@Tec2, 'TECNICO'), (@Recepcion, 'RECEPCION');
++
++        SET @Codigo = 'TCS-' + @Sufijo;
++        EXEC dbo.spCrearOrden @Codigo, @Equipo, @Admin, N'No enciende ñ 漢字', @Orden OUTPUT;
++        INSERT #ResultadoOrden EXEC dbo.spAsignarTecnicoOrden @Admin, @Orden, @Tec1;
++        DELETE FROM #ResultadoOrden;
++        SET @Texto = N'Categoría de prueba ' + @Sufijo;
++        INSERT dbo.CategoriaRepuesto(Nombre) VALUES (@Texto);
++        SET @Categoria = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Repuesto(CategoriaID, Codigo, Nombre, CostoReferencia, PrecioVenta, Activo)
++            VALUES (@Categoria, @Codigo, N'Fuente de prueba ñ', 12.25, 25.50, 1);
++        SET @Repuesto = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Bodega(Codigo, Nombre, Activo) VALUES (@Codigo, N'Bodega técnica de prueba', 1);
++        SET @Bodega = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Inventario(BodegaID, RepuestoID, StockMinimo) VALUES (@Bodega, @Repuesto, 2);
++        SET @Nit = 'TCS-P-' + @Sufijo;
++        INSERT dbo.Proveedor(NIT, Nombre, Activo) VALUES (@Nit, N'Proveedor de prueba técnica', 1);
++        SET @Proveedor = CONVERT(int, SCOPE_IDENTITY());
++        INSERT @Lineas VALUES (1, @Bodega, @Repuesto, 10, 12.25);
++        EXEC dbo.spRegistrarCompra @Codigo, @Proveedor, @Admin, @Lineas, @Compra OUTPUT;
++        EXEC dbo.spRecibirCompra @Compra, @Admin;
++        SET @Texto = N'Prueba con carga ' + @Sufijo;
++        INSERT dbo.Actividad(Nombre, Activo) VALUES (@Texto, 1);
++        SET @Actividad = CONVERT(int, SCOPE_IDENTITY());
++        SET @Preparado = 1;
++
++        IF @Caso = 1
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spIniciarDiagnosticoOrden @Tec1, @Orden;
++            IF NOT EXISTS (SELECT 1 FROM #ResultadoOrden WHERE EstadoCodigo = 'DIAGNOSTICO' AND UsuarioTecnicoID = @Tec1)
++               OR NOT EXISTS (SELECT 1 FROM dbo.HistorialEstadoOrden WHERE OrdenID = @Orden AND EstadoNuevo = 'DIAGNOSTICO' AND UsuarioID = @Tec1)
++                THROW 51791, N'No se registró el inicio de revisión con su técnico.', 1;
++        END;
++        IF @Caso = 2 EXEC dbo.spIniciarDiagnosticoOrden @Tec2, @Orden;
++        IF @Caso = 3 EXEC dbo.spIniciarDiagnosticoOrden @Admin, @Orden;
++        IF @Caso = 4 EXEC dbo.spIniciarDiagnosticoOrden @Recepcion, @Orden;
++        IF @Caso = 5
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spIniciarDiagnosticoOrden @Tec1, @Orden;
++            EXEC dbo.spIniciarDiagnosticoOrden @Tec1, @Orden;
++        END;
++        IF @Caso = 6
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'Falla de alimentación ñ 漢字', 0;
++            IF NOT EXISTS (SELECT 1 FROM #ResultadoOrden WHERE EstadoCodigo = 'ESPERANDO_AUTORIZACION' AND CostoEstimado = 0
++                           AND DescripcionDiagnostico = N'Falla de alimentación ñ 漢字' AND UsuarioTecnicoID = @Tec1)
++               OR (SELECT COUNT(*) FROM dbo.HistorialEstadoOrden WHERE OrdenID = @Orden) <> 3
++                THROW 51791, N'El diagnóstico no conservó sus datos o sus transiciones.', 1;
++        END;
++        IF @Caso = 7 EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'  ', 1;
++        IF @Caso = 8
++        BEGIN
++            SET @Texto = REPLICATE(N'a', 2001);
++            EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, @Texto, 1;
++        END;
++        IF @Caso = 9 EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'Diagnóstico', -1;
++        IF @Caso = 10 EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'Diagnóstico', 1.234;
++        IF @Caso = 12 EXEC dbo.spRegistrarDiagnosticoOrden @Tec2, @Orden, N'Diagnóstico ajeno', 1;
++        IF @Caso = 13 EXEC dbo.spIniciarReparacionOrden @Tec1, @Orden, N'Cambiar fuente', 50, N'Autorizado';
++        IF @Caso = 20 EXEC dbo.spAgregarActividadOrden @Tec1, @Orden, @Actividad;
++        IF @Caso = 31
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spCancelarOrden @Admin, @Orden, N'Cliente cancela';
++            EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'No corresponde', 1;
++        END;
++        IF @Caso = 35 EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'Diagnóstico', 10000000000;
++        IF @Caso = 36
++        BEGIN
++            UPDATE dbo.Usuario SET Activo = 0 WHERE UsuarioID = @Tec1;
++            EXEC dbo.spIniciarDiagnosticoOrden @Tec1, @Orden;
++        END;
++        IF @Caso = 37
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spAsignarTecnicoOrden @Admin, @Orden, @Tec2, @Tec1;
++            EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'Usuario anterior', 1;
++        END;
++
++        IF @Caso IN (11,14,15,16,17,18,19,21,22,23,24,25,26,27,28,29,30,32,33,34,38,39,40)
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'Cambiar fuente ñ 漢字', 50.75;
++            DELETE FROM #ResultadoOrden;
++        END;
++        IF @Caso = 11 EXEC dbo.spRegistrarDiagnosticoOrden @Tec1, @Orden, N'Otro diagnóstico', 10;
++        IF @Caso = 14 EXEC dbo.spIniciarReparacionOrden @Tec1, @Orden, N'Cambiar fuente', 50.75, N'  ';
++        IF @Caso = 39
++        BEGIN
++            SET @Texto = REPLICATE(N'a', 2001);
++            EXEC dbo.spIniciarReparacionOrden @Tec1, @Orden, @Texto, 50.75, N'Autorizado';
++        END;
++        IF @Caso = 40 UPDATE dbo.Diagnostico SET Descripcion = N'Reescritura' WHERE OrdenID = @Orden;
++        IF @Caso IN (15,16,17,18,19,21,22,23,24,25,26,27,28,29,30,32,33,34,38)
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spIniciarReparacionOrden @Tec1, @Orden, N'Cambiar fuente ñ 漢字', 50.75, N'María José autorizó por teléfono';
++            SELECT @Reparacion = ReparacionID FROM #ResultadoOrden;
++            IF @Caso = 15 AND (NOT EXISTS (SELECT 1 FROM #ResultadoOrden WHERE EstadoCodigo = 'REPARACION' AND CostoManoObra = 50.75
++                                          AND UsuarioTecnicoID = @Tec1 AND DescripcionTrabajo = N'Cambiar fuente ñ 漢字')
++                OR NOT EXISTS (SELECT 1 FROM dbo.HistorialEstadoOrden WHERE OrdenID = @Orden AND EstadoNuevo = 'REPARACION'
++                               AND Observacion = N'María José autorizó por teléfono' AND UsuarioID = @Tec1))
++                THROW 51791, N'El inicio perdió la autorización o los datos de la reparación.', 1;
++            DELETE FROM #ResultadoOrden;
++        END;
++        IF @Caso = 16 EXEC dbo.spIniciarReparacionOrden @Tec1, @Orden, N'Otra reparación', 1, N'Autorizado';
++        IF @Caso IN (17,18)
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spAgregarActividadOrden @Tec1, @Orden, @Actividad, N'Probado con carga ñ 漢字';
++            IF NOT EXISTS (SELECT 1 FROM dbo.ReparacionActividad WHERE ReparacionID = @Reparacion AND ActividadID = @Actividad
++                           AND Observacion = N'Probado con carga ñ 漢字') THROW 51791, N'La actividad perdió su observación.', 1;
++        END;
++        IF @Caso = 18 EXEC dbo.spAgregarActividadOrden @Tec1, @Orden, @Actividad;
++        IF @Caso = 19
++        BEGIN
++            UPDATE dbo.Actividad SET Activo = 0 WHERE ActividadID = @Actividad;
++            EXEC dbo.spAgregarActividadOrden @Tec1, @Orden, @Actividad;
++        END;
++        IF @Caso IN (21,26,32)
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spUsarRepuestoOrden @Tec1, @Orden, @Bodega, @Repuesto, 2, 25.50;
++            IF dbo.fnExistencia(@Bodega, @Repuesto) <> 8
++               OR NOT EXISTS (SELECT 1 FROM dbo.ReparacionRepuesto WHERE ReparacionID = @Reparacion AND Cantidad = 2 AND PrecioUnitario = 25.50 AND CostoUnitario = 12.25)
++               OR (SELECT COUNT(*) FROM dbo.MovimientoInventario WHERE ReparacionID = @Reparacion AND UsuarioID = @Tec1 AND ExistenciaResultante = 8) <> 1
++                THROW 51791, N'El consumo, su precio o su salida no son consistentes.', 1;
++        END;
++        IF @Caso = 22 EXEC dbo.spUsarRepuestoOrden @Tec1, @Orden, @Bodega, @Repuesto, 11, 25.50;
++        IF @Caso = 23 EXEC dbo.spUsarRepuestoOrden @Tec1, @Orden, @Bodega, @Repuesto, 0, 25.50;
++        IF @Caso = 24 EXEC dbo.spUsarRepuestoOrden @Tec1, @Orden, @Bodega, @Repuesto, 1, 20;
++        IF @Caso = 25
++        BEGIN
++            UPDATE dbo.Repuesto SET Activo = 0 WHERE RepuestoID = @Repuesto;
++            EXEC dbo.spUsarRepuestoOrden @Tec1, @Orden, @Bodega, @Repuesto, 1, 25.50;
++        END;
++        IF @Caso IN (26,27,28,29,30)
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spFinalizarReparacionOrden @Tec1, @Orden;
++            IF NOT EXISTS (SELECT 1 FROM #ResultadoOrden WHERE EstadoCodigo = 'LISTO' AND EstadoReparacion = 'TERMINADA' AND FechaFinReparacion IS NOT NULL)
++               OR NOT EXISTS (SELECT 1 FROM dbo.HistorialEstadoOrden WHERE OrdenID = @Orden AND EstadoNuevo = 'LISTO' AND UsuarioID = @Tec1)
++                THROW 51791, N'El cierre no finalizó la reparación y la orden juntas.', 1;
++            IF @Caso = 30 AND EXISTS (SELECT 1 FROM dbo.ReparacionRepuesto WHERE ReparacionID = @Reparacion)
++                THROW 51791, N'La reparación de mano de obra no debe generar consumos.', 1;
++        END;
++        IF @Caso = 27 EXEC dbo.spFinalizarReparacionOrden @Tec1, @Orden;
++        IF @Caso = 28 EXEC dbo.spAgregarActividadOrden @Tec1, @Orden, @Actividad;
++        IF @Caso = 29 EXEC dbo.spUsarRepuestoOrden @Tec1, @Orden, @Bodega, @Repuesto, 1, 25.50;
++        IF @Caso = 32
++        BEGIN
++            UPDATE dbo.Repuesto SET PrecioVenta = 99.99 WHERE RepuestoID = @Repuesto;
++            IF NOT EXISTS (SELECT 1 FROM dbo.ReparacionRepuesto WHERE ReparacionID = @Reparacion AND PrecioUnitario = 25.50)
++                THROW 51791, N'El precio del catálogo cambió la historia del consumo.', 1;
++        END;
++        IF @Caso = 33 EXEC dbo.spUsarRepuestoOrden @Tec2, @Orden, @Bodega, @Repuesto, 1, 25.50;
++        IF @Caso = 34 EXEC dbo.spRepuestosOrden @Tec2, @Orden;
++        IF @Caso = 38
++        BEGIN
++            SET @Texto = REPLICATE(N'a', 501);
++            EXEC dbo.spAgregarActividadOrden @Tec1, @Orden, @Actividad, @Texto;
++        END;
++        IF @Esperado <> 0 THROW 51791, N'La operación debía rechazarse y fue aceptada.', 1;
++        ROLLBACK TRANSACTION;
++    END TRY
++    BEGIN CATCH
++        SET @Detalle = ERROR_MESSAGE();
++        IF @Preparado = 0 OR @Esperado = 0 OR ERROR_NUMBER() <> @Esperado SET @Resultado = 'FAIL';
++        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
++    END CATCH;
++    ;WITH Despues AS (
++        SELECT 'OrdenServicio' AS Nombre, COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++        SELECT 'Diagnostico', COUNT_BIG(*) FROM dbo.Diagnostico UNION ALL
++        SELECT 'Reparacion', COUNT_BIG(*) FROM dbo.Reparacion UNION ALL
++        SELECT 'ReparacionActividad', COUNT_BIG(*) FROM dbo.ReparacionActividad UNION ALL
++        SELECT 'ReparacionRepuesto', COUNT_BIG(*) FROM dbo.ReparacionRepuesto UNION ALL
++        SELECT 'MovimientoInventario', COUNT_BIG(*) FROM dbo.MovimientoInventario UNION ALL
++        SELECT 'HistorialEstadoOrden', COUNT_BIG(*) FROM dbo.HistorialEstadoOrden UNION ALL
++        SELECT 'AsignacionOrden', COUNT_BIG(*) FROM dbo.AsignacionOrden UNION ALL
++        SELECT 'Cliente', COUNT_BIG(*) FROM dbo.Cliente UNION ALL
++        SELECT 'Equipo', COUNT_BIG(*) FROM dbo.Equipo UNION ALL
++        SELECT 'Usuario', COUNT_BIG(*) FROM dbo.Usuario UNION ALL
++        SELECT 'Empleado', COUNT_BIG(*) FROM dbo.Empleado UNION ALL
++        SELECT 'UsuarioRol', COUNT_BIG(*) FROM dbo.UsuarioRol UNION ALL
++        SELECT 'CategoriaRepuesto', COUNT_BIG(*) FROM dbo.CategoriaRepuesto UNION ALL
++        SELECT 'Repuesto', COUNT_BIG(*) FROM dbo.Repuesto UNION ALL
++        SELECT 'Bodega', COUNT_BIG(*) FROM dbo.Bodega UNION ALL
++        SELECT 'Inventario', COUNT_BIG(*) FROM dbo.Inventario UNION ALL
++        SELECT 'Proveedor', COUNT_BIG(*) FROM dbo.Proveedor UNION ALL
++        SELECT 'Compra', COUNT_BIG(*) FROM dbo.Compra UNION ALL
++        SELECT 'DetalleCompra', COUNT_BIG(*) FROM dbo.DetalleCompra UNION ALL
++        SELECT 'Actividad', COUNT_BIG(*) FROM dbo.Actividad UNION ALL
++        SELECT 'AuditoriaPrecioRepuesto', COUNT_BIG(*) FROM dbo.AuditoriaPrecioRepuesto
++    )
++    SELECT @Resultado = CASE WHEN EXISTS (SELECT 1 FROM Despues d JOIN @Antes a ON a.Nombre = d.Nombre WHERE a.Cantidad <> d.Cantidad)
++                              THEN 'FAIL' ELSE @Resultado END;
++    IF @Resultado = 'FAIL' AND @Detalle IS NULL SET @Detalle = N'La prueba dejó cantidades persistentes distintas de las iniciales.';
++    INSERT @Resultados VALUES (@Caso, @Nombre, @Resultado, @Detalle);
++    SET @Caso += 1;
++END;
++DROP TABLE #ResultadoOrden;
++SELECT ID, Caso, Resultado, Detalle FROM @Resultados ORDER BY ID;
++IF EXISTS (SELECT 1 FROM @Resultados WHERE Resultado = 'FAIL')
++    THROW 51792, N'Una o más pruebas de servicio técnico fallaron. Revisá los resultados.', 1;
++GO
+diff --git a/INTEGRACION_SERVICIO_TECNICO.md b/INTEGRACION_SERVICIO_TECNICO.md
+new file mode 100644
+index 0000000..e4ead11
+--- /dev/null
++++ b/INTEGRACION_SERVICIO_TECNICO.md
+@@ -0,0 +1,129 @@
++# Servicio técnico: del diagnóstico a LISTO
++
++Continuación de la recepción de Órdenes del commit `2b905f3`. El técnico asignado
++inicia la revisión, registra el diagnóstico y la mano de obra estimada, documenta
++la autorización e inicia la reparación. Después registra actividades y repuestos
++utilizados y finaliza el servicio en LISTO.
++
++## Instalación
++
++1. Guardar `21_Servicio_Tecnico_API.patch` en la raíz de TechCare, junto a `backend` y `frontend`.
++2. En la terminal de IntelliJ, ubicada en esa raíz, ejecutar:
++
++   ```bash
++   git apply --check 21_Servicio_Tecnico_API.patch
++   git apply 21_Servicio_Tecnico_API.patch
++   ```
++
++   El primer comando comprueba compatibilidad sin modificar archivos. Si muestra
++   un conflicto, revisar esa salida antes de aplicar; no forzar la sustitución.
++   El paquete se aplica una sola vez sobre la integración de Órdenes existente.
++
++3. En SSMS ejecutar completo `19_Servicio_Tecnico_Procedimientos.sql` en la
++   instancia habitual de TechCare. Es repetible y conserva los datos.
++4. En la base de desarrollo, sin transacciones abiertas ni escrituras concurrentes,
++   ejecutar `20_Pruebas_Servicio_Tecnico.sql`. Contiene 40 casos, revierte sus datos
++   y muestra PASS/FAIL. Los huecos en identidades son normales.
++5. Reiniciar el backend desde IntelliJ y abrir el frontend como de costumbre.
++   Para comprobar la compilación desde la raíz:
++
++   ```bash
++   npm --prefix frontend run build
++   ```
++
++No se vuelven a ejecutar 01, 02 ni 16 si ya están instalados. Cada integrante
++con base propia ejecuta el 19 en esa base. Una instalación nueva aplica primero
++01, 02, 06, 08, 11, 13 y 16. Se conservan POM, credenciales y configuración local.
++
++## Recorrido desde la interfaz
++
++1. Con ADMIN o RECEPCION, registrar una orden y asignar un técnico activo.
++2. Entrar con ese técnico, abrir Órdenes y luego el expediente asignado.
++3. En Diagnóstico, pulsar **Iniciar diagnóstico**: pasa a DIAGNOSTICO.
++4. Usar **Registrar diagnóstico y estimación**, describir la falla encontrada y
++   anotar la mano de obra estimada, por ejemplo Q125.50. Revisar y confirmar:
++   pasa a ESPERANDO_AUTORIZACION.
++5. En Reparación, usar **Autorizar e iniciar reparación**. Revisar el trabajo y
++   la mano de obra acordada. Documentar quién autorizó, cuándo y por qué medio.
++   Al confirmar queda en REPARACION y la autorización aparece en Historial.
++6. Usar **Registrar actividad** con el trabajo realizado o su observación.
++7. Si hubo consumos, abrir Repuestos → **Registrar repuesto utilizado**. Elegir
++   repuesto, bodega y cantidad; revisar precio unitario y confirmar. Aparecen el
++   consumo y su movimiento de salida. También se permite solo mano de obra.
++8. Verificar tareas y consumos. En Reparación, usar **Finalizar reparación** y
++   confirmar: reparación TERMINADA y orden LISTO.
++9. Revisar Historial y probar que otro técnico no acceda a la orden ajena.
++
++demo04, demo05 y demo06 tienen rol TECNICO; también sirven cuentas nuevas creadas
++desde Administración. El técnico debe ser el asignado. Entrar únicamente como
++ADMIN permite consultar, pero no sustituye al responsable del trabajo. Un ADMIN
++con rol TECNICO explícito puede ser asignado y trabajar sus propias órdenes.
++
++## Reglas y límites
++
++- Usuario y fecha se obtienen de sesión/servidor. SQL valida la asignación y el
++  rol, incluso al llamar la API directamente. No hay endpoint de estado libre.
++- ADMIN, RECEPCION y CAJA consultan; TECNICO consulta sus órdenes y trabaja las
++  propias. BODEGA conserva su restricción de acceso a Órdenes.
++- Se conserva el diagnóstico y la mano de obra acordada al iniciar. Las tareas
++  documentan el trabajo realizado; cada actividad se agrega una vez.
++- La autorización es una constancia escrita por el técnico; no es una solicitud
++  enviada al cliente ni una firma electrónica.
++- Consumo y salida se registran en la misma transacción. Stock insuficiente
++  devuelve 409 y revierte la operación. El precio mostrado se compara con el
++  catálogo; si cambió, se exige actualizar y revisar antes de confirmar.
++- El servidor elige el precio y conserva su valor histórico. Cada importe de
++  línea se calcula en SQL. La consulta de existencias del técnico está acotada
++  al expediente propio y no habilita el módulo general de Inventario.
++- Tras finalizar no se agregan actividades ni consumos ni se reabre el trabajo.
++- Ante error de red al consumir, actualizar y revisar las líneas utilizadas
++  antes de registrar nuevamente. No se reintentan automáticamente escrituras
++  que pudieron haberse ejecutado.
++
++## API agregada
++
++Todas las rutas comienzan con `/api/ordenes/{id}`. Las escrituras requieren cookie
++de sesión y CSRF y devuelven la Orden actualizada.
++
++| Método | Terminación | Entrada o respuesta |
++|---|---|---|
++| POST | `/diagnostico/inicio` | Sin cuerpo; inicia revisión |
++| POST | `/diagnostico` | `descripcion`, `costoEstimado`; 201 |
++| POST | `/reparacion` | `descripcionTrabajo`, `costoManoObra`, `autorizacion`; 201 |
++| GET | `/actividades` | Tareas, fecha y observación |
++| POST | `/actividades` | `actividadId`, `observacion` opcional |
++| GET | `/repuestos` | Consumos, precio histórico y salida |
++| POST | `/repuestos` | `bodegaId`, `repuestoId`, `cantidad`, `precioUnitarioEsperado` |
++| GET | `/catalogos/actividades` | Actividades activas |
++| GET | `/catalogos/repuestos` | Existencias para el técnico asignado |
++| POST | `/reparacion/cierre` | Sin cuerpo; finaliza y deja LISTO |
++
++Se reutilizan los procedimientos originales. El 19 agrega controles y consultas
++sin modificar tablas, triggers ni el maestro 01. Se conserva el rol `techcare_app`.
++
++## Validación
++
++- TypeScript y Vite: compilación correcta del frontend.
++- Recorrido de pantallas verificado con API simulada: diagnóstico, autorización,
++  actividades, consumo, conflicto de stock, cierre en LISTO y consulta desde
++  Recepción. También se revisó el ancho móvil y la ausencia de errores JavaScript.
++  Se corrigió el foco del diálogo para que escribir un costo no mueva el cursor
++  a la descripción.
++- Backend: 130 pruebas ejecutadas sin fallos ni omisiones, incluidas 30 nuevas.
++  Las pruebas HTTP usan JDBC simulado: verifican rutas, sesión, CSRF, validación,
++  parámetros y respuestas; no ejecutan el motor de base de datos.
++- El script 20 incluye 40 escenarios SQL de permisos, estados, autorización,
++  duplicados, stock, rollback de datos de prueba y precios históricos. Su
++  ejecución real queda pendiente en la instancia del equipo: aquí no hay
++  SQL Server conectado. No sustituye una prueba de sesiones concurrentes.
++
++La siguiente integración es Factura → pagos/abonos → entrega con saldo cero.
++Este paquete llega a LISTO; Inventario general, Compras y Caja siguen pendientes.
++
++Después de ejecutar los scripts y probar el flujo, guardar en la rama actual:
++
++```bash
++git add .
++git commit -m "Se integra diagnostico, reparacion y consumo de repuestos"
++git push
++```
+diff --git a/README.md b/README.md
+index 2bec3f2..79dee96 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional,
+ normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
+-Clientes, Equipos y recepción de Órdenes tienen API e interfaz conectadas. El acceso usa las cuentas y
++Clientes, Equipos, Órdenes y servicio técnico hasta LISTO tienen API e interfaz conectadas. El acceso usa las cuentas y
+ roles de la BD, con login, sesión y cierre de sesión. Los demás módulos y manuales
+ con capturas aún deben completarse.
+ 
+@@ -10,7 +10,7 @@ Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACIO
+ La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
+ las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
+ Una instalación nueva con un maestro anterior debe incluir también las
+-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios) y 16 (Órdenes).
++actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes) y 19 (Servicio técnico).
+ 
+ Administración permite consultar y registrar cuentas, empleados y roles desde
+ una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
+@@ -21,8 +21,11 @@ asignar técnicos antes del diagnóstico y cancelar cuando el estado lo permite.
+ Instalación: [INTEGRACION_ORDENES.md](INTEGRACION_ORDENES.md).
+ En una base existente se ejecuta `16_Ordenes_Procedimientos.sql` una vez.
+ Los técnicos sin otros roles consultan únicamente sus órdenes, también desde el
+-historial de Equipos. Registrar diagnósticos, reparaciones y cobros desde la API
+-queda pendiente de las siguientes integraciones.
++historial de Equipos. Diagnóstico, autorización e inicio de reparación, actividades,
++consumo de repuestos y cierre en LISTO están conectados. Instalación:
++[INTEGRACION_SERVICIO_TECNICO.md](INTEGRACION_SERVICIO_TECNICO.md).
++En una base existente se ejecuta `19_Servicio_Tecnico_Procedimientos.sql`.
++Facturación, cobros y entrega desde la API quedan pendientes.
+ 
+ ## Ejecución desde cero
+ 
+diff --git a/backend/src/main/java/com/techcare/backend/ordenes/OrdenErrores.java b/backend/src/main/java/com/techcare/backend/ordenes/OrdenErrores.java
+index cb2fe4d..f48a70c 100644
+--- a/backend/src/main/java/com/techcare/backend/ordenes/OrdenErrores.java
++++ b/backend/src/main/java/com/techcare/backend/ordenes/OrdenErrores.java
+@@ -15,7 +15,7 @@ import java.sql.SQLException;
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+ 
+-@RestControllerAdvice(assignableTypes = OrdenController.class)
++@RestControllerAdvice(assignableTypes = {OrdenController.class, ServicioTecnicoController.class})
+ public class OrdenErrores {
+     private static final Logger LOG = LoggerFactory.getLogger(OrdenErrores.class);
+     @ExceptionHandler(MethodArgumentNotValidException.class)
+@@ -34,12 +34,15 @@ public class OrdenErrores {
+             if (!(causa instanceof SQLException sql)) continue;
+             for (SQLException actual = sql; actual != null; actual = actual.getNextException()) {
+                 switch (actual.getErrorCode()) {
+-                    case 51600, 51601: return error(400, actual.getMessage());
+-                    case 51602: return error(404, "La orden no existe o no está disponible para tu usuario.");
+-                    case 51603: return error(409, actual.getMessage());
++                    case 51600, 51601, 51700, 51701: return error(400, actual.getMessage());
++                    case 51602, 51702: return error(404, "La orden no existe o no está disponible para tu usuario.");
++                    case 51603, 51703: return error(409, actual.getMessage());
+                     case 51604: return error(403, "Tu usuario no tiene permiso para esta operación de órdenes.");
++                    case 51704: return error(403, "Solo el técnico activo asignado puede realizar esta operación.");
++                    case 51019: return error(409, "Stock insuficiente. No se aplicaron cambios; actualizá las existencias.");
+                     case 2601, 2627: return error(409, "La orden ya está registrada. Actualizá el listado.");
+-                    case 547, 51102, 51104, 51105, 51106, 51107, 51108:
++                    case 547, 51008, 51011, 51013, 51016, 51017, 51018, 51021, 51022,
++                         51102, 51104, 51105, 51106, 51107, 51108, 51110, 51111, 51112, 51113, 51114, 51115:
+                         return error(409, "Los datos o el estado de la orden cambiaron. Actualizá y volvé a intentar.");
+                     default: break;
+                 }
+diff --git a/backend/src/main/java/com/techcare/backend/ordenes/OrdenesServicio.java b/backend/src/main/java/com/techcare/backend/ordenes/OrdenesServicio.java
+index aac2657..2362eed 100644
+--- a/backend/src/main/java/com/techcare/backend/ordenes/OrdenesServicio.java
++++ b/backend/src/main/java/com/techcare/backend/ordenes/OrdenesServicio.java
+@@ -72,7 +72,7 @@ public class OrdenesServicio {
+         return filas.stream().map(r -> new Catalogo(texto(r, "Codigo"), texto(r, "Nombre"),
+                 numero(r, "Nivel"), r.get("EsFinal") instanceof Boolean b ? b : null)).toList();
+     }
+-    private static void idValido(int id) {
++    static void idValido(int id) {
+         if (id <= 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El ID de orden debe ser mayor que cero.");
+     }
+     private static LocalDateTime inicioUtc(LocalDate fecha, boolean diaSiguiente) {
+@@ -82,7 +82,7 @@ public class OrdenesServicio {
+         return (diaSiguiente ? fecha.plusDays(1) : fecha).atStartOfDay(GUATEMALA)
+                 .withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
+     }
+-    private Orden una(List<Map<String, Object>> filas) {
++    Orden una(List<Map<String, Object>> filas) {
+         if (filas.size() != 1 || !(filas.get(0).get("OrdenID") instanceof Number))
+             throw new DataRetrievalFailureException("El procedimiento no devolvió una orden válida.");
+         return orden(filas.get(0));
+diff --git a/backend/src/main/java/com/techcare/backend/ordenes/ServicioTecnico.java b/backend/src/main/java/com/techcare/backend/ordenes/ServicioTecnico.java
+new file mode 100644
+index 0000000..36ca82b
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/ordenes/ServicioTecnico.java
+@@ -0,0 +1,86 @@
++package com.techcare.backend.ordenes;
++
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.stereotype.Service;
++
++import java.math.BigDecimal;
++import java.sql.Timestamp;
++import java.time.LocalDateTime;
++import java.time.OffsetDateTime;
++import java.time.ZoneOffset;
++import java.util.List;
++import java.util.Map;
++
++@Service
++public class ServicioTecnico {
++    private final JdbcTemplate jdbc;
++    private final OrdenesServicio ordenes;
++    public ServicioTecnico(JdbcTemplate jdbc, OrdenesServicio ordenes) { this.jdbc = jdbc; this.ordenes = ordenes; }
++
++    public OrdenesServicio.Orden iniciarDiagnostico(int actor, int id) {
++        return ejecutar("EXEC dbo.spIniciarDiagnosticoOrden ?, ?", actor, id);
++    }
++    public OrdenesServicio.Orden diagnosticar(int actor, int id, ServicioTecnicoController.Diagnostico datos) {
++        return ejecutar("EXEC dbo.spRegistrarDiagnosticoOrden ?, ?, ?, ?", actor, id, datos.descripcion(), datos.costoEstimado());
++    }
++    public OrdenesServicio.Orden reparar(int actor, int id, ServicioTecnicoController.Reparacion datos) {
++        return ejecutar("EXEC dbo.spIniciarReparacionOrden ?, ?, ?, ?, ?", actor, id,
++                datos.descripcionTrabajo(), datos.costoManoObra(), datos.autorizacion());
++    }
++    public OrdenesServicio.Orden agregarActividad(int actor, int id, ServicioTecnicoController.Actividad datos) {
++        return ejecutar("EXEC dbo.spAgregarActividadOrden ?, ?, ?, ?", actor, id, datos.actividadId(), datos.observacion());
++    }
++    public OrdenesServicio.Orden consumir(int actor, int id, ServicioTecnicoController.Consumo datos) {
++        return ejecutar("EXEC dbo.spUsarRepuestoOrden ?, ?, ?, ?, ?, ?", actor, id,
++                datos.bodegaId(), datos.repuestoId(), datos.cantidad().intValueExact(), datos.precioUnitarioEsperado());
++    }
++    public OrdenesServicio.Orden finalizar(int actor, int id) {
++        return ejecutar("EXEC dbo.spFinalizarReparacionOrden ?, ?", actor, id);
++    }
++    private OrdenesServicio.Orden ejecutar(String sql, int actor, int id, Object... datos) {
++        OrdenesServicio.idValido(id);
++        Object[] parametros = new Object[datos.length + 2];
++        parametros[0] = actor; parametros[1] = id;
++        System.arraycopy(datos, 0, parametros, 2, datos.length);
++        return ordenes.una(jdbc.queryForList(sql, parametros));
++    }
++    public List<ActividadRealizada> actividades(int actor, int id) {
++        OrdenesServicio.idValido(id);
++        return jdbc.queryForList("EXEC dbo.spActividadesOrden ?, ?", actor, id).stream()
++                .map(r -> new ActividadRealizada(entero(r, "ActividadID"), texto(r, "Nombre"), fecha(r, "Fecha"), texto(r, "Observacion"))).toList();
++    }
++    public List<RepuestoUsado> repuestos(int actor, int id) {
++        OrdenesServicio.idValido(id);
++        return jdbc.queryForList("EXEC dbo.spRepuestosOrden ?, ?", actor, id).stream().map(r -> new RepuestoUsado(
++                entero(r, "Linea"), entero(r, "RepuestoID"), texto(r, "Codigo"), texto(r, "Nombre"), entero(r, "BodegaID"),
++                texto(r, "Bodega"), entero(r, "Cantidad"), decimal(r, "PrecioUnitario"), decimal(r, "Importe"),
++                r.get("MovimientoID") instanceof Number n ? n.longValue() : null, fecha(r, "Fecha"))).toList();
++    }
++    public List<ActividadDisponible> catalogoActividades(int actor, int id) {
++        OrdenesServicio.idValido(id);
++        return jdbc.queryForList("EXEC dbo.spCatalogoActividadesOrden ?, ?", actor, id).stream()
++                .map(r -> new ActividadDisponible(entero(r, "ActividadID"), texto(r, "Nombre"))).toList();
++    }
++    public List<RepuestoDisponible> catalogoRepuestos(int actor, int id) {
++        OrdenesServicio.idValido(id);
++        return jdbc.queryForList("EXEC dbo.spCatalogoRepuestosOrden ?, ?", actor, id).stream().map(r -> new RepuestoDisponible(
++                entero(r, "BodegaID"), texto(r, "Bodega"), entero(r, "RepuestoID"), texto(r, "Codigo"), texto(r, "Nombre"),
++                ((Number) r.get("Existencia")).longValue(), decimal(r, "PrecioUnitario"))).toList();
++    }
++    private static Integer entero(Map<String, Object> r, String clave) { return r.get(clave) instanceof Number n ? n.intValue() : null; }
++    private static String texto(Map<String, Object> r, String clave) { return r.get(clave) instanceof String s ? s : null; }
++    private static BigDecimal decimal(Map<String, Object> r, String clave) { return r.get(clave) instanceof Number n ? new BigDecimal(n.toString()) : null; }
++    private static OffsetDateTime fecha(Map<String, Object> r, String clave) {
++        Object valor = r.get(clave);
++        if (valor instanceof Timestamp t) return t.toLocalDateTime().atOffset(ZoneOffset.UTC);
++        if (valor instanceof LocalDateTime t) return t.atOffset(ZoneOffset.UTC);
++        return null;
++    }
++    public record ActividadDisponible(Integer actividadId, String nombre) {}
++    public record ActividadRealizada(Integer actividadId, String nombre, OffsetDateTime fecha, String observacion) {}
++    public record RepuestoDisponible(Integer bodegaId, String bodega, Integer repuestoId, String codigo,
++                                    String nombre, long existencia, BigDecimal precioUnitario) {}
++    public record RepuestoUsado(Integer linea, Integer repuestoId, String codigo, String nombre, Integer bodegaId,
++                               String bodega, Integer cantidad, BigDecimal precioUnitario, BigDecimal importe,
++                               Long movimientoId, OffsetDateTime fecha) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/ordenes/ServicioTecnicoController.java b/backend/src/main/java/com/techcare/backend/ordenes/ServicioTecnicoController.java
+new file mode 100644
+index 0000000..d46118e
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/ordenes/ServicioTecnicoController.java
+@@ -0,0 +1,96 @@
++package com.techcare.backend.ordenes;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import jakarta.validation.Valid;
++import jakarta.validation.constraints.*;
++import org.springframework.http.ResponseEntity;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.web.bind.annotation.*;
++
++import java.math.BigDecimal;
++import java.net.URI;
++import java.util.List;
++
++@RestController
++@RequestMapping("/api/ordenes/{id}")
++public class ServicioTecnicoController {
++    private final ServicioTecnico servicio;
++    public ServicioTecnicoController(ServicioTecnico servicio) { this.servicio = servicio; }
++
++    @PostMapping("/diagnostico/inicio")
++    public OrdenesServicio.Orden iniciarDiagnostico(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id) {
++        return servicio.iniciarDiagnostico(actor.getUsuarioId(), id);
++    }
++
++    @PostMapping("/diagnostico")
++    public ResponseEntity<OrdenesServicio.Orden> diagnosticar(@AuthenticationPrincipal UsuarioAutenticado actor,
++            @PathVariable int id, @Valid @RequestBody Diagnostico datos) {
++        return ResponseEntity.created(URI.create("/api/ordenes/" + id))
++                .body(servicio.diagnosticar(actor.getUsuarioId(), id, datos));
++    }
++
++    @PostMapping("/reparacion")
++    public ResponseEntity<OrdenesServicio.Orden> reparar(@AuthenticationPrincipal UsuarioAutenticado actor,
++            @PathVariable int id, @Valid @RequestBody Reparacion datos) {
++        return ResponseEntity.created(URI.create("/api/ordenes/" + id))
++                .body(servicio.reparar(actor.getUsuarioId(), id, datos));
++    }
++
++    @GetMapping("/actividades")
++    public List<ServicioTecnico.ActividadRealizada> actividades(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id) {
++        return servicio.actividades(actor.getUsuarioId(), id);
++    }
++
++    @PostMapping("/actividades")
++    public OrdenesServicio.Orden actividad(@AuthenticationPrincipal UsuarioAutenticado actor,
++            @PathVariable int id, @Valid @RequestBody Actividad datos) {
++        return servicio.agregarActividad(actor.getUsuarioId(), id, datos);
++    }
++
++    @GetMapping("/repuestos")
++    public List<ServicioTecnico.RepuestoUsado> repuestos(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id) {
++        return servicio.repuestos(actor.getUsuarioId(), id);
++    }
++
++    @PostMapping("/repuestos")
++    public OrdenesServicio.Orden repuesto(@AuthenticationPrincipal UsuarioAutenticado actor,
++            @PathVariable int id, @Valid @RequestBody Consumo datos) {
++        return servicio.consumir(actor.getUsuarioId(), id, datos);
++    }
++
++    @GetMapping("/catalogos/actividades")
++    public List<ServicioTecnico.ActividadDisponible> catalogoActividades(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id) {
++        return servicio.catalogoActividades(actor.getUsuarioId(), id);
++    }
++
++    @GetMapping("/catalogos/repuestos")
++    public List<ServicioTecnico.RepuestoDisponible> catalogoRepuestos(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id) {
++        return servicio.catalogoRepuestos(actor.getUsuarioId(), id);
++    }
++
++    @PostMapping("/reparacion/cierre")
++    public OrdenesServicio.Orden finalizar(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id) {
++        return servicio.finalizar(actor.getUsuarioId(), id);
++    }
++
++    public record Diagnostico(
++            @NotBlank @Size(max = 2000) String descripcion,
++            @NotNull @DecimalMin("0.00") @Digits(integer = 10, fraction = 2) BigDecimal costoEstimado) {
++        public Diagnostico { descripcion = limpiar(descripcion); }
++    }
++    public record Reparacion(
++            @NotBlank @Size(max = 2000) String descripcionTrabajo,
++            @NotNull @DecimalMin("0.00") @Digits(integer = 10, fraction = 2) BigDecimal costoManoObra,
++            @NotBlank @Size(max = 500) String autorizacion) {
++        public Reparacion { descripcionTrabajo = limpiar(descripcionTrabajo); autorizacion = limpiar(autorizacion); }
++    }
++    public record Actividad(@NotNull @Min(1) Integer actividadId, @Size(max = 500) String observacion) {
++        public Actividad { observacion = limpiar(observacion); }
++    }
++    public record Consumo(
++            @NotNull @Min(1) Integer bodegaId, @NotNull @Min(1) Integer repuestoId,
++            // BigDecimal conserva una fracción recibida para rechazarla; Integer la truncaría al leer JSON.
++            @NotNull @DecimalMin("1") @DecimalMax("2147483647") @Digits(integer = 10, fraction = 0) BigDecimal cantidad,
++            @NotNull @DecimalMin("0.00") @Digits(integer = 10, fraction = 2) BigDecimal precioUnitarioEsperado) {}
++    private static String limpiar(String texto) { return texto == null ? null : texto.strip(); }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+index 5331d45..efb416d 100644
+--- a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
++++ b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+@@ -63,6 +63,10 @@ public class SeguridadConfig {
+                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
+                         .requestMatchers(HttpMethod.POST,"/api/ordenes","/api/ordenes/*/cancelacion")
+                             .hasAnyRole("ADMIN","RECEPCION")
++                        .requestMatchers(HttpMethod.POST,"/api/ordenes/*/diagnostico/inicio",
++                                "/api/ordenes/*/diagnostico","/api/ordenes/*/reparacion",
++                                "/api/ordenes/*/actividades","/api/ordenes/*/repuestos",
++                                "/api/ordenes/*/reparacion/cierre").hasAnyRole("ADMIN","TECNICO")
+                         .requestMatchers(HttpMethod.PUT,"/api/ordenes/*/tecnico").hasAnyRole("ADMIN","RECEPCION")
+                         .requestMatchers(HttpMethod.GET,"/api/clientes","/api/clientes/**")
+                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
+diff --git a/backend/src/test/java/com/techcare/backend/ordenes/ServicioTecnicoApiTests.java b/backend/src/test/java/com/techcare/backend/ordenes/ServicioTecnicoApiTests.java
+new file mode 100644
+index 0000000..4659f59
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/ordenes/ServicioTecnicoApiTests.java
+@@ -0,0 +1,165 @@
++package com.techcare.backend.ordenes;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.junit.jupiter.params.provider.ValueSource;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.jdbc.UncategorizedSQLException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.request.RequestPostProcessor;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.web.context.WebApplicationContext;
++
++import java.math.BigDecimal;
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.not;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.*;
++import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(properties = "spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class ServicioTecnicoApiTests {
++    private static final String DIAGNOSTICO = "{\"descripcion\":\" Revisión ñ 漢字 \",\"costoEstimado\":125.50,\"usuarioTecnicoId\":999}";
++    private static final String REPARACION = "{\"descripcionTrabajo\":\" Cambiar fuente ñ \",\"costoManoObra\":125.50,\"autorizacion\":\" María autorizó por teléfono \",\"usuarioActorId\":999}";
++    @Autowired WebApplicationContext context;
++    @MockitoBean JdbcTemplate jdbc;
++    private MockMvc mvc;
++
++    @BeforeEach void preparar() {
++        reset(jdbc);
++        mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
++        when(jdbc.queryForList(anyString(), any(Object[].class))).thenReturn(List.of(orden()));
++    }
++    private Map<String, Object> orden() {
++        Map<String, Object> r = new HashMap<>();
++        r.put("OrdenID", 81); r.put("NumeroOrden", "TC-81"); r.put("UsuarioTecnicoID", 42);
++        r.put("EstadoCodigo", "REPARACION"); r.put("Estado", "En reparación"); r.put("EsFinal", false);
++        r.put("PasswordHash", "NO_SERIALIZAR"); r.put("CostoReferencia", new BigDecimal("12.00"));
++        return r;
++    }
++    private RequestPostProcessor actor(String rol) {
++        var u = new UsuarioAutenticado(42, "cuenta", "Técnico prueba", "EMP-42", List.of(rol), true, null);
++        return authentication(UsernamePasswordAuthenticationToken.authenticated(u, null, u.getAuthorities()));
++    }
++
++    @ParameterizedTest @ValueSource(strings = {"RECEPCION", "CAJA", "BODEGA"})
++    void losRolesDeConsultaNoEjecutanOperacionesTecnicas(String rol) throws Exception {
++        for (String ruta : List.of("diagnostico/inicio", "diagnostico", "reparacion", "actividades", "repuestos", "reparacion/cierre"))
++            mvc.perform(post("/api/ordenes/81/" + ruta).with(actor(rol)).with(csrf())
++                    .contentType("application/json").content(DIAGNOSTICO)).andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void todasLasEscriturasExigenSesionYCsrf() throws Exception {
++        for (String ruta : List.of("diagnostico/inicio", "diagnostico", "reparacion", "actividades", "repuestos", "reparacion/cierre")) {
++            mvc.perform(post("/api/ordenes/81/" + ruta).with(csrf()).contentType("application/json").content(DIAGNOSTICO)).andExpect(status().isUnauthorized());
++            mvc.perform(post("/api/ordenes/81/" + ruta).with(actor("TECNICO")).contentType("application/json").content(DIAGNOSTICO)).andExpect(status().isForbidden());
++        }
++        verifyNoInteractions(jdbc);
++    }
++    @Test void diagnosticoUsaActorDeSesionYConservaUnicodeYDecimales() throws Exception {
++        mvc.perform(post("/api/ordenes/81/diagnostico").with(actor("TECNICO")).with(csrf())
++                .contentType("application/json").content(DIAGNOSTICO)).andExpect(status().isCreated())
++                .andExpect(header().string("Location", "/api/ordenes/81"))
++                .andExpect(jsonPath("$.numeroOrden").value("TC-81"))
++                .andExpect(content().string(not(containsString("NO_SERIALIZAR"))))
++                .andExpect(content().string(not(containsString("costoReferencia"))));
++        verify(jdbc).queryForList("EXEC dbo.spRegistrarDiagnosticoOrden ?, ?, ?, ?", 42, 81, "Revisión ñ 漢字", new BigDecimal("125.50"));
++        verifyNoMoreInteractions(jdbc);
++    }
++    @Test void iniciarReparacionEnviaLaAutorizacionYNoAceptaOtroActor() throws Exception {
++        mvc.perform(post("/api/ordenes/81/reparacion").with(actor("TECNICO")).with(csrf())
++                .contentType("application/json").content(REPARACION)).andExpect(status().isCreated());
++        verify(jdbc).queryForList("EXEC dbo.spIniciarReparacionOrden ?, ?, ?, ?, ?", 42, 81,
++                "Cambiar fuente ñ", new BigDecimal("125.50"), "María autorizó por teléfono");
++    }
++    @Test void actividadConsumoInicioYCierreUsanLosProcedimientosProtegidos() throws Exception {
++        mvc.perform(post("/api/ordenes/81/diagnostico/inicio").with(actor("TECNICO")).with(csrf())).andExpect(status().isOk());
++        mvc.perform(post("/api/ordenes/81/actividades").with(actor("TECNICO")).with(csrf()).contentType("application/json")
++                .content("{\"actividadId\":3,\"observacion\":\" Se probó con carga ñ \",\"usuarioId\":999}")).andExpect(status().isOk());
++        mvc.perform(post("/api/ordenes/81/repuestos").with(actor("TECNICO")).with(csrf()).contentType("application/json")
++                .content("{\"bodegaId\":2,\"repuestoId\":7,\"cantidad\":3,\"precioUnitarioEsperado\":25.50,\"usuarioId\":999}")).andExpect(status().isOk());
++        mvc.perform(post("/api/ordenes/81/reparacion/cierre").with(actor("TECNICO")).with(csrf())).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spIniciarDiagnosticoOrden ?, ?", 42, 81);
++        verify(jdbc).queryForList("EXEC dbo.spAgregarActividadOrden ?, ?, ?, ?", 42, 81, 3, "Se probó con carga ñ");
++        verify(jdbc).queryForList("EXEC dbo.spUsarRepuestoOrden ?, ?, ?, ?, ?, ?", 42, 81, 2, 7, 3, new BigDecimal("25.50"));
++        verify(jdbc).queryForList("EXEC dbo.spFinalizarReparacionOrden ?, ?", 42, 81);
++        verifyNoMoreInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings = {"ADMIN", "RECEPCION", "TECNICO", "CAJA"})
++    void consultasDeleganElFiltroDeAsignacionAlSql(String rol) throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spActividadesOrden ?, ?", 42, 81)).thenReturn(List.of(Map.of(
++                "ActividadID", 3, "Nombre", "Prueba ñ", "Fecha", Timestamp.valueOf("2026-10-21 12:30:00"))));
++        when(jdbc.queryForList("EXEC dbo.spRepuestosOrden ?, ?", 42, 81)).thenReturn(List.of(Map.of(
++                "Linea", 1, "RepuestoID", 7, "Cantidad", 3, "PrecioUnitario", new BigDecimal("25.50"),
++                "Importe", new BigDecimal("76.50"), "MovimientoID", 10000000000L)));
++        mvc.perform(get("/api/ordenes/81/actividades").with(actor(rol))).andExpect(status().isOk())
++                .andExpect(jsonPath("$[0].fecha").value("2026-10-21T12:30:00Z"));
++        mvc.perform(get("/api/ordenes/81/repuestos").with(actor(rol))).andExpect(status().isOk())
++                .andExpect(jsonPath("$[0].importe").value(76.5)).andExpect(jsonPath("$[0].movimientoId").value(10000000000L));
++        verify(jdbc).queryForList("EXEC dbo.spActividadesOrden ?, ?", 42, 81);
++        verify(jdbc).queryForList("EXEC dbo.spRepuestosOrden ?, ?", 42, 81);
++    }
++    @Test void catalogosNoExponenCostoDeCompraNiOtrosCamposInternos() throws Exception {
++        Map<String, Object> r = new HashMap<>(Map.of("BodegaID", 2, "Bodega", "Principal", "RepuestoID", 7,
++                "Codigo", "REP-7", "Nombre", "Fuente", "Existencia", 12L, "PrecioUnitario", new BigDecimal("25.50")));
++        r.put("CostoReferencia", new BigDecimal("12.00"));
++        when(jdbc.queryForList("EXEC dbo.spCatalogoRepuestosOrden ?, ?", 42, 81)).thenReturn(List.of(r));
++        when(jdbc.queryForList("EXEC dbo.spCatalogoActividadesOrden ?, ?", 42, 81)).thenReturn(List.of(Map.of("ActividadID", 3, "Nombre", "Revisión")));
++        mvc.perform(get("/api/ordenes/81/catalogos/repuestos").with(actor("TECNICO"))).andExpect(status().isOk())
++                .andExpect(jsonPath("$[0].existencia").value(12)).andExpect(content().string(not(containsString("CostoReferencia"))));
++        mvc.perform(get("/api/ordenes/81/catalogos/actividades").with(actor("TECNICO"))).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spCatalogoRepuestosOrden ?, ?", 42, 81);
++        verify(jdbc).queryForList("EXEC dbo.spCatalogoActividadesOrden ?, ?", 42, 81);
++    }
++    @ParameterizedTest @ValueSource(strings = {"-0.01", "1.234", "10000000000", "null"})
++    void importesInvalidosNoLleganASql(String importe) throws Exception {
++        mvc.perform(post("/api/ordenes/81/diagnostico").with(actor("TECNICO")).with(csrf()).contentType("application/json")
++                .content(DIAGNOSTICO.replace("125.50", importe))).andExpect(status().isBadRequest());
++        mvc.perform(post("/api/ordenes/81/reparacion").with(actor("TECNICO")).with(csrf()).contentType("application/json")
++                .content(REPARACION.replace("125.50", importe))).andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void noSeAceptaAutorizacionVaciaNiTextosFueraDeLimite() throws Exception {
++        for (String contenido : List.of(REPARACION.replace("María autorizó por teléfono", " "),
++                REPARACION.replace("María autorizó por teléfono", "a".repeat(501)), REPARACION.replace("Cambiar fuente ñ", "a".repeat(2001))))
++            mvc.perform(post("/api/ordenes/81/reparacion").with(actor("TECNICO")).with(csrf()).contentType("application/json").content(contenido)).andExpect(status().isBadRequest());
++        for (String contenido : List.of(DIAGNOSTICO.replace("Revisión ñ 漢字", " "), DIAGNOSTICO.replace("Revisión ñ 漢字", "a".repeat(2001))))
++            mvc.perform(post("/api/ordenes/81/diagnostico").with(actor("TECNICO")).with(csrf()).contentType("application/json").content(contenido)).andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings = {"0", "-1", "1.5", "2147483648", "null"})
++    void cantidadNoValidaSeRechazaAntesDeConsumir(String cantidad) throws Exception {
++        mvc.perform(post("/api/ordenes/81/repuestos").with(actor("TECNICO")).with(csrf()).contentType("application/json")
++                .content("{\"bodegaId\":2,\"repuestoId\":7,\"cantidad\":" + cantidad + ",\"precioUnitarioEsperado\":25.50}"))
++                .andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @CsvSource({"51700,400", "51701,400", "51702,404", "51703,409", "51704,403", "51019,409", "2812,503"})
++    void conflictosDeStockAsignacionYEstadoDevuelvenErroresControlados(int codigo, int estado) throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spFinalizarReparacionOrden ?, ?", 42, 81)).thenThrow(
++                new UncategorizedSQLException("servicio", "EXEC", new SQLException("Detalle interno controlado", "S0001", codigo)));
++        var respuesta = mvc.perform(post("/api/ordenes/81/reparacion/cierre").with(actor("TECNICO")).with(csrf())).andExpect(status().is(estado));
++        if (estado == 404 || estado == 403 || estado == 503) respuesta.andExpect(content().string(not(containsString("Detalle interno controlado"))));
++    }
++    @Test void idsInvalidosNoSeEnviaASql() throws Exception {
++        mvc.perform(post("/api/ordenes/0/diagnostico/inicio").with(actor("TECNICO")).with(csrf())).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/ordenes/texto/repuestos").with(actor("TECNICO"))).andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++}
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index fad77b8..decd7f6 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -1,7 +1,7 @@
+ /**
+- * Capacidades verificadas en los controladores de Clientes, Equipos y catálogos.
++ * Capacidades de acceso, clientes, equipos, órdenes y servicio técnico.
+  * Las rutas disponibles requieren sesión y permisos del servidor.
+- * Los procesos de órdenes, inventario y caja conservan su estado pendiente.
++ * El inventario general y la caja conservan su estado pendiente.
+  */
+ 
+ export type EstadoCapacidad = "disponible" | "incompleta" | "ausente";
+@@ -270,7 +270,7 @@ export const OPERACIONES: OperacionApi[] = [
+     id: "ordenes.expediente", modulo: "Ordenes", operacion: "Consultar expediente de la orden",
+     metodo: "GET", ruta: "/api/ordenes/{id}", entrada: "id", respuesta: "Orden",
+     roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "incompleta", procedimiento: "spConsultarOrden",
+-    nota: "Recepción y datos técnicos existentes conectados. Repuestos, cobros y entrega pendientes.",
++    nota: "Recepción, diagnóstico, reparación y consumos conectados. Cobros y entrega pendientes.",
+   },
+   {
+     id: "ordenes.asignar", modulo: "Ordenes", operacion: "Asignar o reasignar técnico",
+@@ -301,71 +301,97 @@ export const OPERACIONES: OperacionApi[] = [
+   },
+ 
+   // ---- Diagnostico / reparacion ----
++  {
++    id: "diagnostico.iniciar", modulo: "Servicio tecnico", operacion: "Iniciar revisión del equipo",
++    metodo: "POST", ruta: "/api/ordenes/{id}/diagnostico/inicio", entrada: "-", respuesta: "Orden",
++    roles: "TECNICO asignado", estado: "disponible", procedimiento: "spIniciarDiagnosticoOrden",
++  },
+   {
+     id: "diagnostico.registrar",
+     modulo: "Servicio tecnico",
+     operacion: "Registrar diagnostico",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/ordenes/{id}/diagnostico)",
+-    entrada: "Descripcion, CostoEstimado",
+-    respuesta: "DiagnosticoID",
+-    roles: "TECNICO",
+-    estado: "ausente",
+-    procedimiento: "spRegistrarDiagnostico",
+-    nota: "Puede iniciar desde RECIBIDO y termina en ESPERANDO_AUTORIZACION. El tecnico proviene de la sesion.",
++    metodo: "POST",
++    ruta: "/api/ordenes/{id}/diagnostico",
++    entrada: "descripcion, costoEstimado",
++    respuesta: "Orden (201)",
++    roles: "TECNICO asignado",
++    estado: "disponible",
++    procedimiento: "spRegistrarDiagnosticoOrden",
++    nota: "Termina en ESPERANDO_AUTORIZACION. El técnico proviene de la sesión y debe ser el asignado.",
+   },
+   {
+     id: "reparacion.iniciar",
+     modulo: "Servicio tecnico",
+     operacion: "Iniciar reparacion",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/reparaciones)",
+-    entrada: "DiagnosticoID, DescripcionTrabajo, CostoManoObra, Autorizacion",
+-    respuesta: "ReparacionID",
+-    roles: "TECNICO",
+-    estado: "ausente",
+-    procedimiento: "spIniciarReparacion",
++    metodo: "POST",
++    ruta: "/api/ordenes/{id}/reparacion",
++    entrada: "descripcionTrabajo, costoManoObra, autorizacion",
++    respuesta: "Orden (201)",
++    roles: "TECNICO asignado",
++    estado: "disponible",
++    procedimiento: "spIniciarReparacionOrden",
+     nota: "Exige diagnostico previo y constancia de autorizacion del cliente (se documenta en la observacion del cambio de estado).",
+   },
+   {
+     id: "reparacion.actividad",
+     modulo: "Servicio tecnico",
+     operacion: "Registrar actividad",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/reparaciones/{id}/actividades)",
+-    entrada: "ActividadID, Observacion",
+-    respuesta: "ok",
+-    roles: "TECNICO",
+-    estado: "ausente",
+-    procedimiento: "spRegistrarActividad",
++    metodo: "POST",
++    ruta: "/api/ordenes/{id}/actividades",
++    entrada: "actividadId, observacion?",
++    respuesta: "Orden",
++    roles: "TECNICO asignado",
++    estado: "disponible",
++    procedimiento: "spAgregarActividadOrden",
+   },
+   {
+     id: "reparacion.consumir",
+     modulo: "Servicio tecnico",
+     operacion: "Consumir repuesto",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/reparaciones/{id}/repuestos)",
+-    entrada: "BodegaID, RepuestoID, Cantidad",
+-    respuesta: "ok",
+-    roles: "TECNICO",
+-    estado: "ausente",
+-    procedimiento: "spConsumirRepuesto",
++    metodo: "POST",
++    ruta: "/api/ordenes/{id}/repuestos",
++    entrada: "bodegaId, repuestoId, cantidad, precioUnitarioEsperado",
++    respuesta: "Orden",
++    roles: "TECNICO asignado",
++    estado: "disponible",
++    procedimiento: "spUsarRepuestoOrden",
+     nota: "Validacion + consumo + movimiento de salida en una sola transaccion. El frontend no crea movimiento ni edita existencias.",
+   },
+   {
+     id: "reparacion.cerrar",
+     modulo: "Servicio tecnico",
+     operacion: "Finalizar reparacion",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/reparaciones/{id}/cerrar)",
++    metodo: "POST",
++    ruta: "/api/ordenes/{id}/reparacion/cierre",
+     entrada: "-",
+-    respuesta: "ok",
+-    roles: "TECNICO",
+-    estado: "ausente",
+-    procedimiento: "spCerrarReparacion",
++    respuesta: "Orden",
++    roles: "TECNICO asignado",
++    estado: "disponible",
++    procedimiento: "spFinalizarReparacionOrden",
+     nota: "Termina la reparacion y deja la orden en LISTO.",
+   },
+ 
++  {
++    id: "servicio.actividades", modulo: "Servicio tecnico", operacion: "Consultar actividades realizadas",
++    metodo: "GET", ruta: "/api/ordenes/{id}/actividades", entrada: "id", respuesta: "ActividadRealizada[]",
++    roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "disponible", procedimiento: "spActividadesOrden",
++  },
++  {
++    id: "servicio.repuestos", modulo: "Servicio tecnico", operacion: "Consultar repuestos utilizados y su salida",
++    metodo: "GET", ruta: "/api/ordenes/{id}/repuestos", entrada: "id", respuesta: "RepuestoUsado[]",
++    roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "disponible", procedimiento: "spRepuestosOrden",
++  },
++  {
++    id: "servicio.catalogoActividades", modulo: "Servicio tecnico", operacion: "Consultar catálogo de actividades",
++    metodo: "GET", ruta: "/api/ordenes/{id}/catalogos/actividades", entrada: "id", respuesta: "ActividadDisponible[]",
++    roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "disponible", procedimiento: "spCatalogoActividadesOrden",
++  },
++  {
++    id: "servicio.catalogoRepuestos", modulo: "Servicio tecnico", operacion: "Consultar existencias para una reparación propia",
++    metodo: "GET", ruta: "/api/ordenes/{id}/catalogos/repuestos", entrada: "id", respuesta: "RepuestoDisponible[]",
++    roles: "TECNICO asignado", estado: "disponible", procedimiento: "spCatalogoRepuestosOrden",
++  },
++
+   // ---- Inventario / repuestos / bodegas ----
+   {
+     id: "inventario.consultar",
+diff --git a/frontend/src/components/ui/Dialog.tsx b/frontend/src/components/ui/Dialog.tsx
+index 629098f..6f36099 100644
+--- a/frontend/src/components/ui/Dialog.tsx
++++ b/frontend/src/components/ui/Dialog.tsx
+@@ -21,6 +21,8 @@ export function Dialog({
+ }) {
+   const panelRef = useRef<HTMLDivElement>(null);
+   const previoRef = useRef<HTMLElement | null>(null);
++  const cerrarRef = useRef(onCerrar);
++  cerrarRef.current = onCerrar;
+   const reduce = useReducedMotion();
+ 
+   useEffect(() => {
+@@ -34,7 +36,7 @@ export function Dialog({
+     function onKey(e: KeyboardEvent) {
+       if (e.key === "Escape") {
+         e.stopPropagation();
+-        onCerrar();
++        cerrarRef.current();
+       }
+       if (e.key === "Tab" && panel) {
+         const focusables = panel.querySelectorAll<HTMLElement>(
+@@ -59,7 +61,7 @@ export function Dialog({
+       document.removeEventListener("keydown", onKey, true);
+       previoRef.current?.focus();
+     };
+-  }, [abierto, onCerrar]);
++  }, [abierto]);
+ 
+   if (!abierto) return null;
+ 
+diff --git a/frontend/src/features/integracion/IntegracionPage.tsx b/frontend/src/features/integracion/IntegracionPage.tsx
+index 0f762e8..3b0528a 100644
+--- a/frontend/src/features/integracion/IntegracionPage.tsx
++++ b/frontend/src/features/integracion/IntegracionPage.tsx
+@@ -63,10 +63,9 @@ export function IntegracionPage() {
+ 
+       <div className="tc-stack">
+         <Alert tono="info" titulo="Contrato verificado">
+-          El unico controlador presente es <code>ClienteController</code> bajo <code>{API_BASE_URL}/clientes</code>.
+-          Devuelve columnas en PascalCase (JdbcTemplate <code>queryForList</code>) y errores con forma{" "}
+-          <code>{"{ estado, mensaje, errores? }"}</code>. No hay autenticacion ni CORS configurado; el desarrollo usa
+-          el proxy de Vite.
++          Acceso, administración, clientes, equipos, órdenes y servicio técnico tienen rutas bajo <code>{API_BASE_URL}</code>.
++          Las operaciones requieren sesión, rol y protección CSRF al escribir. El servicio técnico valida además
++          el responsable asignado. Los errores mantienen la forma <code>{"{ estado, mensaje, errores? }"}</code>.
+         </Alert>
+ 
+         <div className="tc-grid tc-grid--cards">
+diff --git a/frontend/src/features/ordenes/OrdenExpedientePage.tsx b/frontend/src/features/ordenes/OrdenExpedientePage.tsx
+index 9fefbb9..535c46a 100644
+--- a/frontend/src/features/ordenes/OrdenExpedientePage.tsx
++++ b/frontend/src/features/ordenes/OrdenExpedientePage.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useRef, useState } from "react";
++import { lazy, Suspense, useEffect, useRef, useState } from "react";
+ import { useQuery, useQueryClient } from "@tanstack/react-query";
+ import { Link, useLocation, useParams } from "react-router-dom";
+ import { ArrowLeft, RefreshCw } from "lucide-react";
+@@ -9,14 +9,15 @@ import { EstadoOrdenBadge } from "../../components/ui/Badge";
+ import { Alert } from "../../components/ui/Alert";
+ import { Dialog } from "../../components/ui/Dialog";
+ import { Field, SelectInput, TextArea } from "../../components/ui/inputs";
+-import { EmptyState, LoadingState, PendingState } from "../../components/ui/StateView";
++import { LoadingState, PendingState } from "../../components/ui/StateView";
+ import { DataTable, type Columna } from "../../components/ui/DataTable";
+ import { ordenesApi, type EventoOrden } from "../../services/ordenes";
+ import { esApiError, mensajeDeError } from "../../services/errors";
+-import { fechaHora, moneda } from "../../utils/format";
++import { fechaHora } from "../../utils/format";
+ import { nombreEstado } from "../../services/catalogos";
+ import "./ordenes.css";
+ 
++const ServicioTecnicoPanel = lazy(() => import("./ServicioTecnicoPanel").then(m => ({ default: m.ServicioTecnicoPanel })));
+ const SECCIONES = ["Recepción", "Diagnóstico", "Reparación", "Repuestos", "Factura y pagos", "Entrega", "Historial"] as const;
+ type Seccion = typeof SECCIONES[number];
+ export function OrdenExpedientePage() {
+@@ -70,7 +71,7 @@ export function OrdenExpedientePage() {
+     <PageHeader eyebrow="Servicio / Órdenes / Expediente" titulo={o ? o.numeroOrden : "Expediente de la orden"}
+       descripcion="Ingreso, responsable y seguimiento del servicio."
+       acciones={<><Link to="/ordenes"><Button variante="fantasma" icono={<ArrowLeft size={16} />}>Volver</Button></Link>
+-        {valido ? <Button disabled={orden.isFetching || guardando} icono={<RefreshCw size={16} />} onClick={() => { void orden.refetch(); if (seccion === "Historial") void historial.refetch(); }}>Actualizar</Button> : null}</>} />
++        {valido ? <Button disabled={orden.isFetching || guardando} icono={<RefreshCw size={16} />} onClick={() => { void qc.invalidateQueries({ queryKey: ["orden", ordenId] }); }}>Actualizar</Button> : null}</>} />
+     {!valido ? <Alert tono="danger">El número de expediente no es válido.</Alert> : orden.isLoading ? <LoadingState titulo="Cargando expediente…" /> : orden.isError ?
+       <Alert tono="danger" titulo="No se pudo consultar la orden" accion={<Button onClick={() => orden.refetch()}>Reintentar</Button>}>{mensajeDeError(orden.error)}</Alert> : o ?
+       <div className="tc-stack tc-ordenes">
+@@ -99,17 +100,12 @@ export function OrdenExpedientePage() {
+             <dt>Problema reportado</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.problemaReportado}</dd>
+             <dt>Descripción del equipo</dt><dd style={{ overflowWrap: "anywhere" }}>{o.equipoDescripcion}</dd>
+             <dt>Observaciones</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.observaciones || "Sin observaciones"}</dd></dl> : null}
+-          {seccion === "Diagnóstico" ? o.diagnosticoId ? <dl className="tc-dl"><dt>Fecha</dt><dd>{fechaHora(o.fechaDiagnostico)}</dd>
+-            <dt>Descripción</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.descripcionDiagnostico}</dd><dt>Mano de obra estimada</dt><dd>{moneda(o.costoEstimado)}</dd></dl> :
+-            <EmptyState titulo="Sin diagnóstico registrado" descripcion="La orden conserva la falla reportada durante la recepción." /> : null}
+-          {seccion === "Reparación" ? o.reparacionId ? <dl className="tc-dl"><dt>Estado</dt><dd>{o.estadoReparacion}</dd>
+-            <dt>Inicio</dt><dd>{fechaHora(o.fechaInicioReparacion)}</dd><dt>Finalización</dt><dd>{fechaHora(o.fechaFinReparacion)}</dd>
+-            <dt>Trabajo realizado</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.descripcionTrabajo}</dd><dt>Mano de obra</dt><dd>{moneda(o.costoManoObra)}</dd></dl> :
+-            <EmptyState titulo="Sin reparación registrada" descripcion="La reparación requiere un diagnóstico y la autorización del cliente." /> : null}
++          {seccion === "Diagnóstico" || seccion === "Reparación" || seccion === "Repuestos" ?
++            <Suspense fallback={<LoadingState titulo="Cargando servicio técnico…" />}><ServicioTecnicoPanel key={`${ordenId}-${seccion}`} orden={o} seccion={seccion} /></Suspense> : null}
+           {seccion === "Historial" ? historial.isLoading ? <LoadingState titulo="Cargando historial…" /> : historial.isError ?
+             <Alert tono="danger" accion={<Button onClick={() => historial.refetch()}>Reintentar</Button>}>{mensajeDeError(historial.error)}</Alert> :
+             <DataTable columnas={columnas} filas={historial.data ?? []} claveFila={e => e.eventoId} vacio="Sin eventos registrados." /> : null}
+-          {["Repuestos", "Factura y pagos", "Entrega"].includes(seccion) ? <PendingState titulo="Sección pendiente" descripcion="Esta parte del expediente todavía no está disponible." /> : null}
++          {["Factura y pagos", "Entrega"].includes(seccion) ? <PendingState titulo="Sección pendiente" descripcion="Esta parte del expediente todavía no está disponible." /> : null}
+         </div></Card>
+       </div> : null}
+     {accion && o ? <Dialog abierto titulo={accion === "asignar" ? "Asignar técnico" : "Cancelar orden"}
+diff --git a/frontend/src/features/ordenes/ServicioTecnicoPanel.tsx b/frontend/src/features/ordenes/ServicioTecnicoPanel.tsx
+new file mode 100644
+index 0000000..10d31db
+--- /dev/null
++++ b/frontend/src/features/ordenes/ServicioTecnicoPanel.tsx
+@@ -0,0 +1,229 @@
++import { useEffect, useRef, useState } from "react";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import { puedeAcceder, useSession } from "../../app/session";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { DataTable, type Columna } from "../../components/ui/DataTable";
++import { Dialog } from "../../components/ui/Dialog";
++import { Field, SelectInput, TextArea, TextInput } from "../../components/ui/inputs";
++import { EmptyState, LoadingState } from "../../components/ui/StateView";
++import type { Orden } from "../../services/ordenes";
++import { servicioTecnicoApi as api, type ActividadRealizada, type RepuestoUsado } from "../../services/servicioTecnico";
++import { esApiError, mensajeDeError } from "../../services/errors";
++import { fechaHora, moneda } from "../../utils/format";
++
++type Accion = "inicio" | "diagnostico" | "reparacion" | "actividad" | "repuesto" | "cierre";
++const TITULOS: Record<Accion, string> = {
++  inicio: "Iniciar diagnóstico", diagnostico: "Registrar diagnóstico", reparacion: "Autorizar e iniciar reparación",
++  actividad: "Registrar actividad", repuesto: "Registrar repuesto utilizado", cierre: "Finalizar reparación",
++};
++const EXITO: Record<Accion, string> = {
++  inicio: "Revisión iniciada. La orden está en diagnóstico.",
++  diagnostico: "Diagnóstico registrado. La orden está esperando autorización del cliente.",
++  reparacion: "Autorización documentada. La reparación está en proceso.",
++  actividad: "Actividad registrada en el expediente.",
++  repuesto: "Repuesto registrado y salida de inventario aplicada.",
++  cierre: "Reparación terminada. La orden está LISTA para el proceso de facturación y entrega.",
++};
++const columnasActividades: Columna<ActividadRealizada>[] = [
++  { clave: "nombre", encabezado: "Actividad", render: a => a.nombre },
++  { clave: "fecha", encabezado: "Fecha", render: a => fechaHora(a.fecha) },
++  { clave: "observacion", encabezado: "Trabajo realizado / observación", render: a => a.observacion || "—" },
++];
++const columnasRepuestos: Columna<RepuestoUsado>[] = [
++  { clave: "nombre", encabezado: "Repuesto", render: r => `${r.codigo} · ${r.nombre}` },
++  { clave: "bodega", encabezado: "Bodega", render: r => r.bodega },
++  { clave: "cantidad", encabezado: "Cantidad", render: r => r.cantidad },
++  { clave: "precio", encabezado: "Precio unitario", render: r => moneda(r.precioUnitario) },
++  { clave: "importe", encabezado: "Importe", render: r => moneda(r.importe) },
++  { clave: "salida", encabezado: "Salida de inventario", render: r => r.movimientoId ? `#${r.movimientoId} · ${fechaHora(r.fecha)}` : "Sin movimiento" },
++];
++
++export function ServicioTecnicoPanel({ orden: o, seccion }: { orden: Orden; seccion: "Diagnóstico" | "Reparación" | "Repuestos" }) {
++  const sesion = useSession();
++  const qc = useQueryClient();
++  const propio = puedeAcceder(sesion, ["TECNICO"]) && sesion.usuario?.usuarioId === o.usuarioTecnicoId;
++  const enReparacion = o.estadoCodigo === "REPARACION" && o.estadoReparacion === "EN_PROCESO";
++  const [accion, setAccion] = useState<Accion | null>(null);
++  const [descripcion, setDescripcion] = useState("");
++  const [costo, setCosto] = useState("");
++  const [autorizacion, setAutorizacion] = useState("");
++  const [actividadId, setActividadId] = useState("");
++  const [observacion, setObservacion] = useState("");
++  const [repuestoKey, setRepuestoKey] = useState("");
++  const [cantidad, setCantidad] = useState("1");
++  const [confirmado, setConfirmado] = useState(false);
++  const [error, setError] = useState("");
++  const [mensaje, setMensaje] = useState("");
++  const [guardando, setGuardando] = useState(false);
++  const enCurso = useRef(false);
++  const montado = useRef(true);
++  useEffect(() => { montado.current = true; return () => { montado.current = false; }; }, []);
++
++  const actividades = useQuery({ queryKey: ["orden", o.ordenId, "actividades"],
++    queryFn: ({ signal }) => api.actividades(o.ordenId, signal), enabled: seccion === "Reparación" });
++  const repuestos = useQuery({ queryKey: ["orden", o.ordenId, "repuestos"],
++    queryFn: ({ signal }) => api.repuestos(o.ordenId, signal), enabled: seccion === "Repuestos" || seccion === "Reparación" });
++  const catActividades = useQuery({ queryKey: ["orden", o.ordenId, "catalogo-actividades"],
++    queryFn: ({ signal }) => api.catalogoActividades(o.ordenId, signal), enabled: propio && accion === "actividad" });
++  const catRepuestos = useQuery({ queryKey: ["orden", o.ordenId, "catalogo-repuestos"],
++    queryFn: ({ signal }) => api.catalogoRepuestos(o.ordenId, signal), enabled: propio && accion === "repuesto" });
++  const seleccionado = catRepuestos.data?.find(r => `${r.bodegaId}:${r.repuestoId}` === repuestoKey);
++  const pendientes = catActividades.data?.filter(a => !actividades.data?.some(r => r.actividadId === a.actividadId)) ?? [];
++
++  function abrir(tipo: Accion) {
++    setAccion(tipo); setError(""); setMensaje(""); setConfirmado(false);
++    setDescripcion(tipo === "reparacion" ? o.descripcionDiagnostico ?? "" : "");
++    setCosto(tipo === "reparacion" && o.costoEstimado != null ? String(o.costoEstimado) : "");
++    setAutorizacion(""); setActividadId(""); setObservacion(""); setRepuestoKey(""); setCantidad("1");
++  }
++  async function actualizar() {
++    await Promise.all([
++      qc.invalidateQueries({ queryKey: ["orden", o.ordenId] }),
++      qc.invalidateQueries({ queryKey: ["ordenes"] }),
++      qc.invalidateQueries({ queryKey: ["equipos"] }),
++    ]);
++  }
++  async function guardar() {
++    if (enCurso.current || !accion || !propio) return;
++    const tipo = accion;
++    if (["diagnostico", "reparacion"].includes(tipo) &&
++      (!descripcion.trim() || !/^(?:0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(costo))) {
++      setError("Ingresá la descripción y un costo válido con hasta dos decimales."); return;
++    }
++    if (tipo === "reparacion" && !autorizacion.trim()) { setError("Documentá la autorización del cliente."); return; }
++    if (tipo === "actividad" && !actividadId) { setError("Elegí una actividad pendiente."); return; }
++    if (tipo === "repuesto" && (!seleccionado || !/^\d+$/.test(cantidad) || !Number.isSafeInteger(Number(cantidad)) ||
++      Number(cantidad) < 1 || Number(cantidad) > Math.min(seleccionado.existencia, 2147483647))) {
++      setError("Elegí un repuesto y una cantidad entera dentro de la existencia disponible."); return;
++    }
++    if (["diagnostico", "reparacion", "repuesto", "cierre"].includes(tipo) && !confirmado) {
++      setError("Revisá los datos y marcá la confirmación."); return;
++    }
++    enCurso.current = true; setGuardando(true); setError("");
++    try {
++      let actualizada: Orden;
++      switch (tipo) {
++        case "inicio": actualizada = await api.iniciarDiagnostico(o.ordenId); break;
++        case "diagnostico": actualizada = await api.diagnosticar(o.ordenId, descripcion.trim(), Number(costo)); break;
++        case "reparacion": actualizada = await api.reparar(o.ordenId, descripcion.trim(), Number(costo), autorizacion.trim()); break;
++        case "actividad": actualizada = await api.agregarActividad(o.ordenId, Number(actividadId), observacion.trim()); break;
++        case "repuesto": actualizada = await api.consumir(o.ordenId, seleccionado!, Number(cantidad)); break;
++        case "cierre": actualizada = await api.finalizar(o.ordenId); break;
++      }
++      // No repoblar la caché de una sesión que pudo cerrarse durante la escritura.
++      if (montado.current) {
++        qc.setQueryData(["orden", o.ordenId], actualizada);
++        setMensaje(EXITO[tipo]); setAccion(null);
++      }
++      await actualizar();
++    } catch (e) {
++      if (montado.current) {
++        setError(mensajeDeError(e));
++        setConfirmado(false);
++      }
++      if (esApiError(e) && [403, 404, 409].includes(e.status)) await actualizar();
++    } finally {
++      enCurso.current = false;
++      if (montado.current) setGuardando(false);
++    }
++  }
++  const ocupado = guardando || !propio || (accion === "actividad" && (catActividades.isFetching || catActividades.isError || actividades.isError || !actividadId))
++    || (accion === "repuesto" && (catRepuestos.isFetching || catRepuestos.isError || !seleccionado))
++    || (accion === "cierre" && (actividades.isFetching || actividades.isError || repuestos.isFetching || repuestos.isError));
++  return <div className="tc-stack">
++    {mensaje ? <Alert tono="ok">{mensaje}</Alert> : null}
++    {!propio && !o.esFinal && o.estadoCodigo !== "LISTO" ? <Alert tono="info">
++      {o.usuarioTecnicoId ? "El técnico asignado realiza el diagnóstico, registra el trabajo y finaliza la reparación desde su sesión."
++        : "Recepción debe asignar un técnico antes de iniciar el diagnóstico."}
++    </Alert> : null}
++    {seccion === "Diagnóstico" ? <>
++      {o.diagnosticoId ? <><dl className="tc-dl"><dt>Técnico</dt><dd>{o.tecnico}</dd><dt>Fecha</dt><dd>{fechaHora(o.fechaDiagnostico)}</dd>
++        <dt>Descripción</dt><dd className="tc-servicio-texto">{o.descripcionDiagnostico}</dd><dt>Mano de obra estimada</dt><dd>{moneda(o.costoEstimado)}</dd></dl>
++        {o.estadoCodigo === "ESPERANDO_AUTORIZACION" ? <Alert tono="info">La reparación puede iniciarse después de documentar la autorización del cliente, en la pestaña Reparación.</Alert> : null}</> :
++        <EmptyState titulo={o.estadoCodigo === "DIAGNOSTICO" ? "Revisión en curso" : "Sin diagnóstico registrado"}
++          descripcion={`Falla reportada: ${o.problemaReportado}`} />}
++      {propio && !o.diagnosticoId && o.estadoCodigo === "RECIBIDO" ? <Button variante="primario" disabled={guardando} onClick={() => abrir("inicio")}>Iniciar diagnóstico</Button> : null}
++      {propio && !o.diagnosticoId && o.estadoCodigo === "DIAGNOSTICO" ? <Button variante="primario" disabled={guardando} onClick={() => abrir("diagnostico")}>Registrar diagnóstico y estimación</Button> : null}
++    </> : null}
++    {seccion === "Reparación" ? <>
++      {o.reparacionId ? <dl className="tc-dl"><dt>Estado</dt><dd>{o.estadoReparacion === "EN_PROCESO" ? "En proceso" : "Terminada"}</dd>
++        <dt>Técnico</dt><dd>{o.tecnico}</dd><dt>Inicio</dt><dd>{fechaHora(o.fechaInicioReparacion)}</dd>
++        <dt>Finalización</dt><dd>{fechaHora(o.fechaFinReparacion)}</dd><dt>Trabajo autorizado</dt><dd className="tc-servicio-texto">{o.descripcionTrabajo}</dd>
++        <dt>Mano de obra acordada</dt><dd>{moneda(o.costoManoObra)}</dd></dl> :
++        <EmptyState titulo="Sin reparación registrada" descripcion={o.estadoCodigo === "ESPERANDO_AUTORIZACION"
++          ? `Mano de obra estimada: ${moneda(o.costoEstimado)}. Registrá el trabajo y la autorización para continuar.`
++          : "La reparación requiere diagnóstico y autorización del cliente."} />}
++      {propio && o.estadoCodigo === "ESPERANDO_AUTORIZACION" ? <Button variante="primario" disabled={guardando} onClick={() => abrir("reparacion")}>Autorizar e iniciar reparación</Button> : null}
++      {o.reparacionId ? <>
++        <h3 className="tc-section-title">Actividades realizadas</h3>
++        {actividades.isLoading ? <LoadingState titulo="Cargando actividades…" /> : actividades.isError ?
++          <Alert tono="danger" accion={<Button onClick={() => actividades.refetch()}>Reintentar</Button>}>{mensajeDeError(actividades.error)}</Alert> :
++          <DataTable columnas={columnasActividades} filas={actividades.data ?? []} claveFila={a => a.actividadId} vacio="Sin actividades registradas." />}
++        {propio && enReparacion ? <div className="tc-row" style={{ flexWrap: "wrap" }}>
++          <Button disabled={guardando || actividades.isLoading || actividades.isError} onClick={() => abrir("actividad")}>Registrar actividad</Button>
++          <Button variante="primario" disabled={guardando || actividades.isLoading || actividades.isError || repuestos.isLoading || repuestos.isError} onClick={() => abrir("cierre")}>Finalizar reparación</Button>
++        </div> : null}
++        {o.estadoCodigo === "LISTO" ? <Alert tono="ok">El trabajo técnico terminó. La orden está lista para facturación y entrega.</Alert> : null}
++        {repuestos.isError ? <Alert tono="danger" accion={<Button onClick={() => repuestos.refetch()}>Reintentar</Button>}>No se pudo verificar el listado de repuestos: {mensajeDeError(repuestos.error)}</Alert> : null}
++      </> : null}
++    </> : null}
++    {seccion === "Repuestos" ? <>
++      <p className="tc-section-sub">Repuestos utilizados en esta reparación. Cada registro conserva su precio y la salida de inventario.</p>
++      {repuestos.isLoading ? <LoadingState titulo="Cargando repuestos utilizados…" /> : repuestos.isError ?
++        <Alert tono="danger" accion={<Button onClick={() => repuestos.refetch()}>Reintentar</Button>}>{mensajeDeError(repuestos.error)}</Alert> :
++        <DataTable columnas={columnasRepuestos} filas={repuestos.data ?? []} claveFila={r => r.linea} vacio="Sin repuestos utilizados. El servicio puede realizarse solo con mano de obra." />}
++      {propio && enReparacion ? <Button variante="primario" disabled={guardando || repuestos.isLoading || repuestos.isError} onClick={() => abrir("repuesto")}>Registrar repuesto utilizado</Button> : null}
++    </> : null}
++    {accion ? <Dialog abierto titulo={TITULOS[accion]} ancho={680} onCerrar={() => { if (!enCurso.current) setAccion(null); }}>
++      <form className="tc-stack" style={{ marginTop: 16 }} onSubmit={e => { e.preventDefault(); void guardar(); }}>
++        {error ? <Alert tono="danger">{error}</Alert> : null}
++        {!propio ? <Alert tono="danger">La asignación o los permisos cambiaron. Actualizá el expediente.</Alert> : null}
++        {accion === "inicio" ? <p>Se registrará el inicio de revisión de {o.numeroOrden} a tu nombre.</p> : null}
++        {accion === "diagnostico" || accion === "reparacion" ? <>
++          <Field label={accion === "diagnostico" ? "Diagnóstico del equipo" : "Trabajo autorizado"} htmlFor="servicio-descripcion" requerido>
++            <TextArea id="servicio-descripcion" required maxLength={2000} rows={5} disabled={guardando} value={descripcion} onChange={e => setDescripcion(e.target.value)} /></Field>
++          <Field label={accion === "diagnostico" ? "Mano de obra estimada (Q)" : "Mano de obra acordada (Q)"} htmlFor="servicio-costo" requerido hint="Importe de mano de obra. Los repuestos se registran por separado.">
++            <TextInput id="servicio-costo" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={costo} onChange={e => setCosto(e.target.value)} /></Field>
++          {accion === "reparacion" ? <Field label="Autorización del cliente" htmlFor="servicio-autorizacion" requerido hint="Indicá quién autorizó, la fecha y el medio de contacto.">
++            <TextArea id="servicio-autorizacion" required maxLength={500} rows={3} disabled={guardando} value={autorizacion} onChange={e => setAutorizacion(e.target.value)} /></Field> : null}
++          <Alert tono="info">Revisá los datos antes de guardar. El registro se conserva como parte del historial del servicio.</Alert>
++        </> : null}
++        {accion === "actividad" ? <>
++          {catActividades.isLoading ? <LoadingState titulo="Cargando catálogo de actividades…" /> : catActividades.isError ?
++            <Alert tono="danger" accion={<Button onClick={() => catActividades.refetch()}>Reintentar</Button>}>{mensajeDeError(catActividades.error)}</Alert> :
++            <Field label="Actividad" htmlFor="servicio-actividad" requerido><SelectInput id="servicio-actividad" required disabled={guardando} value={actividadId} onChange={e => setActividadId(e.target.value)}>
++              <option value="">Elegir actividad</option>{pendientes.map(a => <option key={a.actividadId} value={a.actividadId}>{a.nombre}</option>)}
++            </SelectInput></Field>}
++          {catActividades.isSuccess && pendientes.length === 0 ? <Alert tono="info">No hay actividades activas pendientes para esta reparación.</Alert> : null}
++          <Field label="Trabajo realizado / observación" htmlFor="servicio-observacion"><TextArea id="servicio-observacion" maxLength={500} rows={3} disabled={guardando} value={observacion} onChange={e => setObservacion(e.target.value)} /></Field>
++        </> : null}
++        {accion === "repuesto" ? <>
++          <Button disabled={guardando || catRepuestos.isFetching} onClick={() => { setConfirmado(false); void catRepuestos.refetch(); }}>Actualizar existencias y precios</Button>
++          {catRepuestos.isLoading ? <LoadingState titulo="Cargando existencias…" /> : catRepuestos.isError ? <Alert tono="danger">{mensajeDeError(catRepuestos.error)}</Alert> :
++            <Field label="Repuesto y bodega" htmlFor="servicio-repuesto" requerido><SelectInput id="servicio-repuesto" required disabled={guardando || catRepuestos.isFetching} value={repuestoKey} onChange={e => { setRepuestoKey(e.target.value); setConfirmado(false); }}>
++              <option value="">Elegir repuesto disponible</option>{catRepuestos.data?.map(r => <option key={`${r.bodegaId}:${r.repuestoId}`} value={`${r.bodegaId}:${r.repuestoId}`} disabled={r.existencia <= 0}>
++                {r.codigo} · {r.nombre} · {r.bodega} · {r.existencia} disponibles · {moneda(r.precioUnitario)} c/u
++              </option>)}
++            </SelectInput></Field>}
++          <Field label="Cantidad utilizada" htmlFor="servicio-cantidad" requerido><TextInput id="servicio-cantidad" type="number" required min="1" step="1" max={seleccionado ? Math.min(seleccionado.existencia, 2147483647) : 2147483647}
++            disabled={guardando} value={cantidad} onChange={e => { setCantidad(e.target.value); setConfirmado(false); }} /></Field>
++          {seleccionado ? <p>Precio unitario: {moneda(seleccionado.precioUnitario)}. Existencia consultada: {seleccionado.existencia} unidades en {seleccionado.bodega}.</p> : null}
++          <Alert tono="info">Al confirmar se registrará el consumo y se descontarán las unidades de la bodega seleccionada.</Alert>
++        </> : null}
++        {accion === "cierre" ? <>
++          <p>Se finalizará el trabajo de {o.numeroOrden} y la orden pasará a LISTO.</p>
++          <dl className="tc-dl"><dt>Actividades registradas</dt><dd>{actividades.data?.length ?? "—"}</dd><dt>Líneas de repuestos</dt><dd>{repuestos.data?.length ?? "—"}</dd>
++            <dt>Mano de obra</dt><dd>{moneda(o.costoManoObra)}</dd></dl>
++          <Alert tono="info">Verificá que todas las actividades y los repuestos estén registrados. El cierre conserva el expediente y termina la edición del trabajo técnico.</Alert>
++        </> : null}
++        {["diagnostico", "reparacion", "repuesto", "cierre"].includes(accion) ? <label className="tc-row" style={{ alignItems: "flex-start" }}>
++          <input type="checkbox" required disabled={guardando} checked={confirmado} onChange={e => setConfirmado(e.target.checked)} />
++          <span>{accion === "reparacion" ? "Confirmo los datos y que el cliente autorizó este trabajo y su mano de obra." : accion === "cierre" ? "Confirmo que el trabajo terminó y el expediente está completo." : "Revisé los datos y confirmo el registro."}</span>
++        </label> : null}
++        <div className="tc-row tc-row--end"><Button disabled={guardando} onClick={() => setAccion(null)}>Volver</Button>
++          <Button type="submit" variante="primario" disabled={ocupado}>{guardando ? "Guardando…" : TITULOS[accion]}</Button></div>
++      </form>
++    </Dialog> : null}
++  </div>;
++}
+diff --git a/frontend/src/features/ordenes/ordenes.css b/frontend/src/features/ordenes/ordenes.css
+index 6cbfe7d..dcbbe5d 100644
+--- a/frontend/src/features/ordenes/ordenes.css
++++ b/frontend/src/features/ordenes/ordenes.css
+@@ -1,4 +1,5 @@
+ .tc-ordenes .tc-dl dd { min-width: 0; overflow-wrap: anywhere; }
++.tc-servicio-texto { white-space: pre-wrap; overflow-wrap: anywhere; }
+ @media (max-width: 640px) {
+   .tc-ordenes .tc-dl { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
+   .tc-ordenes .tc-dl dd { margin: 0 0 12px; }
+diff --git a/frontend/src/services/servicioTecnico.ts b/frontend/src/services/servicioTecnico.ts
+new file mode 100644
+index 0000000..4fad3de
+--- /dev/null
++++ b/frontend/src/services/servicioTecnico.ts
+@@ -0,0 +1,30 @@
++import { http } from "./http";
++import type { Orden } from "./ordenes";
++
++export interface ActividadDisponible { actividadId: number; nombre: string }
++export interface ActividadRealizada extends ActividadDisponible { fecha: string; observacion: string | null }
++export interface RepuestoDisponible {
++  bodegaId: number; bodega: string; repuestoId: number; codigo: string; nombre: string;
++  existencia: number; precioUnitario: number;
++}
++export interface RepuestoUsado {
++  linea: number; repuestoId: number; codigo: string; nombre: string; bodegaId: number; bodega: string;
++  cantidad: number; precioUnitario: number; importe: number; movimientoId: number | null; fecha: string | null;
++}
++export const servicioTecnicoApi = {
++  iniciarDiagnostico: (id: number) => http.post<Orden>(`/ordenes/${id}/diagnostico/inicio`),
++  diagnosticar: (id: number, descripcion: string, costoEstimado: number) =>
++    http.post<Orden>(`/ordenes/${id}/diagnostico`, { descripcion, costoEstimado }),
++  reparar: (id: number, descripcionTrabajo: string, costoManoObra: number, autorizacion: string) =>
++    http.post<Orden>(`/ordenes/${id}/reparacion`, { descripcionTrabajo, costoManoObra, autorizacion }),
++  actividades: (id: number, signal?: AbortSignal) => http.get<ActividadRealizada[]>(`/ordenes/${id}/actividades`, signal),
++  agregarActividad: (id: number, actividadId: number, observacion: string) =>
++    http.post<Orden>(`/ordenes/${id}/actividades`, { actividadId, observacion }),
++  repuestos: (id: number, signal?: AbortSignal) => http.get<RepuestoUsado[]>(`/ordenes/${id}/repuestos`, signal),
++  consumir: (id: number, repuesto: RepuestoDisponible, cantidad: number) =>
++    http.post<Orden>(`/ordenes/${id}/repuestos`, { bodegaId: repuesto.bodegaId, repuestoId: repuesto.repuestoId,
++      cantidad, precioUnitarioEsperado: repuesto.precioUnitario }),
++  catalogoActividades: (id: number, signal?: AbortSignal) => http.get<ActividadDisponible[]>(`/ordenes/${id}/catalogos/actividades`, signal),
++  catalogoRepuestos: (id: number, signal?: AbortSignal) => http.get<RepuestoDisponible[]>(`/ordenes/${id}/catalogos/repuestos`, signal),
++  finalizar: (id: number) => http.post<Orden>(`/ordenes/${id}/reparacion/cierre`),
++};

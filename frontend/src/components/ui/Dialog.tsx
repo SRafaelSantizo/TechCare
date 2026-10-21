@@ -21,6 +21,8 @@ export function Dialog({
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const previoRef = useRef<HTMLElement | null>(null);
+  const cerrarRef = useRef(onCerrar);
+  cerrarRef.current = onCerrar;
   const reduce = useReducedMotion();
 
   useEffect(() => {
@@ -34,7 +36,7 @@ export function Dialog({
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onCerrar();
+        cerrarRef.current();
       }
       if (e.key === "Tab" && panel) {
         const focusables = panel.querySelectorAll<HTMLElement>(
@@ -59,7 +61,7 @@ export function Dialog({
       document.removeEventListener("keydown", onKey, true);
       previoRef.current?.focus();
     };
-  }, [abierto, onCerrar]);
+  }, [abierto]);
 
   if (!abierto) return null;
 
