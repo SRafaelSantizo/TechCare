@@ -1,5 +1,12 @@
 package com.techcare.backend;
 
+import com.techcare.backend.seguridad.UsuarioAutenticado;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.web.method.support.HandlerMethodArgumentResolver;
+import org.springframework.web.method.support.ModelAndViewContainer;
+import org.springframework.core.MethodParameter;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.bind.support.WebDataBinderFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -34,6 +41,12 @@ class EquipoControllerTests {
         LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
         validator.afterPropertiesSet();
         mvc = MockMvcBuilders.standaloneSetup(new EquipoController(jdbc), new CatalogoEquipoController(jdbc))
+                .setCustomArgumentResolvers(new HandlerMethodArgumentResolver() {
+                    public boolean supportsParameter(MethodParameter p) { return p.hasParameterAnnotation(AuthenticationPrincipal.class); }
+                    public Object resolveArgument(MethodParameter p, ModelAndViewContainer c, NativeWebRequest r, WebDataBinderFactory b) {
+                        return new UsuarioAutenticado(42, "recepcion", "Recepción", "EMP-42", List.of("RECEPCION"), true, null);
+                    }
+                })
                 .setControllerAdvice(new EquipoApiErrores()).setValidator(validator).build();
     }
 
@@ -140,13 +153,14 @@ class EquipoControllerTests {
 
     @Test
     void historialVacioEs200YNoFilaNula() throws Exception {
-        when(jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", 7)).thenReturn(List.of());
+        when(jdbc.queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", 42, 7)).thenReturn(List.of());
         mvc.perform(get("/api/equipos/7/historial")).andExpect(status().isOk()).andExpect(content().json("[]"));
+        verify(jdbc).queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", 42, 7);
     }
 
     @Test
     void historialDeEquipoInexistenteEs404() throws Exception {
-        when(jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", 7)).thenThrow(fallo(new SQLException("No existe", "S0001", 51302)));
+        when(jdbc.queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", 42, 7)).thenThrow(fallo(new SQLException("No existe", "S0001", 51302)));
         mvc.perform(get("/api/equipos/7/historial")).andExpect(status().isNotFound());
     }
 

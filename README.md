@@ -2,7 +2,7 @@
 
 Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional,
 normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
-Clientes y Equipos tienen API e interfaz conectadas. El acceso usa las cuentas y
+Clientes, Equipos y recepción de Órdenes tienen API e interfaz conectadas. El acceso usa las cuentas y
 roles de la BD, con login, sesión y cierre de sesión. Los demás módulos y manuales
 con capturas aún deben completarse.
 
@@ -10,11 +10,19 @@ Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACIO
 La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
 las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
 Una instalación nueva con un maestro anterior debe incluir también las
-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso) y 13 (Usuarios).
+actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios) y 16 (Órdenes).
 
 Administración permite consultar y registrar cuentas, empleados y roles desde
 una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
 En una base existente se ejecuta `13_Usuarios_Procedimientos.sql` una vez.
+
+Órdenes permite registrar ingresos, consultar el expediente y su historial,
+asignar técnicos antes del diagnóstico y cancelar cuando el estado lo permite.
+Instalación: [INTEGRACION_ORDENES.md](INTEGRACION_ORDENES.md).
+En una base existente se ejecuta `16_Ordenes_Procedimientos.sql` una vez.
+Los técnicos sin otros roles consultan únicamente sus órdenes, también desde el
+historial de Equipos. Registrar diagnósticos, reparaciones y cobros desde la API
+queda pendiente de las siguientes integraciones.
 
 ## Ejecución desde cero
 
@@ -43,7 +51,7 @@ TasaImpuesto es una tasa de prueba configurable (0.1200); no constituye configur
 
 ## Decisiones que debe conocer el equipo
 
-- **35 tablas** útiles. Cliente -> Equipo -> Orden determina el propietario. Orden
+- **35 tablas originales**, más AsignacionOrden en la actualización 16. Cliente -> Equipo -> Orden determina el propietario. Orden
   no repite ClienteID; `vOrdenResumen` lo presenta mediante JOIN y preserva 3FN.
   No se permite cambiar propietario, serie ni modelo de un equipo con órdenes.
 - **Un diagnóstico consolidado y una reparación por orden.** Las revisiones del

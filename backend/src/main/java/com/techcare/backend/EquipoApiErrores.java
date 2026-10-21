@@ -43,6 +43,8 @@ public class EquipoApiErrores {
                         return error(HttpStatus.BAD_REQUEST, actual.getMessage());
                     case 51302:
                         return error(HttpStatus.NOT_FOUND, "El equipo no existe.");
+                    case 51604:
+                        return error(HttpStatus.FORBIDDEN, "Tu usuario no tiene permiso para consultar este historial.");
                     case 51303:
                     case 2601:
                     case 2627:

@@ -1,5 +1,6 @@
 package com.techcare.backend;
 
+import com.techcare.backend.seguridad.UsuarioAutenticado;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -8,6 +9,7 @@ import jakarta.validation.constraints.Size;
 import org.springframework.dao.DataRetrievalFailureException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
@@ -37,8 +39,8 @@ public class EquipoController {
     }
 
     @GetMapping("/{id}/historial")
-    public List<Map<String, Object>> historial(@PathVariable("id") int id) {
-        return jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", id);
+    public List<Map<String, Object>> historial(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable("id") int id) {
+        return jdbc.queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", actor.getUsuarioId(), id);
     }
 
     @PostMapping

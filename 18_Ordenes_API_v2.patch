@@ -1,0 +1,2274 @@
+diff --git a/16_Ordenes_Procedimientos.sql b/16_Ordenes_Procedimientos.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..f93337ae5c58667b9d2353d3ec9f3fc121b3f035
+--- /dev/null
++++ b/16_Ordenes_Procedimientos.sql
+@@ -0,0 +1,330 @@
++-- Actualización de Órdenes para una base TechCare existente. No borra datos.
++-- Ejecutar completo una vez en SSMS. Puede repetirse sin reiniciar la numeración.
++USE [TechCare];
++GO
++SET NOCOUNT ON;
++SET XACT_ABORT ON;
++IF OBJECT_ID(N'dbo.OrdenServicio', N'U') IS NULL
++   OR OBJECT_ID(N'dbo.spCrearOrden', N'P') IS NULL
++   OR DATABASE_PRINCIPAL_ID(N'techcare_app') IS NULL
++    THROW 51690, N'Primero instalá la base TechCare y sus procedimientos originales.', 1;
++GO
++
++IF OBJECT_ID(N'dbo.SecuenciaOrden', N'SO') IS NULL
++    EXEC(N'CREATE SEQUENCE dbo.SecuenciaOrden AS bigint START WITH 1 INCREMENT BY 1 NO CYCLE;');
++GO
++
++-- Cada asignación es un evento. La última determina el responsable antes del diagnóstico.
++IF OBJECT_ID(N'dbo.AsignacionOrden', N'U') IS NULL
++BEGIN
++    CREATE TABLE dbo.AsignacionOrden (
++        AsignacionID bigint IDENTITY(1,1) NOT NULL CONSTRAINT PK_AsignacionOrden PRIMARY KEY,
++        OrdenID int NOT NULL CONSTRAINT FK_AsignacionOrden_Orden REFERENCES dbo.OrdenServicio(OrdenID),
++        UsuarioTecnicoID int NOT NULL CONSTRAINT FK_AsignacionOrden_Tecnico REFERENCES dbo.Usuario(UsuarioID),
++        UsuarioAsignaID int NOT NULL CONSTRAINT FK_AsignacionOrden_Actor REFERENCES dbo.Usuario(UsuarioID),
++        Fecha datetime2(0) NOT NULL CONSTRAINT DF_AsignacionOrden_Fecha DEFAULT SYSUTCDATETIME(),
++        Observacion nvarchar(500) NULL
++    );
++    CREATE INDEX IX_AsignacionOrden_Ultima ON dbo.AsignacionOrden(OrdenID, AsignacionID DESC)
++        INCLUDE(UsuarioTecnicoID);
++END;
++GO
++
++CREATE OR ALTER TRIGGER dbo.trAsignacionOrdenInmutable ON dbo.AsignacionOrden
++AFTER UPDATE, DELETE AS
++BEGIN
++    SET NOCOUNT ON;
++    IF EXISTS (SELECT 1 FROM deleted)
++        THROW 51603, N'El historial de asignaciones no se modifica ni se elimina.', 1;
++END;
++GO
++
++-- También presenta órdenes anteriores a esta actualización, usando su técnico histórico.
++CREATE OR ALTER VIEW dbo.vOrdenAcceso AS
++SELECT o.OrdenID, o.NumeroOrden, o.EquipoID, e.NumeroSerie, e.Descripcion AS EquipoDescripcion,
++       mo.Nombre AS Modelo, ma.Nombre AS Marca, c.ClienteID, c.Nombre AS Cliente, c.NIT,
++       o.UsuarioRecepcionID, er.Nombres + N' ' + er.Apellidos AS Recepcionista,
++       o.FechaIngreso, o.ProblemaReportado, o.PrioridadCodigo, p.Nombre AS Prioridad,
++       o.EstadoCodigo, es.Nombre AS Estado, es.EsFinal, o.FechaEstimada, o.Observaciones,
++       COALESCE(r.UsuarioTecnicoID, d.UsuarioTecnicoID, a.UsuarioTecnicoID) AS UsuarioTecnicoID,
++       et.Nombres + N' ' + et.Apellidos AS Tecnico,
++       d.DiagnosticoID, d.Fecha AS FechaDiagnostico, d.Descripcion AS DescripcionDiagnostico,
++       d.CostoManoObraEstimado AS CostoEstimado,
++       r.ReparacionID, r.FechaInicio AS FechaInicioReparacion, r.FechaFin AS FechaFinReparacion,
++       r.DescripcionTrabajo, r.CostoManoObra, r.Estado AS EstadoReparacion
++FROM dbo.OrdenServicio o
++JOIN dbo.Equipo e ON e.EquipoID = o.EquipoID
++JOIN dbo.Cliente c ON c.ClienteID = e.ClienteID
++JOIN dbo.ModeloEquipo mo ON mo.ModeloEquipoID = e.ModeloEquipoID
++JOIN dbo.Marca ma ON ma.MarcaID = mo.MarcaID
++JOIN dbo.Usuario ur ON ur.UsuarioID = o.UsuarioRecepcionID
++JOIN dbo.Empleado er ON er.EmpleadoID = ur.EmpleadoID
++JOIN dbo.Prioridad p ON p.Codigo = o.PrioridadCodigo
++JOIN dbo.EstadoOrden es ON es.Codigo = o.EstadoCodigo
++LEFT JOIN dbo.Diagnostico d ON d.OrdenID = o.OrdenID
++LEFT JOIN dbo.Reparacion r ON r.DiagnosticoID = d.DiagnosticoID
++OUTER APPLY (SELECT TOP (1) ax.UsuarioTecnicoID FROM dbo.AsignacionOrden ax
++             WHERE ax.OrdenID = o.OrdenID ORDER BY ax.AsignacionID DESC) a
++LEFT JOIN dbo.Usuario ut ON ut.UsuarioID = COALESCE(r.UsuarioTecnicoID, d.UsuarioTecnicoID, a.UsuarioTecnicoID)
++LEFT JOIN dbo.Empleado et ON et.EmpleadoID = ut.EmpleadoID;
++GO
++
++CREATE OR ALTER FUNCTION dbo.fnPuedeConsultarOrden(@UsuarioID int, @OrdenID int)
++RETURNS bit AS
++BEGIN
++    RETURN CASE WHEN EXISTS (SELECT 1 FROM dbo.vOrdenAcceso o WHERE o.OrdenID = @OrdenID AND (
++        dbo.fnTieneRol(@UsuarioID, 'RECEPCION') = 1 OR dbo.fnTieneRol(@UsuarioID, 'CAJA') = 1
++        OR (dbo.fnTieneRol(@UsuarioID, 'TECNICO') = 1 AND o.UsuarioTecnicoID = @UsuarioID)))
++        THEN 1 ELSE 0 END;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spValidarActorOrden @UsuarioActorID int, @Escritura bit = 0 AS
++BEGIN
++    SET NOCOUNT ON;
++    IF dbo.fnTieneRol(@UsuarioActorID, 'RECEPCION') = 1 RETURN;
++    IF @Escritura = 0 AND (dbo.fnTieneRol(@UsuarioActorID, 'TECNICO') = 1
++                          OR dbo.fnTieneRol(@UsuarioActorID, 'CAJA') = 1) RETURN;
++    THROW 51604, N'Tu usuario no tiene permiso para esta operación de órdenes.', 1;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spListarOrdenes
++    @UsuarioActorID int, @Buscar nvarchar(max) = NULL, @Estado nvarchar(max) = NULL,
++    @Prioridad nvarchar(max) = NULL, @TecnicoID int = NULL,
++    @Desde datetime2(0) = NULL, @HastaExclusiva datetime2(0) = NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarActorOrden @UsuarioActorID;
++    SET @Buscar = NULLIF(LTRIM(RTRIM(@Buscar)), N'');
++    SET @Estado = NULLIF(LTRIM(RTRIM(@Estado)), N'');
++    SET @Prioridad = NULLIF(LTRIM(RTRIM(@Prioridad)), N'');
++    IF DATALENGTH(@Buscar) > 300 OR @TecnicoID < 0
++       OR (@Desde IS NOT NULL AND @HastaExclusiva IS NOT NULL AND @Desde >= @HastaExclusiva)
++        THROW 51600, N'Revisá los filtros de búsqueda y las fechas.', 1;
++    IF @Estado IS NOT NULL AND (DATALENGTH(@Estado) > 60
++       OR NOT EXISTS (SELECT 1 FROM dbo.EstadoOrden WHERE Codigo = @Estado))
++        THROW 51600, N'El estado del filtro no existe.', 1;
++    IF @Prioridad IS NOT NULL AND (DATALENGTH(@Prioridad) > 20
++       OR NOT EXISTS (SELECT 1 FROM dbo.Prioridad WHERE Codigo = @Prioridad))
++        THROW 51600, N'La prioridad del filtro no existe.', 1;
++    SELECT * FROM dbo.vOrdenAcceso o
++    WHERE dbo.fnPuedeConsultarOrden(@UsuarioActorID, o.OrdenID) = 1
++      AND (@Buscar IS NULL OR CHARINDEX(@Buscar, o.NumeroOrden) > 0
++           OR CHARINDEX(@Buscar, o.Cliente) > 0 OR CHARINDEX(@Buscar, o.NIT) > 0
++           OR CHARINDEX(@Buscar, o.NumeroSerie) > 0)
++      AND (@Estado IS NULL OR o.EstadoCodigo = @Estado)
++      AND (@Prioridad IS NULL OR o.PrioridadCodigo = @Prioridad)
++      AND (@TecnicoID IS NULL OR (@TecnicoID = 0 AND o.UsuarioTecnicoID IS NULL) OR o.UsuarioTecnicoID = @TecnicoID)
++      AND (@Desde IS NULL OR o.FechaIngreso >= @Desde)
++      AND (@HastaExclusiva IS NULL OR o.FechaIngreso < @HastaExclusiva)
++    ORDER BY o.FechaIngreso DESC, o.OrdenID DESC;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spConsultarOrden @UsuarioActorID int, @OrdenID int AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarActorOrden @UsuarioActorID;
++    IF @OrdenID IS NULL OR @OrdenID <= 0 THROW 51600, N'El ID de orden debe ser mayor que cero.', 1;
++    -- Una orden ajena y una inexistente tienen la misma respuesta.
++    IF dbo.fnPuedeConsultarOrden(@UsuarioActorID, @OrdenID) = 0
++        THROW 51602, N'La orden no existe o no está disponible para tu usuario.', 1;
++    SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID
++      AND dbo.fnPuedeConsultarOrden(@UsuarioActorID, OrdenID) = 1;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spRegistrarOrden
++    @UsuarioActorID int, @EquipoID int, @Problema nvarchar(max), @Prioridad nvarchar(max),
++    @FechaEstimada datetime2(0) = NULL, @Observaciones nvarchar(max) = NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @OrdenID int, @Numero varchar(30), @Fecha datetime2(0) = SYSUTCDATETIME(), @Lock int;
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIRegistrarOrden;
++        EXEC dbo.spValidarActorOrden @UsuarioActorID, 1;
++        SET @Problema = NULLIF(LTRIM(RTRIM(@Problema)), N'');
++        SET @Prioridad = NULLIF(LTRIM(RTRIM(@Prioridad)), N'');
++        SET @Observaciones = NULLIF(LTRIM(RTRIM(@Observaciones)), N'');
++        IF @Problema IS NULL OR DATALENGTH(@Problema) > 2000
++            THROW 51600, N'El problema es obligatorio y admite hasta 1000 caracteres.', 1;
++        IF DATALENGTH(@Observaciones) > 2000
++            THROW 51600, N'Las observaciones admiten hasta 1000 caracteres.', 1;
++        IF @Prioridad IS NULL OR DATALENGTH(@Prioridad) > 20
++           OR NOT EXISTS (SELECT 1 FROM dbo.Prioridad WHERE Codigo = @Prioridad)
++            THROW 51601, N'Elegí una prioridad válida.', 1;
++        IF @FechaEstimada < @Fecha
++            THROW 51600, N'La fecha estimada no puede ser anterior al ingreso.', 1;
++        SELECT @Lock = e.EquipoID FROM dbo.Equipo e WITH (HOLDLOCK)
++        JOIN dbo.Cliente c WITH (HOLDLOCK) ON c.ClienteID = e.ClienteID
++        WHERE e.EquipoID = @EquipoID AND e.Activo = 1 AND c.Activo = 1;
++        IF @Lock IS NULL THROW 51601, N'El equipo o su cliente no existe o está inactivo.', 1;
++        -- La secuencia no se reinicia al repetir este script. Sus huecos son normales.
++        WHILE 1 = 1
++        BEGIN
++            SET @Numero = 'TC-' + CONVERT(varchar(20), NEXT VALUE FOR dbo.SecuenciaOrden);
++            IF NOT EXISTS (SELECT 1 FROM dbo.OrdenServicio WITH (UPDLOCK, HOLDLOCK) WHERE NumeroOrden = @Numero) BREAK;
++        END;
++        EXEC dbo.spCrearOrden @NumeroOrden = @Numero, @EquipoID = @EquipoID,
++            @UsuarioID = @UsuarioActorID, @Problema = @Problema, @OrdenID = @OrdenID OUTPUT,
++            @Prioridad = @Prioridad, @Fecha = @Fecha, @FechaEstimada = @FechaEstimada,
++            @Observaciones = @Observaciones;
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APIRegistrarOrden;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spAsignarTecnicoOrden
++    @UsuarioActorID int, @OrdenID int, @UsuarioTecnicoID int,
++    @TecnicoAnteriorID int = NULL, @Observacion nvarchar(max) = NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @Estado varchar(30), @Actual int;
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIAsignarTecnico;
++        EXEC dbo.spValidarActorOrden @UsuarioActorID, 1;
++        IF @OrdenID IS NULL OR @OrdenID <= 0 THROW 51600, N'El ID de orden debe ser mayor que cero.', 1;
++        SET @Observacion = NULLIF(LTRIM(RTRIM(@Observacion)), N'');
++        IF DATALENGTH(@Observacion) > 1000 THROW 51600, N'La observación admite hasta 500 caracteres.', 1;
++        SELECT @Estado = EstadoCodigo FROM dbo.OrdenServicio WITH (UPDLOCK, HOLDLOCK) WHERE OrdenID = @OrdenID;
++        IF @Estado IS NULL THROW 51602, N'La orden no existe o no está disponible para tu usuario.', 1;
++        IF @Estado NOT IN ('RECIBIDO', 'DIAGNOSTICO')
++           OR EXISTS (SELECT 1 FROM dbo.Diagnostico WHERE OrdenID = @OrdenID)
++            THROW 51603, N'Solo se asigna o reasigna antes de registrar el diagnóstico.', 1;
++        SELECT @Actual = UsuarioTecnicoID FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++        IF ISNULL(@Actual, 0) <> ISNULL(@TecnicoAnteriorID, 0)
++            THROW 51603, N'La asignación cambió. Actualizá la orden y volvé a intentar.', 1;
++        IF @Actual = @UsuarioTecnicoID THROW 51603, N'El técnico ya está asignado a esta orden.', 1;
++        IF NOT EXISTS (SELECT 1 FROM dbo.Usuario u WITH (HOLDLOCK)
++            JOIN dbo.Empleado e WITH (HOLDLOCK) ON e.EmpleadoID = u.EmpleadoID
++            JOIN dbo.UsuarioRol ur WITH (HOLDLOCK) ON ur.UsuarioID = u.UsuarioID AND ur.RolCodigo = 'TECNICO'
++            WHERE u.UsuarioID = @UsuarioTecnicoID AND u.Activo = 1 AND e.Activo = 1)
++            THROW 51601, N'Elegí un usuario y empleado activos con rol TECNICO.', 1;
++        INSERT dbo.AsignacionOrden(OrdenID, UsuarioTecnicoID, UsuarioAsignaID, Observacion)
++            VALUES (@OrdenID, @UsuarioTecnicoID, @UsuarioActorID, @Observacion);
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APIAsignarTecnico;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spCancelarOrden
++    @UsuarioActorID int, @OrdenID int, @Motivo nvarchar(max)
++AS
++BEGIN
++    SET NOCOUNT ON;
++    SET XACT_ABORT ON;
++    DECLARE @Propia bit = CASE WHEN @@TRANCOUNT = 0 THEN 1 ELSE 0 END;
++    DECLARE @Estado varchar(30);
++    BEGIN TRY
++        IF @Propia = 1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APICancelarOrden;
++        EXEC dbo.spValidarActorOrden @UsuarioActorID, 1;
++        IF @OrdenID IS NULL OR @OrdenID <= 0 THROW 51600, N'El ID de orden debe ser mayor que cero.', 1;
++        SET @Motivo = NULLIF(LTRIM(RTRIM(@Motivo)), N'');
++        IF @Motivo IS NULL OR DATALENGTH(@Motivo) > 1000
++            THROW 51600, N'El motivo es obligatorio y admite hasta 500 caracteres.', 1;
++        SELECT @Estado = EstadoCodigo FROM dbo.OrdenServicio WITH (UPDLOCK, HOLDLOCK) WHERE OrdenID = @OrdenID;
++        IF @Estado IS NULL THROW 51602, N'La orden no existe o no está disponible para tu usuario.', 1;
++        IF NOT EXISTS (SELECT 1 FROM dbo.TransicionEstadoOrden WHERE EstadoOrigen = @Estado AND EstadoDestino = 'CANCELADO')
++            THROW 51603, N'El estado actual no permite cancelar esta orden.', 1;
++        EXEC dbo.spCambiarEstadoOrden @OrdenID, 'CANCELADO', @UsuarioActorID, @Motivo;
++        IF @Propia = 1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vOrdenAcceso WHERE OrdenID = @OrdenID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia = 1 AND XACT_STATE() <> 0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia = 0 AND XACT_STATE() = 1 ROLLBACK TRANSACTION APICancelarOrden;
++        THROW;
++    END CATCH;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spHistorialOrden @UsuarioActorID int, @OrdenID int AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarActorOrden @UsuarioActorID;
++    IF @OrdenID IS NULL OR @OrdenID <= 0 THROW 51600, N'El ID de orden debe ser mayor que cero.', 1;
++    IF dbo.fnPuedeConsultarOrden(@UsuarioActorID, @OrdenID) = 0
++        THROW 51602, N'La orden no existe o no está disponible para tu usuario.', 1;
++    -- El relleno conserva el orden numérico de los eventos que comparten segundo.
++    SELECT 'E-' + RIGHT(REPLICATE('0', 20) + CONVERT(varchar(20), h.HistorialID), 20) AS EventoID, 'ESTADO' AS Tipo,
++           h.Fecha, u.NombreUsuario AS Usuario, e.Nombres + N' ' + e.Apellidos AS NombreUsuario,
++           h.EstadoAnterior, h.EstadoNuevo, CAST(NULL AS nvarchar(161)) AS Tecnico, h.Observacion
++    FROM dbo.HistorialEstadoOrden h
++    JOIN dbo.Usuario u ON u.UsuarioID = h.UsuarioID JOIN dbo.Empleado e ON e.EmpleadoID = u.EmpleadoID
++    WHERE h.OrdenID = @OrdenID AND dbo.fnPuedeConsultarOrden(@UsuarioActorID, h.OrdenID) = 1
++    UNION ALL
++    SELECT 'A-' + RIGHT(REPLICATE('0', 20) + CONVERT(varchar(20), a.AsignacionID), 20), 'ASIGNACION', a.Fecha,
++           u.NombreUsuario, e.Nombres + N' ' + e.Apellidos, NULL, NULL,
++           et.Nombres + N' ' + et.Apellidos, a.Observacion
++    FROM dbo.AsignacionOrden a
++    JOIN dbo.Usuario u ON u.UsuarioID = a.UsuarioAsignaID JOIN dbo.Empleado e ON e.EmpleadoID = u.EmpleadoID
++    JOIN dbo.Usuario ut ON ut.UsuarioID = a.UsuarioTecnicoID JOIN dbo.Empleado et ON et.EmpleadoID = ut.EmpleadoID
++    WHERE a.OrdenID = @OrdenID AND dbo.fnPuedeConsultarOrden(@UsuarioActorID, a.OrdenID) = 1
++    ORDER BY Fecha, Tipo DESC, EventoID;
++END;
++GO
++
++CREATE OR ALTER PROCEDURE dbo.spCatalogosOrden @UsuarioActorID int, @Catalogo varchar(15) AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarActorOrden @UsuarioActorID;
++    IF @Catalogo = 'estados' SELECT Codigo, Nombre, EsFinal FROM dbo.EstadoOrden ORDER BY Codigo;
++    ELSE IF @Catalogo = 'prioridades' SELECT Codigo, Nombre, Nivel FROM dbo.Prioridad ORDER BY Nivel;
++    ELSE IF @Catalogo = 'tecnicos'
++    BEGIN
++        EXEC dbo.spValidarActorOrden @UsuarioActorID, 1;
++        SELECT u.UsuarioID, e.Codigo AS EmpleadoCodigo, e.Nombres + N' ' + e.Apellidos AS Nombre
++        FROM dbo.Usuario u JOIN dbo.Empleado e ON e.EmpleadoID = u.EmpleadoID
++        WHERE u.Activo = 1 AND e.Activo = 1
++          AND EXISTS (SELECT 1 FROM dbo.UsuarioRol ur WHERE ur.UsuarioID = u.UsuarioID AND ur.RolCodigo = 'TECNICO')
++        ORDER BY e.Nombres, e.Apellidos, u.UsuarioID;
++    END
++    ELSE THROW 51600, N'El catálogo solicitado no existe.', 1;
++END;
++GO
++
++-- Impide que el historial de Equipos eluda los permisos de consulta de Órdenes.
++CREATE OR ALTER PROCEDURE dbo.spHistorialEquipoAcceso @UsuarioActorID int, @EquipoID int AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarActorOrden @UsuarioActorID;
++    IF @EquipoID IS NULL OR @EquipoID <= 0 THROW 51300, N'El ID debe ser mayor que cero.', 1;
++    IF NOT EXISTS (SELECT 1 FROM dbo.Equipo WHERE EquipoID = @EquipoID) THROW 51302, N'El equipo no existe.', 1;
++    SELECT h.* FROM dbo.vHistorialEquipo h
++    WHERE h.EquipoID = @EquipoID AND h.OrdenID IS NOT NULL
++      AND dbo.fnPuedeConsultarOrden(@UsuarioActorID, h.OrdenID) = 1
++    ORDER BY h.FechaIngreso DESC, h.OrdenID DESC;
++END;
++GO
++
++DENY INSERT, UPDATE, DELETE ON dbo.AsignacionOrden TO techcare_app;
++GRANT SELECT ON dbo.vOrdenAcceso TO techcare_app;
++GRANT EXECUTE ON dbo.spListarOrdenes TO techcare_app;
++GRANT EXECUTE ON dbo.spConsultarOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spRegistrarOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spAsignarTecnicoOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spCancelarOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spHistorialOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spCatalogosOrden TO techcare_app;
++GRANT EXECUTE ON dbo.spHistorialEquipoAcceso TO techcare_app;
++GO
+diff --git a/17_Pruebas_Ordenes.sql b/17_Pruebas_Ordenes.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..a76ea303d649a679fd3f9b9eb75e1124f0d82598
+--- /dev/null
++++ b/17_Pruebas_Ordenes.sql
+@@ -0,0 +1,228 @@
++-- Pruebas opcionales. Ejecutar después del 16, sin transacciones abiertas.
++-- Cada caso revierte todos sus datos. Identidades y secuencias pueden dejar huecos.
++USE [TechCare];
++GO
++SET NOCOUNT ON;
++SET XACT_ABORT ON;
++IF @@TRANCOUNT <> 0 THROW 51990, N'Ejecutá estas pruebas sin una transacción abierta.', 1;
++IF OBJECT_ID(N'dbo.spRegistrarOrden', N'P') IS NULL
++    THROW 51990, N'Ejecutá primero 16_Ordenes_Procedimientos.sql.', 1;
++DECLARE @Admin int = (SELECT TOP (1) UsuarioID FROM dbo.Usuario WHERE dbo.fnTieneRol(UsuarioID, 'ADMIN') = 1 ORDER BY UsuarioID);
++DECLARE @Modelo int = (SELECT TOP (1) ModeloEquipoID FROM dbo.ModeloEquipo ORDER BY ModeloEquipoID);
++DECLARE @Tipo int = (SELECT TOP (1) TipoClienteID FROM dbo.TipoCliente ORDER BY TipoClienteID);
++IF @Admin IS NULL OR @Modelo IS NULL OR @Tipo IS NULL
++    THROW 51990, N'Las pruebas requieren un ADMIN activo y catálogos de clientes y equipos.', 1;
++
++DECLARE @Ordenes bigint = (SELECT COUNT_BIG(*) FROM dbo.OrdenServicio),
++        @Historial bigint = (SELECT COUNT_BIG(*) FROM dbo.HistorialEstadoOrden),
++        @Asignaciones bigint = (SELECT COUNT_BIG(*) FROM dbo.AsignacionOrden),
++        @Clientes bigint = (SELECT COUNT_BIG(*) FROM dbo.Cliente),
++        @Equipos bigint = (SELECT COUNT_BIG(*) FROM dbo.Equipo),
++        @Usuarios bigint = (SELECT COUNT_BIG(*) FROM dbo.Usuario),
++        @Empleados bigint = (SELECT COUNT_BIG(*) FROM dbo.Empleado),
++        @Roles bigint = (SELECT COUNT_BIG(*) FROM dbo.UsuarioRol),
++        @Diagnosticos bigint = (SELECT COUNT_BIG(*) FROM dbo.Diagnostico);
++DECLARE @Casos TABLE (ID int PRIMARY KEY, Caso nvarchar(200), ErrorEsperado int, MensajeEsperado nvarchar(500));
++INSERT @Casos VALUES
++(1, N'Crear orden con Unicode, número propio e historial inicial único', 0, NULL),
++(2, N'Problema obligatorio', 51600, N'El problema es obligatorio y admite hasta 1000 caracteres.'),
++(3, N'Problema largo no se trunca silenciosamente', 51600, N'El problema es obligatorio y admite hasta 1000 caracteres.'),
++(4, N'Observaciones largas no se truncan', 51600, N'Las observaciones admiten hasta 1000 caracteres.'),
++(5, N'Prioridad inexistente', 51601, N'Elegí una prioridad válida.'),
++(6, N'Equipo inactivo', 51601, N'El equipo o su cliente no existe o está inactivo.'),
++(7, N'Cliente inactivo', 51601, N'El equipo o su cliente no existe o está inactivo.'),
++(8, N'Fecha estimada anterior al ingreso', 51600, N'La fecha estimada no puede ser anterior al ingreso.'),
++(9, N'BODEGA no puede crear órdenes', 51604, N'Tu usuario no tiene permiso para esta operación de órdenes.'),
++(10, N'BODEGA no puede listar órdenes', 51604, N'Tu usuario no tiene permiso para esta operación de órdenes.'),
++(11, N'Asignar técnico y limitar consulta a su usuario', 0, NULL),
++(12, N'Reasignar conserva los eventos y retira el acceso anterior', 0, NULL),
++(13, N'Rechazar responsable sin rol TECNICO', 51601, N'Elegí un usuario y empleado activos con rol TECNICO.'),
++(14, N'Rechazar técnico con cuenta inactiva', 51601, N'Elegí un usuario y empleado activos con rol TECNICO.'),
++(15, N'Rechazar técnico con empleado inactivo', 51601, N'Elegí un usuario y empleado activos con rol TECNICO.'),
++(16, N'Rechazar asignación desde una pantalla desactualizada', 51603, N'La asignación cambió. Actualizá la orden y volvé a intentar.'),
++(17, N'No duplicar la misma asignación', 51603, N'El técnico ya está asignado a esta orden.'),
++(18, N'TECNICO no puede asignarse una orden', 51604, N'Tu usuario no tiene permiso para esta operación de órdenes.'),
++(19, N'Técnico ajeno no puede consultar la orden por ID', 51602, N'La orden no existe o no está disponible para tu usuario.'),
++(20, N'Técnico ajeno no puede consultar el historial por ID', 51602, N'La orden no existe o no está disponible para tu usuario.'),
++(21, N'CAJA puede consultar órdenes sin estar asignada', 0, NULL),
++(22, N'Cancelar conserva la orden y registra el motivo Unicode', 0, NULL),
++(23, N'Cancelación exige motivo', 51600, N'El motivo es obligatorio y admite hasta 500 caracteres.'),
++(24, N'No se cancela dos veces', 51603, N'El estado actual no permite cancelar esta orden.'),
++(25, N'No se asigna una orden cancelada', 51603, N'Solo se asigna o reasigna antes de registrar el diagnóstico.'),
++(26, N'No se reescribe el responsable de un diagnóstico histórico', 51603, N'Solo se asigna o reasigna antes de registrar el diagnóstico.'),
++(27, N'Buscar porcentajes y guiones bajos como texto literal', 0, NULL),
++(28, N'Historial de Equipos respeta las órdenes del técnico', 0, NULL),
++(29, N'Orden con ID no positivo', 51600, N'El ID de orden debe ser mayor que cero.'),
++(30, N'Historial de asignaciones inmutable', 51603, N'El historial de asignaciones no se modifica ni se elimina.');
++
++SELECT TOP (0) * INTO #OrdenResultado FROM dbo.vOrdenAcceso;
++SELECT TOP (0) * INTO #HistorialEquipo FROM dbo.vHistorialEquipo;
++DECLARE @Resultados TABLE (ID int, Caso nvarchar(200), Resultado varchar(4), Detalle nvarchar(4000));
++DECLARE @Caso int = 1, @Nombre nvarchar(200), @Esperado int, @Mensaje nvarchar(500), @Detalle nvarchar(4000), @Resultado varchar(4);
++DECLARE @ClienteID int, @EquipoID int, @Emp1 int, @Emp2 int, @Emp3 int, @Tec1 int, @Tec2 int, @Otro int, @OrdenID int, @D int;
++DECLARE @Sufijo varchar(8), @Codigo varchar(20), @Usuario varchar(50), @Nit varchar(20), @Serie varchar(80), @NombreCliente nvarchar(150);
++DECLARE @Problema nvarchar(max), @Observacion nvarchar(max), @Prioridad nvarchar(max), @Fecha datetime2(0), @Actor int, @Destino int;
++DECLARE @Hash varchar(255) = '$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
++
++WHILE @Caso <= 30
++BEGIN
++    SELECT @Nombre = Caso, @Esperado = ErrorEsperado, @Mensaje = MensajeEsperado FROM @Casos WHERE ID = @Caso;
++    SET @Detalle = NULL; SET @Resultado = 'PASS';
++    SET @OrdenID = NULL;
++    SET @Sufijo = LEFT(REPLACE(CONVERT(varchar(36), NEWID()), '-', ''), 8);
++    DELETE FROM #OrdenResultado; DELETE FROM #HistorialEquipo;
++    BEGIN TRY
++        BEGIN TRANSACTION;
++        SET @Nit = 'TCO-' + @Sufijo; SET @Serie = 'TCO-E-' + @Sufijo;
++        SET @NombreCliente = N'Cliente 100%_ María José ' + @Sufijo;
++        INSERT dbo.Cliente(TipoClienteID, NIT, Nombre, Activo) VALUES (@Tipo, @Nit, @NombreCliente, 1);
++        SET @ClienteID = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Equipo(ClienteID, ModeloEquipoID, NumeroSerie, Descripcion, Activo)
++            VALUES (@ClienteID, @Modelo, @Serie, N'Portátil de prueba ñ 漢字', 1);
++        SET @EquipoID = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCOT1-' + @Sufijo; SET @Usuario = 'tcot1_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Uno', 1);
++        SET @Emp1 = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Emp1, @Usuario, @Hash, 1);
++        SET @Tec1 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCOT2-' + @Sufijo; SET @Usuario = 'tcot2_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Dos', 1);
++        SET @Emp2 = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Emp2, @Usuario, @Hash, 1);
++        SET @Tec2 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCOB-' + @Sufijo; SET @Usuario = 'tcob_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Bodega', N'Prueba', 1);
++        SET @Emp3 = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Emp3, @Usuario, @Hash, 1);
++        SET @Otro = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.UsuarioRol VALUES (@Tec1, 'TECNICO'), (@Tec2, 'TECNICO'), (@Otro, 'BODEGA');
++        INSERT #OrdenResultado EXEC dbo.spRegistrarOrden @Admin, @EquipoID, N'No enciende: revisión ñ 漢字', N'NORMAL', NULL, N'Entregado por María José';
++        SELECT @OrdenID = OrdenID FROM #OrdenResultado;
++        IF @OrdenID IS NULL THROW 51991, N'La preparación no devolvió una orden.', 1;
++        IF @Caso = 1
++        BEGIN
++            IF NOT EXISTS (SELECT 1 FROM #OrdenResultado WHERE EstadoCodigo = 'RECIBIDO' AND NumeroOrden LIKE 'TC-%'
++                AND ProblemaReportado = N'No enciende: revisión ñ 漢字' AND ClienteID = @ClienteID AND UsuarioRecepcionID = @Admin)
++                THROW 51991, N'La orden no conservó el ingreso, el cliente o Unicode.', 1;
++            IF (SELECT COUNT(*) FROM dbo.HistorialEstadoOrden WHERE OrdenID = @OrdenID AND EstadoAnterior IS NULL AND EstadoNuevo = 'RECIBIDO') <> 1
++                THROW 51991, N'El historial inicial debe tener un evento.', 1;
++        END;
++        DELETE FROM #OrdenResultado;
++        IF @Caso BETWEEN 2 AND 9
++        BEGIN
++            SET @Problema = N'Otra falla'; SET @Observacion = NULL; SET @Prioridad = N'NORMAL'; SET @Fecha = NULL; SET @Actor = @Admin;
++            IF @Caso = 2 SET @Problema = N'   ';
++            IF @Caso = 3 SET @Problema = REPLICATE(N'a', 1001);
++            IF @Caso = 4 SET @Observacion = REPLICATE(N'a', 1001);
++            IF @Caso = 5 SET @Prioridad = N'NO_EXISTE';
++            IF @Caso = 6 UPDATE dbo.Equipo SET Activo = 0 WHERE EquipoID = @EquipoID;
++            IF @Caso = 7 UPDATE dbo.Cliente SET Activo = 0 WHERE ClienteID = @ClienteID;
++            IF @Caso = 8 SET @Fecha = DATEADD(day, -1, SYSUTCDATETIME());
++            IF @Caso = 9 SET @Actor = @Otro;
++            EXEC dbo.spRegistrarOrden @Actor, @EquipoID, @Problema, @Prioridad, @Fecha, @Observacion;
++        END;
++        IF @Caso = 10 EXEC dbo.spListarOrdenes @Otro;
++        IF @Caso IN (11,12,16,17,19,20,26,28,30)
++            INSERT #OrdenResultado EXEC dbo.spAsignarTecnicoOrden @Admin, @OrdenID, @Tec1, NULL, N'Asignación inicial';
++        IF @Caso = 11
++        BEGIN
++            IF dbo.fnPuedeConsultarOrden(@Tec1, @OrdenID) <> 1 OR dbo.fnPuedeConsultarOrden(@Tec2, @OrdenID) <> 0
++                THROW 51991, N'La asignación no limitó la consulta al técnico correcto.', 1;
++            DELETE #OrdenResultado;
++            INSERT #OrdenResultado EXEC dbo.spListarOrdenes @Tec1, @Nit;
++            IF (SELECT COUNT(*) FROM #OrdenResultado WHERE OrdenID = @OrdenID) <> 1
++                THROW 51991, N'El técnico no pudo listar su orden.', 1;
++            DELETE #OrdenResultado;
++            INSERT #OrdenResultado EXEC dbo.spListarOrdenes @Tec2, @Nit;
++            IF EXISTS (SELECT 1 FROM #OrdenResultado) THROW 51991, N'El listado expuso una orden ajena.', 1;
++        END;
++        IF @Caso = 12
++        BEGIN
++            DELETE #OrdenResultado;
++            INSERT #OrdenResultado EXEC dbo.spAsignarTecnicoOrden @Admin, @OrdenID, @Tec2, @Tec1, N'Reasignación ñ';
++            IF dbo.fnPuedeConsultarOrden(@Tec1, @OrdenID) <> 0 OR dbo.fnPuedeConsultarOrden(@Tec2, @OrdenID) <> 1
++                THROW 51991, N'La reasignación no cambió los permisos de consulta.', 1;
++            IF (SELECT COUNT(*) FROM dbo.AsignacionOrden WHERE OrdenID = @OrdenID) <> 2
++                THROW 51991, N'La reasignación no conservó ambos eventos.', 1;
++        END;
++        IF @Caso BETWEEN 13 AND 15
++        BEGIN
++            SET @Destino = @Tec1;
++            IF @Caso = 13 SET @Destino = @Otro;
++            IF @Caso = 14 UPDATE dbo.Usuario SET Activo = 0 WHERE UsuarioID = @Tec1;
++            IF @Caso = 15 UPDATE dbo.Empleado SET Activo = 0 WHERE EmpleadoID = @Emp1;
++            EXEC dbo.spAsignarTecnicoOrden @Admin, @OrdenID, @Destino;
++        END;
++        IF @Caso = 16 EXEC dbo.spAsignarTecnicoOrden @Admin, @OrdenID, @Tec2, NULL;
++        IF @Caso = 17 EXEC dbo.spAsignarTecnicoOrden @Admin, @OrdenID, @Tec1, @Tec1;
++        IF @Caso = 18 EXEC dbo.spAsignarTecnicoOrden @Tec1, @OrdenID, @Tec1;
++        IF @Caso = 19 EXEC dbo.spConsultarOrden @Tec2, @OrdenID;
++        IF @Caso = 20 EXEC dbo.spHistorialOrden @Tec2, @OrdenID;
++        IF @Caso = 21
++        BEGIN
++            INSERT dbo.UsuarioRol VALUES (@Otro, 'CAJA');
++            INSERT #OrdenResultado EXEC dbo.spConsultarOrden @Otro, @OrdenID;
++            IF NOT EXISTS (SELECT 1 FROM #OrdenResultado WHERE OrdenID = @OrdenID) THROW 51991, N'CAJA no pudo consultar la orden.', 1;
++        END;
++        IF @Caso IN (22,24,25)
++        BEGIN
++            DELETE #OrdenResultado;
++            INSERT #OrdenResultado EXEC dbo.spCancelarOrden @Admin, @OrdenID, N'Cliente José solicita cancelación ñ 漢字';
++        END;
++        IF @Caso = 22
++        BEGIN
++            IF NOT EXISTS (SELECT 1 FROM dbo.OrdenServicio WHERE OrdenID = @OrdenID AND EstadoCodigo = 'CANCELADO')
++                OR (SELECT COUNT(*) FROM dbo.HistorialEstadoOrden WHERE OrdenID = @OrdenID) <> 2
++                OR NOT EXISTS (SELECT 1 FROM dbo.HistorialEstadoOrden WHERE OrdenID = @OrdenID AND EstadoNuevo = 'CANCELADO'
++                               AND Observacion = N'Cliente José solicita cancelación ñ 漢字')
++                THROW 51991, N'La cancelación perdió la orden, el historial o su motivo.', 1;
++        END;
++        IF @Caso = 23 EXEC dbo.spCancelarOrden @Admin, @OrdenID, N'  ';
++        IF @Caso = 24 EXEC dbo.spCancelarOrden @Admin, @OrdenID, N'Otra vez';
++        IF @Caso = 25 EXEC dbo.spAsignarTecnicoOrden @Admin, @OrdenID, @Tec1;
++        IF @Caso = 26
++        BEGIN
++            EXEC dbo.spRegistrarDiagnostico @OrdenID, @Tec1, N'Diagnóstico de prueba', 1, @D OUTPUT;
++            EXEC dbo.spAsignarTecnicoOrden @Admin, @OrdenID, @Tec2, @Tec1;
++        END;
++        IF @Caso = 27
++        BEGIN
++            INSERT #OrdenResultado EXEC dbo.spListarOrdenes @Admin, @NombreCliente;
++            IF (SELECT COUNT(*) FROM #OrdenResultado) <> 1 OR NOT EXISTS (SELECT 1 FROM #OrdenResultado WHERE OrdenID = @OrdenID)
++                THROW 51991, N'La búsqueda no trató el porcentaje y el guion bajo como texto literal.', 1;
++        END;
++        IF @Caso = 28
++        BEGIN
++            INSERT #HistorialEquipo EXEC dbo.spHistorialEquipoAcceso @Tec2, @EquipoID;
++            IF EXISTS (SELECT 1 FROM #HistorialEquipo) THROW 51991, N'Equipos expuso una orden ajena.', 1;
++            INSERT #HistorialEquipo EXEC dbo.spHistorialEquipoAcceso @Tec1, @EquipoID;
++            IF (SELECT COUNT(*) FROM #HistorialEquipo WHERE OrdenID = @OrdenID) <> 1 THROW 51991, N'Equipos ocultó la orden del técnico asignado.', 1;
++        END;
++        IF @Caso = 29 EXEC dbo.spConsultarOrden @Admin, 0;
++        IF @Caso = 30 UPDATE dbo.AsignacionOrden SET Observacion = N'Intento de reescritura' WHERE OrdenID = @OrdenID;
++        IF @Esperado <> 0 THROW 51991, N'La operación debía rechazarse y fue aceptada.', 1;
++        ROLLBACK TRANSACTION;
++    END TRY
++    BEGIN CATCH
++        SET @Detalle = ERROR_MESSAGE();
++        IF @Esperado = 0 OR ERROR_NUMBER() <> @Esperado OR @Detalle <> @Mensaje SET @Resultado = 'FAIL';
++        IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
++    END CATCH;
++    IF (SELECT COUNT_BIG(*) FROM dbo.OrdenServicio) <> @Ordenes
++       OR (SELECT COUNT_BIG(*) FROM dbo.HistorialEstadoOrden) <> @Historial
++       OR (SELECT COUNT_BIG(*) FROM dbo.AsignacionOrden) <> @Asignaciones
++       OR (SELECT COUNT_BIG(*) FROM dbo.Cliente) <> @Clientes OR (SELECT COUNT_BIG(*) FROM dbo.Equipo) <> @Equipos
++       OR (SELECT COUNT_BIG(*) FROM dbo.Usuario) <> @Usuarios OR (SELECT COUNT_BIG(*) FROM dbo.Empleado) <> @Empleados
++       OR (SELECT COUNT_BIG(*) FROM dbo.UsuarioRol) <> @Roles OR (SELECT COUNT_BIG(*) FROM dbo.Diagnostico) <> @Diagnosticos
++    BEGIN
++        SET @Resultado = 'FAIL'; SET @Detalle = N'La prueba dejó cambios persistentes. Revisá las transacciones.';
++    END;
++    INSERT @Resultados VALUES (@Caso, @Nombre, @Resultado, @Detalle);
++    SET @Caso += 1;
++END;
++DROP TABLE #OrdenResultado;
++DROP TABLE #HistorialEquipo;
++SELECT Caso, Resultado, Detalle FROM @Resultados ORDER BY ID;
++IF EXISTS (SELECT 1 FROM @Resultados WHERE Resultado = 'FAIL')
++    THROW 51992, N'Una o más pruebas de Órdenes fallaron. Revisá la tabla de resultados.', 1;
++GO
+diff --git a/INTEGRACION_ORDENES.md b/INTEGRACION_ORDENES.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..50d4262f39af63a58cd691031cb173a490689dc0
+--- /dev/null
++++ b/INTEGRACION_ORDENES.md
+@@ -0,0 +1,145 @@
++# Órdenes de servicio: recepción y seguimiento
++
++Esta entrega conecta el ingreso de órdenes, su listado con filtros, el expediente,
++el historial, la asignación de técnicos y la cancelación. El número se genera en
++SQL Server (`TC-1`, `TC-2`, etc.) y la persona que registra cada operación se obtiene
++de la sesión. El cliente se obtiene del equipo seleccionado.
++
++Versión compatible con el frontend del commit `4cafbf7`, más el alta de usuarios
++del parche 15 y las correcciones de sus scripts 13/14. Conserva el diseño y la
++protección de rutas existentes; no requiere incorporar la actualización visual
++posterior de GitHub. La API y los scripts de Órdenes son los mismos de la entrega 18.
++
++## Aplicación sobre el proyecto actual
++
++1. Guardar `18_Ordenes_API_v2.patch` en la raíz de TechCare. En la terminal de IntelliJ,
++   ubicada en esa misma carpeta, ejecutar:
++
++   ```bash
++   git apply --check 18_Ordenes_API_v2.patch
++   git apply 18_Ordenes_API_v2.patch
++   ```
++
++2. El parche incorpora `16_Ordenes_Procedimientos.sql` y `17_Pruebas_Ordenes.sql` en
++   la raíz del proyecto. En SSMS, abrir y ejecutar completo el **16 una vez** en
++   la instancia habitual de TechCare. No requiere ejecutar nuevamente 01 ni 02.
++3. Ejecutar completo el **17** para verificar las 30 pruebas en la instancia real.
++   Los casos revierten sus datos; pueden quedar huecos normales en identidades y
++   en la secuencia de números. Usar la base de desarrollo sin escrituras concurrentes.
++4. Reiniciar el backend con la configuración DB_URL habitual y abrir el frontend.
++   No se agregan dependencias ni se cambian las credenciales, el POM o el maestro 01.
++
++El parche modifica código; la actualización de la base se realiza en el paso 2.
++Después, las operaciones cotidianas se realizan desde la aplicación.
++Cada integrante que tenga una base propia aplica el 16 a esa base una vez.
++Una instalación nueva ejecuta también las actualizaciones previas 06, 08, 11 y 13.
++
++## Cómo comprobarlo desde la interfaz
++
++1. Iniciar sesión con ADMIN o RECEPCION. Abrir Órdenes → Nueva orden.
++2. Elegir cliente y equipo activos, describir la falla y seleccionar prioridad.
++   La fecha estimada es opcional y se ingresa en hora de Guatemala.
++3. Revisar y confirmar. Aparecerá el expediente con un número `TC-…`, estado
++   RECIBIDO, recepción registrada a nombre del usuario y el evento inicial.
++4. Usar Asignar técnico. Aparecen cuentas y empleados activos con el rol TECNICO.
++   La asignación se registra en el historial y conserva el estado RECIBIDO.
++5. Entrar con ese técnico: debe ver la orden. Otro usuario que solo tenga rol
++   TECNICO no debe verla en el listado ni consultar su ID o historial.
++6. Desde ADMIN o RECEPCION, reasignar antes del diagnóstico y comprobar ambos
++   eventos en Historial. El técnico anterior deja de tener acceso.
++7. Cancelar una orden de prueba con motivo. Conserva su número y sus eventos;
++   una orden cancelada no admite nuevas asignaciones ni otra cancelación.
++
++## Permisos
++
++| Rol | Consulta | Crear | Asignar / reasignar | Cancelar |
++|---|---|---|---|---|
++| ADMIN | Todas | Sí | Sí | Sí, según estado |
++| RECEPCION | Todas | Sí | Sí | Sí, según estado |
++| TECNICO | Sus órdenes | No | No | No |
++| CAJA | Todas | No | No | No |
++| BODEGA | Sin acceso a este módulo | No | No | No |
++
++Los roles se acumulan: una cuenta TECNICO + CAJA tiene la consulta general de CAJA.
++Los permisos se comprueban en Spring Security y SQL. El historial de Equipos usa
++el mismo filtro de órdenes, para conservar esta restricción también en esa pantalla.
++El acceso directo a rutas del frontend respeta los roles de la navegación.
++
++La reasignación se permite en RECIBIDO o DIAGNOSTICO mientras todavía no exista
++un diagnóstico registrado. Después se conserva el responsable histórico.
++Una asignación enviada desde una pantalla desactualizada devuelve 409; no sustituye
++silenciosamente al responsable elegido por otra persona.
++La cancelación usa las transiciones de SQL; no existe un endpoint para saltar
++libremente a REPARACION, LISTO o ENTREGADO.
++
++## API
++
++| Método | Ruta | Uso |
++|---|---|---|
++| GET | `/api/ordenes` | Listado autorizado y filtros |
++| POST | `/api/ordenes` | Registrar ingreso; devuelve 201 y Location |
++| GET | `/api/ordenes/{id}` | Recepción, responsable y datos técnicos existentes |
++| GET | `/api/ordenes/{id}/historial` | Eventos de estados y asignaciones |
++| PUT | `/api/ordenes/{id}/tecnico` | Asignar o reasignar con control de concurrencia |
++| POST | `/api/ordenes/{id}/cancelacion` | Cancelar con motivo |
++| GET | `/api/ordenes/catalogos/estados` | Estados vigentes |
++| GET | `/api/ordenes/catalogos/prioridades` | Prioridades vigentes |
++| GET | `/api/ordenes/catalogos/tecnicos` | Técnicos activos; ADMIN/RECEPCION |
++
++Filtros: `buscar`, `estado`, `prioridad`, `tecnicoId`, `desde`, `hasta`.
++`tecnicoId=0` significa sin asignar. Desde/hasta reciben `YYYY-MM-DD` y se convierten
++en el rango UTC correspondiente al día completo en Guatemala. La búsqueda usa
++texto literal, incluyendo `%` y `_`, y las consultas JDBC son parametrizadas.
++
++Crear recibe `{equipoId, problema, prioridad, fechaEstimada?, observaciones?}`.
++`fechaEstimada`, cuando existe, debe tener zona horaria ISO, por ejemplo
++`2026-12-31T10:15:00-06:00`. No se acepta un número de orden ni un actor del cliente.
++Asignar recibe `{tecnicoId, tecnicoAnteriorId, observacion?}`; `tecnicoAnteriorId`
++es null para la primera asignación. Cancelar recibe `{motivo}`.
++Las respuestas de Órdenes usan camelCase y fechas ISO UTC. Los datos de acceso
++como PasswordHash no forman parte del DTO. Las escrituras requieren CSRF.
++
++## Cambios en la base
++
++El 16 incorpora una secuencia que conserva su avance al repetir el script,
++la tabla AsignacionOrden (eventos inmutables), su índice y trigger, una vista de
++consulta, una función de permisos y los procedimientos de API. No altera las
++tablas originales ni reescribe órdenes, diagnósticos o reparaciones anteriores.
++En órdenes anteriores sin asignaciones, el técnico se obtiene de su reparación
++o diagnóstico. No requiere asignar de nuevo las órdenes históricas.
++
++AsignacionOrden tiene AsignacionID como PK y FK a OrdenServicio, al Usuario técnico
++y al Usuario que asigna. Guarda Fecha UTC y Observacion de hasta 500 caracteres.
++Una orden admite varios eventos; su última asignación determina el responsable
++antes del diagnóstico. Cada usuario puede participar en varios eventos.
++La tabla adicional se incluye en el siguiente diagrama del módulo:
++
++```mermaid
++erDiagram
++    OrdenServicio ||--o{ AsignacionOrden : registra
++    Usuario ||--o{ AsignacionOrden : "tecnico asignado"
++    Usuario ||--o{ AsignacionOrden : "usuario que asigna"
++```
++
++## Alcance y validación
++
++Registrar diagnósticos, reparaciones, repuestos, facturas, pagos y entregas desde
++la aplicación se integra en las siguientes etapas. El expediente ya consulta los
++diagnósticos y reparaciones existentes; los demás apartados indican su estado pendiente.
++Modificar los roles de cuentas existentes continúa pendiente y no se incluye aquí.
++
++Verificación local: compilación TypeScript/Vite y pruebas de navegador con HTTP
++simulado, con revisión visual en escritorio y móvil; 100 pruebas Java aprobadas,
++incluidas 30 de Órdenes, con JDBC simulado; análisis de sintaxis T-SQL de 16 y 17.
++No se ejecutó SQL Server en este entorno. Los 30 casos del 17 deben ejecutarse
++en la instancia real antes de considerar validada la integración con la base.
++
++```bash
++cd backend
++./mvnw test
++cd ../frontend
++npm run build
++```
++
++No se hizo commit ni push. Después de validar la base y la aplicación, un mensaje
++de commit adecuado es: `Se integra la recepción y gestión de órdenes de servicio`.
+diff --git a/README.md b/README.md
+index 6e14225d55e881f8e1fc47937a07f99c0548f481..2bec3f26d536056b252cf11e3deefd7f4e4f710e 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional,
+ normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
+-Clientes y Equipos tienen API e interfaz conectadas. El acceso usa las cuentas y
++Clientes, Equipos y recepción de Órdenes tienen API e interfaz conectadas. El acceso usa las cuentas y
+ roles de la BD, con login, sesión y cierre de sesión. Los demás módulos y manuales
+ con capturas aún deben completarse.
+ 
+@@ -10,11 +10,19 @@
+ La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
+ las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
+ Una instalación nueva con un maestro anterior debe incluir también las
+-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso) y 13 (Usuarios).
++actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios) y 16 (Órdenes).
+ 
+ Administración permite consultar y registrar cuentas, empleados y roles desde
+ una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
+ En una base existente se ejecuta `13_Usuarios_Procedimientos.sql` una vez.
++
++Órdenes permite registrar ingresos, consultar el expediente y su historial,
++asignar técnicos antes del diagnóstico y cancelar cuando el estado lo permite.
++Instalación: [INTEGRACION_ORDENES.md](INTEGRACION_ORDENES.md).
++En una base existente se ejecuta `16_Ordenes_Procedimientos.sql` una vez.
++Los técnicos sin otros roles consultan únicamente sus órdenes, también desde el
++historial de Equipos. Registrar diagnósticos, reparaciones y cobros desde la API
++queda pendiente de las siguientes integraciones.
+ 
+ ## Ejecución desde cero
+ 
+@@ -43,7 +51,7 @@
+ 
+ ## Decisiones que debe conocer el equipo
+ 
+-- **35 tablas** útiles. Cliente -> Equipo -> Orden determina el propietario. Orden
++- **35 tablas originales**, más AsignacionOrden en la actualización 16. Cliente -> Equipo -> Orden determina el propietario. Orden
+   no repite ClienteID; `vOrdenResumen` lo presenta mediante JOIN y preserva 3FN.
+   No se permite cambiar propietario, serie ni modelo de un equipo con órdenes.
+ - **Un diagnóstico consolidado y una reparación por orden.** Las revisiones del
+diff --git a/backend/src/main/java/com/techcare/backend/EquipoApiErrores.java b/backend/src/main/java/com/techcare/backend/EquipoApiErrores.java
+index bde26e6635de02f5f31eb738f383e08566422b84..335095b471d336acdbc8b7f3d75e5f5926bad29b 100644
+--- a/backend/src/main/java/com/techcare/backend/EquipoApiErrores.java
++++ b/backend/src/main/java/com/techcare/backend/EquipoApiErrores.java
+@@ -43,6 +43,8 @@
+                         return error(HttpStatus.BAD_REQUEST, actual.getMessage());
+                     case 51302:
+                         return error(HttpStatus.NOT_FOUND, "El equipo no existe.");
++                    case 51604:
++                        return error(HttpStatus.FORBIDDEN, "Tu usuario no tiene permiso para consultar este historial.");
+                     case 51303:
+                     case 2601:
+                     case 2627:
+diff --git a/backend/src/main/java/com/techcare/backend/EquipoController.java b/backend/src/main/java/com/techcare/backend/EquipoController.java
+index 57028a14b6eff7fcad69677ad17fb59a5d96c5c8..d5b8dc9fd25c566f5c77fa8b6fdd56a671f27b50 100644
+--- a/backend/src/main/java/com/techcare/backend/EquipoController.java
++++ b/backend/src/main/java/com/techcare/backend/EquipoController.java
+@@ -1,5 +1,6 @@
+ package com.techcare.backend;
+ 
++import com.techcare.backend.seguridad.UsuarioAutenticado;
+ import jakarta.validation.Valid;
+ import jakarta.validation.constraints.Min;
+ import jakarta.validation.constraints.NotBlank;
+@@ -8,6 +9,7 @@
+ import org.springframework.dao.DataRetrievalFailureException;
+ import org.springframework.http.ResponseEntity;
+ import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
+ import org.springframework.web.bind.annotation.*;
+ 
+ import java.net.URI;
+@@ -37,8 +39,8 @@
+     }
+ 
+     @GetMapping("/{id}/historial")
+-    public List<Map<String, Object>> historial(@PathVariable("id") int id) {
+-        return jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", id);
++    public List<Map<String, Object>> historial(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable("id") int id) {
++        return jdbc.queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", actor.getUsuarioId(), id);
+     }
+ 
+     @PostMapping
+diff --git a/backend/src/main/java/com/techcare/backend/ordenes/OrdenController.java b/backend/src/main/java/com/techcare/backend/ordenes/OrdenController.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2b81de4c4694da37c95c4ace756ed770d3759ba
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/ordenes/OrdenController.java
+@@ -0,0 +1,87 @@
++package com.techcare.backend.ordenes;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import jakarta.validation.Valid;
++import jakarta.validation.constraints.Future;
++import jakarta.validation.constraints.Min;
++import jakarta.validation.constraints.NotBlank;
++import jakarta.validation.constraints.NotNull;
++import jakarta.validation.constraints.Size;
++import org.springframework.format.annotation.DateTimeFormat;
++import org.springframework.http.ResponseEntity;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.web.bind.annotation.*;
++
++import java.net.URI;
++import java.time.LocalDate;
++import java.time.OffsetDateTime;
++import java.util.List;
++
++@RestController
++@RequestMapping("/api/ordenes")
++public class OrdenController {
++    private final OrdenesServicio ordenes;
++    public OrdenController(OrdenesServicio ordenes) { this.ordenes = ordenes; }
++
++    @GetMapping
++    public List<OrdenesServicio.Orden> listar(@AuthenticationPrincipal UsuarioAutenticado actor,
++            @RequestParam(required = false) String buscar, @RequestParam(required = false) String estado,
++            @RequestParam(required = false) String prioridad, @RequestParam(required = false) Integer tecnicoId,
++            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate desde,
++            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate hasta) {
++        return ordenes.listar(actor.getUsuarioId(), buscar, estado, prioridad, tecnicoId, desde, hasta);
++    }
++
++    @GetMapping("/{id}")
++    public OrdenesServicio.Orden consultar(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id) {
++        return ordenes.consultar(actor.getUsuarioId(), id);
++    }
++
++    @GetMapping("/{id}/historial")
++    public List<OrdenesServicio.Evento> historial(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id) {
++        return ordenes.historial(actor.getUsuarioId(), id);
++    }
++
++    @GetMapping("/catalogos/{catalogo}")
++    public Object catalogo(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable String catalogo) {
++        return ordenes.catalogo(actor.getUsuarioId(), catalogo);
++    }
++
++    @PostMapping
++    public ResponseEntity<OrdenesServicio.Orden> crear(@AuthenticationPrincipal UsuarioAutenticado actor,
++            @Valid @RequestBody NuevaOrden datos) {
++        var orden = ordenes.crear(actor.getUsuarioId(), datos);
++        return ResponseEntity.created(URI.create("/api/ordenes/" + orden.ordenId())).body(orden);
++    }
++
++    @PutMapping("/{id}/tecnico")
++    public OrdenesServicio.Orden asignar(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id,
++            @Valid @RequestBody AsignarTecnico datos) {
++        return ordenes.asignar(actor.getUsuarioId(), id, datos);
++    }
++
++    @PostMapping("/{id}/cancelacion")
++    public OrdenesServicio.Orden cancelar(@AuthenticationPrincipal UsuarioAutenticado actor, @PathVariable int id,
++            @Valid @RequestBody CancelarOrden datos) {
++        return ordenes.cancelar(actor.getUsuarioId(), id, datos.motivo());
++    }
++
++    public record NuevaOrden(
++            @NotNull @Min(1) Integer equipoId,
++            @NotBlank(message = "El problema es obligatorio.") @Size(max = 1000) String problema,
++            @NotBlank(message = "Elegí una prioridad.") @Size(max = 10) String prioridad,
++            @Future(message = "La fecha estimada debe ser posterior al momento actual.") OffsetDateTime fechaEstimada,
++            @Size(max = 1000) String observaciones) {
++        public NuevaOrden {
++            problema = limpiar(problema); prioridad = limpiar(prioridad); observaciones = limpiar(observaciones);
++        }
++    }
++    public record AsignarTecnico(@NotNull @Min(1) Integer tecnicoId, @Min(1) Integer tecnicoAnteriorId,
++                                 @Size(max = 500) String observacion) {
++        public AsignarTecnico { observacion = limpiar(observacion); }
++    }
++    public record CancelarOrden(@NotBlank(message = "Ingresá el motivo de cancelación.") @Size(max = 500) String motivo) {
++        public CancelarOrden { motivo = limpiar(motivo); }
++    }
++    private static String limpiar(String texto) { return texto == null ? null : texto.strip(); }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/ordenes/OrdenErrores.java b/backend/src/main/java/com/techcare/backend/ordenes/OrdenErrores.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb2fe4dbdd824006be18656dc92ba5b09a75a12d
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/ordenes/OrdenErrores.java
+@@ -0,0 +1,54 @@
++package com.techcare.backend.ordenes;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.dao.DataAccessException;
++import org.springframework.http.ResponseEntity;
++import org.springframework.http.converter.HttpMessageNotReadableException;
++import org.springframework.web.bind.MethodArgumentNotValidException;
++import org.springframework.web.bind.annotation.ExceptionHandler;
++import org.springframework.web.bind.annotation.RestControllerAdvice;
++import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.sql.SQLException;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++@RestControllerAdvice(assignableTypes = OrdenController.class)
++public class OrdenErrores {
++    private static final Logger LOG = LoggerFactory.getLogger(OrdenErrores.class);
++    @ExceptionHandler(MethodArgumentNotValidException.class)
++    public ResponseEntity<Map<String, Object>> validacion(MethodArgumentNotValidException ex) {
++        Map<String, String> errores = new LinkedHashMap<>();
++        ex.getBindingResult().getFieldErrors().forEach(e -> errores.putIfAbsent(e.getField(), e.getDefaultMessage()));
++        return ResponseEntity.badRequest().body(Map.of("estado", 400, "mensaje", "Revisá los datos de la orden.", "errores", errores));
++    }
++    @ExceptionHandler({HttpMessageNotReadableException.class, MethodArgumentTypeMismatchException.class})
++    public ResponseEntity<Map<String, Object>> entrada(Exception ex) { return error(400, "La solicitud contiene datos inválidos."); }
++    @ExceptionHandler(ResponseStatusException.class)
++    public ResponseEntity<Map<String, Object>> estado(ResponseStatusException ex) { return error(ex.getStatusCode().value(), ex.getReason()); }
++    @ExceptionHandler(DataAccessException.class)
++    public ResponseEntity<Map<String, Object>> sql(DataAccessException ex) {
++        for (Throwable causa = ex; causa != null; causa = causa.getCause()) {
++            if (!(causa instanceof SQLException sql)) continue;
++            for (SQLException actual = sql; actual != null; actual = actual.getNextException()) {
++                switch (actual.getErrorCode()) {
++                    case 51600, 51601: return error(400, actual.getMessage());
++                    case 51602: return error(404, "La orden no existe o no está disponible para tu usuario.");
++                    case 51603: return error(409, actual.getMessage());
++                    case 51604: return error(403, "Tu usuario no tiene permiso para esta operación de órdenes.");
++                    case 2601, 2627: return error(409, "La orden ya está registrada. Actualizá el listado.");
++                    case 547, 51102, 51104, 51105, 51106, 51107, 51108:
++                        return error(409, "Los datos o el estado de la orden cambiaron. Actualizá y volvé a intentar.");
++                    default: break;
++                }
++            }
++        }
++        LOG.error("No se pudo completar una operación de órdenes.", ex);
++        return error(503, "No se pudo completar la operación. Revisá el backend e intentá nuevamente.");
++    }
++    private static ResponseEntity<Map<String, Object>> error(int estado, String mensaje) {
++        return ResponseEntity.status(estado).body(Map.of("estado", estado, "mensaje", mensaje));
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/ordenes/OrdenesServicio.java b/backend/src/main/java/com/techcare/backend/ordenes/OrdenesServicio.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..aac2657783e1442cfae6844bceb7283c23a7151c
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/ordenes/OrdenesServicio.java
+@@ -0,0 +1,128 @@
++package com.techcare.backend.ordenes;
++
++import org.springframework.dao.DataRetrievalFailureException;
++import org.springframework.http.HttpStatus;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.stereotype.Service;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.math.BigDecimal;
++import java.sql.Timestamp;
++import java.time.LocalDate;
++import java.time.LocalDateTime;
++import java.time.OffsetDateTime;
++import java.time.ZoneId;
++import java.time.ZoneOffset;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++@Service
++public class OrdenesServicio {
++    private static final ZoneId GUATEMALA = ZoneId.of("America/Guatemala");
++    private final JdbcTemplate jdbc;
++    public OrdenesServicio(JdbcTemplate jdbc) { this.jdbc = jdbc; }
++
++    public List<Orden> listar(int actor, String buscar, String estado, String prioridad, Integer tecnico,
++                              LocalDate desde, LocalDate hasta) {
++        if ((buscar != null && buscar.length() > 150) || (estado != null && estado.length() > 30)
++                || (prioridad != null && prioridad.length() > 10) || (tecnico != null && tecnico < 0)
++                || (desde != null && hasta != null && desde.isAfter(hasta)))
++            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Revisá los filtros de búsqueda y las fechas.");
++        return jdbc.queryForList("EXEC dbo.spListarOrdenes ?, ?, ?, ?, ?, ?, ?",
++                actor, buscar, estado, prioridad, tecnico, inicioUtc(desde, false), inicioUtc(hasta, true))
++                .stream().map(this::orden).toList();
++    }
++    public Orden consultar(int actor, int id) {
++        idValido(id);
++        var filas = jdbc.queryForList("EXEC dbo.spConsultarOrden ?, ?", actor, id);
++        if (filas.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "La orden no existe o no está disponible para tu usuario.");
++        return una(filas);
++    }
++    public Orden crear(int actor, OrdenController.NuevaOrden datos) {
++        LocalDateTime estimada = datos.fechaEstimada() == null ? null
++                : datos.fechaEstimada().withOffsetSameInstant(ZoneOffset.UTC).toLocalDateTime();
++        if (estimada != null && (estimada.getYear() < 1 || estimada.getYear() > 9999))
++            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "La fecha estimada está fuera del rango permitido.");
++        return una(jdbc.queryForList("EXEC dbo.spRegistrarOrden ?, ?, ?, ?, ?, ?", actor,
++                datos.equipoId(), datos.problema(), datos.prioridad(), estimada, datos.observaciones()));
++    }
++    public Orden asignar(int actor, int id, OrdenController.AsignarTecnico datos) {
++        idValido(id);
++        return una(jdbc.queryForList("EXEC dbo.spAsignarTecnicoOrden ?, ?, ?, ?, ?",
++                actor, id, datos.tecnicoId(), datos.tecnicoAnteriorId(), datos.observacion()));
++    }
++    public Orden cancelar(int actor, int id, String motivo) {
++        idValido(id);
++        return una(jdbc.queryForList("EXEC dbo.spCancelarOrden ?, ?, ?", actor, id, motivo));
++    }
++    public List<Evento> historial(int actor, int id) {
++        idValido(id);
++        return jdbc.queryForList("EXEC dbo.spHistorialOrden ?, ?", actor, id).stream().map(r -> new Evento(
++                texto(r, "EventoID"), texto(r, "Tipo"), fecha(r, "Fecha"), texto(r, "Usuario"),
++                texto(r, "NombreUsuario"), texto(r, "EstadoAnterior"), texto(r, "EstadoNuevo"),
++                texto(r, "Tecnico"), texto(r, "Observacion"))).toList();
++    }
++    public Object catalogo(int actor, String catalogo) {
++        if (!Set.of("estados", "prioridades", "tecnicos").contains(catalogo))
++            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "El catálogo solicitado no existe.");
++        List<Map<String, Object>> filas = jdbc.queryForList("EXEC dbo.spCatalogosOrden ?, ?", actor, catalogo);
++        if (catalogo.equals("tecnicos")) return filas.stream().map(r -> new Tecnico(
++                numero(r, "UsuarioID"), texto(r, "EmpleadoCodigo"), texto(r, "Nombre"))).toList();
++        return filas.stream().map(r -> new Catalogo(texto(r, "Codigo"), texto(r, "Nombre"),
++                numero(r, "Nivel"), r.get("EsFinal") instanceof Boolean b ? b : null)).toList();
++    }
++    private static void idValido(int id) {
++        if (id <= 0) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El ID de orden debe ser mayor que cero.");
++    }
++    private static LocalDateTime inicioUtc(LocalDate fecha, boolean diaSiguiente) {
++        if (fecha == null) return null;
++        if (fecha.getYear() < 1 || fecha.getYear() > 9998)
++            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "La fecha del filtro está fuera del rango permitido.");
++        return (diaSiguiente ? fecha.plusDays(1) : fecha).atStartOfDay(GUATEMALA)
++                .withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
++    }
++    private Orden una(List<Map<String, Object>> filas) {
++        if (filas.size() != 1 || !(filas.get(0).get("OrdenID") instanceof Number))
++            throw new DataRetrievalFailureException("El procedimiento no devolvió una orden válida.");
++        return orden(filas.get(0));
++    }
++    private Orden orden(Map<String, Object> r) {
++        if (!(r.get("OrdenID") instanceof Number)) throw new DataRetrievalFailureException("Orden incompleta.");
++        // Respuesta explícita: los campos internos de autenticación nunca se serializan.
++        return new Orden(numero(r, "OrdenID"), texto(r, "NumeroOrden"), numero(r, "EquipoID"),
++                texto(r, "NumeroSerie"), texto(r, "EquipoDescripcion"), texto(r, "Marca"), texto(r, "Modelo"),
++                numero(r, "ClienteID"), texto(r, "Cliente"), texto(r, "NIT"), numero(r, "UsuarioRecepcionID"),
++                texto(r, "Recepcionista"), fecha(r, "FechaIngreso"), texto(r, "ProblemaReportado"),
++                texto(r, "PrioridadCodigo"), texto(r, "Prioridad"), texto(r, "EstadoCodigo"), texto(r, "Estado"),
++                Boolean.TRUE.equals(r.get("EsFinal")), fecha(r, "FechaEstimada"), texto(r, "Observaciones"),
++                numero(r, "UsuarioTecnicoID"), texto(r, "Tecnico"), numero(r, "DiagnosticoID"),
++                fecha(r, "FechaDiagnostico"), texto(r, "DescripcionDiagnostico"), decimal(r, "CostoEstimado"),
++                numero(r, "ReparacionID"), fecha(r, "FechaInicioReparacion"), fecha(r, "FechaFinReparacion"),
++                texto(r, "DescripcionTrabajo"), decimal(r, "CostoManoObra"), texto(r, "EstadoReparacion"));
++    }
++    private static Integer numero(Map<String, Object> r, String clave) { return r.get(clave) instanceof Number n ? n.intValue() : null; }
++    private static String texto(Map<String, Object> r, String clave) { return r.get(clave) instanceof String s ? s : null; }
++    private static BigDecimal decimal(Map<String, Object> r, String clave) {
++        return r.get(clave) instanceof Number n ? new BigDecimal(n.toString()) : null;
++    }
++    private static OffsetDateTime fecha(Map<String, Object> r, String clave) {
++        Object valor = r.get(clave);
++        if (valor instanceof Timestamp ts) return ts.toLocalDateTime().atOffset(ZoneOffset.UTC);
++        if (valor instanceof LocalDateTime fecha) return fecha.atOffset(ZoneOffset.UTC);
++        if (valor instanceof OffsetDateTime fecha) return fecha.withOffsetSameInstant(ZoneOffset.UTC);
++        return null;
++    }
++    public record Orden(Integer ordenId, String numeroOrden, Integer equipoId, String numeroSerie,
++            String equipoDescripcion, String marca, String modelo, Integer clienteId, String cliente, String nit,
++            Integer usuarioRecepcionId, String recepcionista, OffsetDateTime fechaIngreso, String problemaReportado,
++            String prioridadCodigo, String prioridad, String estadoCodigo, String estado, boolean esFinal,
++            OffsetDateTime fechaEstimada, String observaciones, Integer usuarioTecnicoId, String tecnico,
++            Integer diagnosticoId, OffsetDateTime fechaDiagnostico, String descripcionDiagnostico, BigDecimal costoEstimado,
++            Integer reparacionId, OffsetDateTime fechaInicioReparacion, OffsetDateTime fechaFinReparacion,
++            String descripcionTrabajo, BigDecimal costoManoObra, String estadoReparacion) {}
++    public record Evento(String eventoId, String tipo, OffsetDateTime fecha, String usuario, String nombreUsuario,
++                         String estadoAnterior, String estadoNuevo, String tecnico, String observacion) {}
++    public record Tecnico(Integer usuarioId, String empleadoCodigo, String nombre) {}
++    public record Catalogo(String codigo, String nombre, Integer nivel, Boolean esFinal) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+index a60f47192d3da8886de7f9fa1bb933204c48a1f7..5331d45f24e1288ee57da4c6d74e2485c02b7782 100644
+--- a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
++++ b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+@@ -58,6 +58,12 @@
+                         .requestMatchers(HttpMethod.GET,"/api/admin/usuarios","/api/admin/usuarios/*",
+                                 "/api/admin/roles","/api/admin/empleados-disponibles").hasRole("ADMIN")
+                         .requestMatchers(HttpMethod.POST,"/api/admin/usuarios").hasRole("ADMIN")
++                        .requestMatchers(HttpMethod.GET,"/api/ordenes/catalogos/tecnicos").hasAnyRole("ADMIN","RECEPCION")
++                        .requestMatchers(HttpMethod.GET,"/api/ordenes","/api/ordenes/**")
++                            .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
++                        .requestMatchers(HttpMethod.POST,"/api/ordenes","/api/ordenes/*/cancelacion")
++                            .hasAnyRole("ADMIN","RECEPCION")
++                        .requestMatchers(HttpMethod.PUT,"/api/ordenes/*/tecnico").hasAnyRole("ADMIN","RECEPCION")
+                         .requestMatchers(HttpMethod.GET,"/api/clientes","/api/clientes/**")
+                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
+                         .requestMatchers(HttpMethod.POST,"/api/clientes").hasAnyRole("ADMIN","RECEPCION")
+diff --git a/backend/src/test/java/com/techcare/backend/EquipoControllerTests.java b/backend/src/test/java/com/techcare/backend/EquipoControllerTests.java
+index 03c478f146cf2122c3a3944bf2826bf938f2c889..ec69d16e59b9ed4942d14afb5ecedfb6b85dfc5d 100644
+--- a/backend/src/test/java/com/techcare/backend/EquipoControllerTests.java
++++ b/backend/src/test/java/com/techcare/backend/EquipoControllerTests.java
+@@ -1,5 +1,12 @@
+ package com.techcare.backend;
+ 
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.web.method.support.HandlerMethodArgumentResolver;
++import org.springframework.web.method.support.ModelAndViewContainer;
++import org.springframework.core.MethodParameter;
++import org.springframework.web.context.request.NativeWebRequest;
++import org.springframework.web.bind.support.WebDataBinderFactory;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
+ import org.springframework.dao.DataAccessResourceFailureException;
+@@ -34,6 +41,12 @@
+         LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
+         validator.afterPropertiesSet();
+         mvc = MockMvcBuilders.standaloneSetup(new EquipoController(jdbc), new CatalogoEquipoController(jdbc))
++                .setCustomArgumentResolvers(new HandlerMethodArgumentResolver() {
++                    public boolean supportsParameter(MethodParameter p) { return p.hasParameterAnnotation(AuthenticationPrincipal.class); }
++                    public Object resolveArgument(MethodParameter p, ModelAndViewContainer c, NativeWebRequest r, WebDataBinderFactory b) {
++                        return new UsuarioAutenticado(42, "recepcion", "Recepción", "EMP-42", List.of("RECEPCION"), true, null);
++                    }
++                })
+                 .setControllerAdvice(new EquipoApiErrores()).setValidator(validator).build();
+     }
+ 
+@@ -140,13 +153,14 @@
+ 
+     @Test
+     void historialVacioEs200YNoFilaNula() throws Exception {
+-        when(jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", 7)).thenReturn(List.of());
++        when(jdbc.queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", 42, 7)).thenReturn(List.of());
+         mvc.perform(get("/api/equipos/7/historial")).andExpect(status().isOk()).andExpect(content().json("[]"));
++        verify(jdbc).queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", 42, 7);
+     }
+ 
+     @Test
+     void historialDeEquipoInexistenteEs404() throws Exception {
+-        when(jdbc.queryForList("EXEC dbo.spHistorialEquipo ?", 7)).thenThrow(fallo(new SQLException("No existe", "S0001", 51302)));
++        when(jdbc.queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", 42, 7)).thenThrow(fallo(new SQLException("No existe", "S0001", 51302)));
+         mvc.perform(get("/api/equipos/7/historial")).andExpect(status().isNotFound());
+     }
+ 
+diff --git a/backend/src/test/java/com/techcare/backend/ordenes/OrdenApiTests.java b/backend/src/test/java/com/techcare/backend/ordenes/OrdenApiTests.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..85ff50bd07cef802921428b62cb1fdb90c796e99
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/ordenes/OrdenApiTests.java
+@@ -0,0 +1,186 @@
++package com.techcare.backend.ordenes;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.junit.jupiter.params.provider.ValueSource;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.jdbc.UncategorizedSQLException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.request.RequestPostProcessor;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.web.context.WebApplicationContext;
++
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.time.LocalDateTime;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.not;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.*;
++import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(properties = "spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class OrdenApiTests {
++    private static final String ALTA = "EXEC dbo.spRegistrarOrden ?, ?, ?, ?, ?, ?";
++    private static final String LISTA = "EXEC dbo.spListarOrdenes ?, ?, ?, ?, ?, ?, ?";
++    private static final String ASIGNAR = "EXEC dbo.spAsignarTecnicoOrden ?, ?, ?, ?, ?";
++    private static final String DATOS = """
++        {"equipoId":7,"problema":" Falla ñ 漢字 ","prioridad":"NORMAL","fechaEstimada":null,
++         "observaciones":" María José ","usuarioActorID":999,"usuarioRecepcionId":999,"numeroOrden":"ELEGIDO-POR-CLIENTE"}
++        """;
++    @Autowired WebApplicationContext context;
++    @MockitoBean JdbcTemplate jdbc;
++    private MockMvc mvc;
++    @BeforeEach void preparar() {
++        reset(jdbc);
++        mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
++        when(jdbc.queryForList(anyString(), any(Object[].class))).thenAnswer(inv -> {
++            String sql = inv.getArgument(0);
++            if (sql.contains("spCatalogosOrden")) return List.of(Map.of("Codigo", "NORMAL", "Nombre", "Normal", "Nivel", 2));
++            if (sql.contains("spHistorialOrden")) return List.of(Map.of("EventoID", "E-1", "Tipo", "ESTADO", "EstadoNuevo", "RECIBIDO",
++                    "Fecha", Timestamp.valueOf("2026-10-20 12:00:00"), "Usuario", "recepcion", "NombreUsuario", "Recepción"));
++            if (sql.contains("spHistorialEquipoAcceso")) return List.of();
++            return List.of(fila());
++        });
++    }
++    private Map<String, Object> fila() {
++        Map<String, Object> r = new HashMap<>();
++        r.put("OrdenID", 81); r.put("NumeroOrden", "TC-81"); r.put("EquipoID", 7); r.put("ClienteID", 5);
++        r.put("NumeroSerie", "SER-7"); r.put("Cliente", "María José"); r.put("NIT", "CF-5");
++        r.put("UsuarioRecepcionID", 42); r.put("FechaIngreso", Timestamp.valueOf("2026-10-20 12:00:00"));
++        r.put("ProblemaReportado", "Falla ñ 漢字"); r.put("PrioridadCodigo", "NORMAL"); r.put("Prioridad", "Normal");
++        r.put("EstadoCodigo", "RECIBIDO"); r.put("Estado", "Recibido"); r.put("EsFinal", false);
++        r.put("PasswordHash", "SECRETO_INTERNO"); r.put("AlgoritmoHash", "PBKDF2_SHA256");
++        return r;
++    }
++    private RequestPostProcessor actor(String rol) {
++        var u = new UsuarioAutenticado(42, "cuenta", "Cuenta prueba", "EMP-42", List.of(rol), true, null);
++        return authentication(UsernamePasswordAuthenticationToken.authenticated(u, null, u.getAuthorities()));
++    }
++    @Test void anonimoNoPuedeConsultarNiCrear() throws Exception {
++        mvc.perform(get("/api/ordenes")).andExpect(status().isUnauthorized());
++        mvc.perform(post("/api/ordenes").with(csrf()).contentType("application/json").content(DATOS)).andExpect(status().isUnauthorized());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void bodegaNoTieneAccesoAOrdenes() throws Exception {
++        for (String ruta : List.of("/api/ordenes", "/api/ordenes/81", "/api/ordenes/81/historial", "/api/ordenes/catalogos/estados"))
++            mvc.perform(get(ruta).with(actor("BODEGA"))).andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings = {"TECNICO", "CAJA", "BODEGA"})
++    void rolesSinRecepcionNoPuedenCrearAsignarNiCancelar(String rol) throws Exception {
++        mvc.perform(post("/api/ordenes").with(actor(rol)).with(csrf()).contentType("application/json").content(DATOS)).andExpect(status().isForbidden());
++        mvc.perform(put("/api/ordenes/81/tecnico").with(actor(rol)).with(csrf()).contentType("application/json").content("{\"tecnicoId\":4}")).andExpect(status().isForbidden());
++        mvc.perform(post("/api/ordenes/81/cancelacion").with(actor(rol)).with(csrf()).contentType("application/json").content("{\"motivo\":\"Cliente solicita\"}")).andExpect(status().isForbidden());
++        mvc.perform(get("/api/ordenes/catalogos/tecnicos").with(actor(rol))).andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings = {"ADMIN", "RECEPCION", "TECNICO", "CAJA"})
++    void consultasUsanElActorRealParaFiltrarEnSql(String rol) throws Exception {
++        mvc.perform(get("/api/ordenes/81").with(actor(rol))).andExpect(status().isOk())
++                .andExpect(jsonPath("$.numeroOrden").value("TC-81"));
++        verify(jdbc).queryForList("EXEC dbo.spConsultarOrden ?, ?", 42, 81);
++    }
++    @ParameterizedTest @ValueSource(strings = {"ADMIN", "RECEPCION"})
++    void crearDevuelveIdUnicodeYActorDeSesionIgnorandoElNumeroDelCliente(String rol) throws Exception {
++        mvc.perform(post("/api/ordenes").with(actor(rol)).with(csrf()).contentType("application/json").content(DATOS))
++                .andExpect(status().isCreated()).andExpect(header().string("Location", "/api/ordenes/81"))
++                .andExpect(jsonPath("$.problemaReportado").value("Falla ñ 漢字"))
++                .andExpect(jsonPath("$.fechaIngreso").value("2026-10-20T12:00:00Z"))
++                .andExpect(content().string(not(containsString("PasswordHash"))))
++                .andExpect(content().string(not(containsString("SECRETO_INTERNO"))))
++                .andExpect(content().string(not(containsString("ELEGIDO-POR-CLIENTE"))));
++        verify(jdbc).queryForList(ALTA, 42, 7, "Falla ñ 漢字", "NORMAL", null, "María José");
++        verifyNoMoreInteractions(jdbc);
++    }
++    @Test void fechaEstimadaSeConvierteAUtcAntesDeLlamarSql() throws Exception {
++        mvc.perform(post("/api/ordenes").with(actor("RECEPCION")).with(csrf()).contentType("application/json")
++                .content(DATOS.replace("\"fechaEstimada\":null", "\"fechaEstimada\":\"2099-12-31T10:15:00-06:00\"")))
++                .andExpect(status().isCreated());
++        verify(jdbc).queryForList(ALTA, 42, 7, "Falla ñ 漢字", "NORMAL", LocalDateTime.of(2099, 12, 31, 16, 15), "María José");
++    }
++    @Test void filtrosDeDiasIncluyenGuatemalaYTextoSeEnviaComoParametro() throws Exception {
++        String literal = "100%_'; DROP TABLE dbo.Usuario;--";
++        mvc.perform(get("/api/ordenes").with(actor("TECNICO")).param("buscar", literal)
++                .param("estado", "RECIBIDO").param("prioridad", "NORMAL").param("tecnicoId", "0")
++                .param("desde", "2026-10-20").param("hasta", "2026-10-21")).andExpect(status().isOk());
++        verify(jdbc).queryForList(LISTA, 42, literal, "RECIBIDO", "NORMAL", 0,
++                LocalDateTime.of(2026, 10, 20, 6, 0), LocalDateTime.of(2026, 10, 22, 6, 0));
++    }
++    @ParameterizedTest @ValueSource(strings = {"ADMIN", "RECEPCION"})
++    void asignacionUsaActorDeSesionYResponsableAnterior(String rol) throws Exception {
++        mvc.perform(put("/api/ordenes/81/tecnico").with(actor(rol)).with(csrf()).contentType("application/json")
++                .content("{\"tecnicoId\":5,\"tecnicoAnteriorId\":4,\"observacion\":\" Cambio ñ \",\"usuarioActorID\":999}"))
++                .andExpect(status().isOk());
++        verify(jdbc).queryForList(ASIGNAR, 42, 81, 5, 4, "Cambio ñ");
++    }
++    @Test void cancelacionNoAceptaUnActorEnviadoPorElCliente() throws Exception {
++        mvc.perform(post("/api/ordenes/81/cancelacion").with(actor("RECEPCION")).with(csrf()).contentType("application/json")
++                .content("{\"motivo\":\" Cliente José solicita ñ \",\"usuarioActorID\":999}"))
++                .andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spCancelarOrden ?, ?, ?", 42, 81, "Cliente José solicita ñ");
++    }
++    @Test void lasTresEscriturasRequierenCsrf() throws Exception {
++        mvc.perform(post("/api/ordenes").with(actor("ADMIN")).contentType("application/json").content(DATOS)).andExpect(status().isForbidden());
++        mvc.perform(put("/api/ordenes/81/tecnico").with(actor("ADMIN")).contentType("application/json").content("{\"tecnicoId\":4}")).andExpect(status().isForbidden());
++        mvc.perform(post("/api/ordenes/81/cancelacion").with(actor("ADMIN")).contentType("application/json").content("{\"motivo\":\"Prueba\"}")).andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void idsYFechasInvalidosSeRechazanAntesDeSql() throws Exception {
++        mvc.perform(get("/api/ordenes/0").with(actor("ADMIN"))).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/ordenes/texto").with(actor("ADMIN"))).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/ordenes").with(actor("ADMIN")).param("desde", "2026-10-22").param("hasta", "2026-10-20")).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/ordenes").with(actor("ADMIN")).param("desde", "fecha-invalida")).andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void limitesYObligatoriosNoLleganASql() throws Exception {
++        for (String datos : List.of(DATOS.replace("Falla ñ 漢字", " "), DATOS.replace("Falla ñ 漢字", "a".repeat(1001)),
++                DATOS.replace("\"equipoId\":7", "\"equipoId\":0"), DATOS.replace("NORMAL", "a".repeat(11)),
++                DATOS.replace("María José", "a".repeat(1001)), DATOS.replace("\"fechaEstimada\":null", "\"fechaEstimada\":\"2000-01-01T00:00:00Z\"")))
++            mvc.perform(post("/api/ordenes").with(actor("ADMIN")).with(csrf()).contentType("application/json").content(datos)).andExpect(status().isBadRequest());
++        mvc.perform(post("/api/ordenes/81/cancelacion").with(actor("ADMIN")).with(csrf()).contentType("application/json").content("{\"motivo\":\"   \"}"))
++                .andExpect(status().isBadRequest());
++        mvc.perform(put("/api/ordenes/81/tecnico").with(actor("ADMIN")).with(csrf()).contentType("application/json").content("{\"tecnicoId\":0}"))
++                .andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @CsvSource({"51600,400", "51601,400", "51602,404", "51603,409", "51604,403", "547,409", "2627,409", "2812,503"})
++    void erroresSqlSeTraducenSinExponerDetallesInternos(int codigo, int estado) throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spConsultarOrden ?, ?", 42, 81)).thenThrow(
++                new UncategorizedSQLException("orden", "EXEC dbo.spConsultarOrden ?, ?", new SQLException("Mensaje controlado", "S0001", codigo)));
++        var respuesta = mvc.perform(get("/api/ordenes/81").with(actor("ADMIN"))).andExpect(status().is(estado));
++        if (estado == 503) respuesta.andExpect(content().string(not(containsString("Mensaje controlado"))));
++    }
++    @Test void historialYEquiposRecibenElActorParaAplicarLaMismaRestriccion() throws Exception {
++        mvc.perform(get("/api/ordenes/81/historial").with(actor("TECNICO"))).andExpect(status().isOk())
++                .andExpect(jsonPath("$[0].eventoId").value("E-1"));
++        mvc.perform(get("/api/equipos/7/historial").with(actor("TECNICO"))).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spHistorialOrden ?, ?", 42, 81);
++        verify(jdbc).queryForList("EXEC dbo.spHistorialEquipoAcceso ?, ?", 42, 7);
++    }
++    @Test void consultaSinFilasDevuelve404SiLaAsignacionCambioDuranteLaLectura() throws Exception {
++        when(jdbc.queryForList("EXEC dbo.spConsultarOrden ?, ?", 42, 81)).thenReturn(List.of());
++        mvc.perform(get("/api/ordenes/81").with(actor("TECNICO"))).andExpect(status().isNotFound());
++    }
++    @Test void catalogosUsanParametrosYNoSeExponenCambiosDeEstadoGenericos() throws Exception {
++        mvc.perform(get("/api/ordenes/catalogos/prioridades").with(actor("TECNICO"))).andExpect(status().isOk())
++                .andExpect(jsonPath("$[0].codigo").value("NORMAL"));
++        verify(jdbc).queryForList("EXEC dbo.spCatalogosOrden ?, ?", 42, "prioridades");
++        mvc.perform(get("/api/ordenes/catalogos/desconocido").with(actor("ADMIN"))).andExpect(status().isNotFound());
++        mvc.perform(post("/api/ordenes/81/estado").with(actor("ADMIN")).with(csrf()).contentType("application/json").content("{\"estado\":\"ENTREGADO\"}"))
++                .andExpect(status().isForbidden());
++    }
++}
+diff --git a/frontend/README.md b/frontend/README.md
+index 9b503fcd3daff2f6aef6a6e9d4e7424797e89520..54d700e9974f6ae53249c286b36cb69c7ae42699 100644
+--- a/frontend/README.md
++++ b/frontend/README.md
+@@ -20,7 +20,10 @@
+ - Equipos: listado, registro, edición, historial y catálogos de tipos, marcas y modelos.
+ - Administración (ADMIN): consulta y registro de cuentas con varios roles, para
+   un empleado nuevo o un empleado activo que todavía no tenga cuenta.
+-- Nueva orden: selección de cliente y equipo; la confirmación requiere la API de órdenes.
++- Órdenes: recepción con confirmación, listado con filtros, expediente e historial,
++  asignación de técnicos y cancelación según el estado. Requiere la actualización SQL 16.
++  Diagnósticos y reparaciones existentes se consultan; su registro y los cobros
++  se integran en las siguientes etapas.
+ 
+ Los demás módulos conservan sus pantallas pendientes de integración. El mapa
+ `/integracion`, disponible para ADMIN, detalla los endpoints implementados.
+@@ -37,8 +40,8 @@
+ acciones se ajustan a los roles; el servidor comprueba los mismos permisos.
+ Al salir o vencer la sesión se limpia la caché de consultas para el siguiente usuario.
+ 
+-Las respuestas de Clientes y Equipos conservan PascalCase. Las de acceso y usuarios
+-usan DTO camelCase en `src/services/auth.ts` y `src/services/usuarios.ts`.
++Las respuestas de Clientes y Equipos conservan PascalCase. Acceso, usuarios y órdenes
++usan DTO camelCase en sus respectivos archivos de `src/services/`.
+ Los errores mantienen `{estado,mensaje,errores?}`. El alta usa una solicitud directa
+ y no guarda la contraseña en la caché de consultas o de mutaciones.
+ 
+@@ -50,3 +53,6 @@
+ 
+ La instalación y las cuentas de demostración se describen en `../INTEGRACION_LOGIN.md`.
+ El alta de usuarios se describe en `../INTEGRACION_USUARIOS.md`.
++Órdenes se describe en `../INTEGRACION_ORDENES.md`. Los técnicos sin otros roles
++solo consultan las órdenes de las que son responsables. ADMIN y RECEPCION
++gestionan ingresos, asignaciones y cancelaciones; CAJA tiene consulta general.
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index 55bc08bb20c7e387c3aa8a1f224fee72d7828694..fad77b8b2419b321949df60b3b9504c042556d45 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -214,7 +214,7 @@
+     "respuesta": "HistorialEquipo[]",
+     "roles": "RECEPCION, TECNICO, ADMIN",
+     "estado": "disponible",
+-    "procedimiento": "spHistorialEquipo"
++    "procedimiento": "spHistorialEquipoAcceso"
+   },
+   {
+     "id": "catalogos.tiposEquipos",
+@@ -255,56 +255,49 @@
+ 
+   // ---- Ordenes ----
+   {
+-    id: "ordenes.listar",
+-    modulo: "Ordenes",
+-    operacion: "Listar y filtrar ordenes",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/ordenes)",
+-    entrada: "estado, prioridad, tecnico, fechas, texto",
+-    respuesta: "OrdenResumen[]",
+-    roles: "Todos",
+-    estado: "ausente",
+-    procedimiento: "vOrdenResumen",
+-    nota: "Orden no repite ClienteID: el propietario se obtiene via Equipo.",
+-  },
+-  {
+-    id: "ordenes.crear",
+-    modulo: "Ordenes",
+-    operacion: "Registrar ingreso (crear orden)",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/ordenes)",
+-    entrada: "NumeroOrden, EquipoID, Problema, Prioridad, FechaEstimada, Observaciones",
+-    respuesta: "OrdenID",
+-    roles: "RECEPCION",
+-    estado: "ausente",
+-    procedimiento: "spCrearOrden",
+-    nota: "spCrearOrden crea la orden y el historial inicial en RECIBIDO. El NumeroOrden lo genera/valida el servidor.",
+-  },
+-  {
+-    id: "ordenes.expediente",
+-    modulo: "Ordenes",
+-    operacion: "Expediente completo de la orden",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/ordenes/{id})",
+-    entrada: "id",
+-    respuesta: "orden + equipo + cliente + diagnostico + reparacion + repuestos + factura + entrega + historial",
+-    roles: "Todos",
+-    estado: "ausente",
+-    procedimiento: "vOrdenResumen, vConsumoRepuesto, vFacturaSaldo, HistorialEstadoOrden",
+-    nota: "La ausencia de diagnostico/reparacion/factura es un estado valido, no un error.",
+-  },
+-  {
+-    id: "ordenes.cambiarEstado",
+-    modulo: "Ordenes",
+-    operacion: "Cambio permitido o cancelacion",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/ordenes/{id}/estado)",
+-    entrada: "EstadoNuevo, Observacion",
+-    respuesta: "ok",
+-    roles: "TECNICO, RECEPCION",
+-    estado: "ausente",
+-    procedimiento: "spCambiarEstadoOrden",
+-    nota: "Valida TransicionEstadoOrden y escribe HistorialEstadoOrden. El frontend no debe duplicar el cambio de estado.",
++    id: "ordenes.listar", modulo: "Ordenes", operacion: "Listar y filtrar órdenes",
++    metodo: "GET", ruta: "/api/ordenes", entrada: "buscar?, estado?, prioridad?, tecnicoId?, desde?, hasta?",
++    respuesta: "Orden[]", roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "disponible",
++    procedimiento: "spListarOrdenes", nota: "El cliente se obtiene del equipo. SQL filtra el acceso por usuario.",
++  },
++  {
++    id: "ordenes.crear", modulo: "Ordenes", operacion: "Registrar ingreso",
++    metodo: "POST", ruta: "/api/ordenes", entrada: "equipoId, problema, prioridad, fechaEstimada?, observaciones?",
++    respuesta: "Orden", roles: "ADMIN, RECEPCION", estado: "disponible", procedimiento: "spRegistrarOrden",
++    nota: "Número y actor se resuelven en el servidor; el trigger crea el historial inicial.",
++  },
++  {
++    id: "ordenes.expediente", modulo: "Ordenes", operacion: "Consultar expediente de la orden",
++    metodo: "GET", ruta: "/api/ordenes/{id}", entrada: "id", respuesta: "Orden",
++    roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "incompleta", procedimiento: "spConsultarOrden",
++    nota: "Recepción y datos técnicos existentes conectados. Repuestos, cobros y entrega pendientes.",
++  },
++  {
++    id: "ordenes.asignar", modulo: "Ordenes", operacion: "Asignar o reasignar técnico",
++    metodo: "PUT", ruta: "/api/ordenes/{id}/tecnico", entrada: "tecnicoId, tecnicoAnteriorId, observacion?",
++    respuesta: "Orden", roles: "ADMIN, RECEPCION", estado: "disponible", procedimiento: "spAsignarTecnicoOrden",
++    nota: "Antes del diagnóstico. Conserva cada asignación y detecta pantallas desactualizadas.",
++  },
++  {
++    id: "ordenes.historial", modulo: "Ordenes", operacion: "Consultar historial",
++    metodo: "GET", ruta: "/api/ordenes/{id}/historial", entrada: "id", respuesta: "EventoOrden[]",
++    roles: "ADMIN, RECEPCION, TECNICO (sus órdenes), CAJA", estado: "disponible", procedimiento: "spHistorialOrden",
++  },
++  {
++    id: "ordenes.cancelar", modulo: "Ordenes", operacion: "Cancelar orden",
++    metodo: "POST", ruta: "/api/ordenes/{id}/cancelacion", entrada: "motivo", respuesta: "Orden",
++    roles: "ADMIN, RECEPCION", estado: "disponible", procedimiento: "spCancelarOrden",
++    nota: "Exige motivo y transición permitida. Conserva la orden y su historial.",
++  },
++  {
++    id: "ordenes.catalogos", modulo: "Ordenes", operacion: "Consultar estados y prioridades",
++    metodo: "GET", ruta: "/api/ordenes/catalogos/{estados|prioridades}", entrada: "catálogo",
++    respuesta: "CatalogoOrden[]", roles: "ADMIN, RECEPCION, TECNICO, CAJA", estado: "disponible", procedimiento: "spCatalogosOrden",
++  },
++  {
++    id: "ordenes.tecnicos", modulo: "Ordenes", operacion: "Consultar técnicos activos",
++    metodo: "GET", ruta: "/api/ordenes/catalogos/tecnicos", entrada: "-", respuesta: "TecnicoOrden[]",
++    roles: "ADMIN, RECEPCION", estado: "disponible", procedimiento: "spCatalogosOrden",
+   },
+ 
+   // ---- Diagnostico / reparacion ----
+diff --git a/frontend/src/app/navigation.ts b/frontend/src/app/navigation.ts
+index 0d8fbab0e9c0d543e30dd415db85339fa0102349..e314ab973ac29b0a9dcbbdf1ae71287cd4ed0c20 100644
+--- a/frontend/src/app/navigation.ts
++++ b/frontend/src/app/navigation.ts
+@@ -41,7 +41,7 @@
+   {
+     etiqueta: "Servicio",
+     items: [
+-      { etiqueta: "Ordenes", ruta: "/ordenes", icono: ClipboardList },
++      { etiqueta: "Ordenes", ruta: "/ordenes", icono: ClipboardList, roles: ["ADMIN", "RECEPCION", "TECNICO", "CAJA"] },
+       { etiqueta: "Nueva orden", ruta: "/ordenes/nueva", icono: Wrench, roles: ["RECEPCION", "ADMIN"] },
+       { etiqueta: "Clientes", ruta: "/clientes", icono: Users, roles: ["RECEPCION", "TECNICO", "CAJA", "ADMIN"] },
+       { etiqueta: "Equipos", ruta: "/equipos", icono: LayoutGrid, roles: ["RECEPCION", "TECNICO", "ADMIN"] },
+diff --git a/frontend/src/features/ordenes/OrdenExpedientePage.tsx b/frontend/src/features/ordenes/OrdenExpedientePage.tsx
+index d517639367bf95966f6e26b8772475b4c656ac79..9fefbb975ad208b18353648ade33ba119ab669be 100644
+--- a/frontend/src/features/ordenes/OrdenExpedientePage.tsx
++++ b/frontend/src/features/ordenes/OrdenExpedientePage.tsx
+@@ -1,157 +1,133 @@
+-import { useState } from "react";
+-import { Link, useParams } from "react-router-dom";
+-import { ArrowLeft, Info } from "lucide-react";
++import { useEffect, useRef, useState } from "react";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import { Link, useLocation, useParams } from "react-router-dom";
++import { ArrowLeft, RefreshCw } from "lucide-react";
++import { puedeAcceder, useSession } from "../../app/session";
+ import { PageHeader, Card } from "../../components/ui/Card";
+ import { Button } from "../../components/ui/Button";
+-import { Badge } from "../../components/ui/Badge";
+-import { PendingState } from "../../components/ui/StateView";
++import { EstadoOrdenBadge } from "../../components/ui/Badge";
++import { Alert } from "../../components/ui/Alert";
++import { Dialog } from "../../components/ui/Dialog";
++import { Field, SelectInput, TextArea } from "../../components/ui/inputs";
++import { EmptyState, LoadingState, PendingState } from "../../components/ui/StateView";
++import { DataTable, type Columna } from "../../components/ui/DataTable";
++import { ordenesApi, type EventoOrden } from "../../services/ordenes";
++import { esApiError, mensajeDeError } from "../../services/errors";
++import { fechaHora, moneda } from "../../utils/format";
++import { nombreEstado } from "../../services/catalogos";
++import "./ordenes.css";
+ 
+-type SeccionId = "recepcion" | "diagnostico" | "reparacion" | "repuestos" | "factura" | "entrega" | "historial";
+-
+-interface Seccion {
+-  id: SeccionId;
+-  titulo: string;
+-  descripcion: string;
+-}
+-
+-const SECCIONES: Seccion[] = [
+-  {
+-    id: "recepcion",
+-    titulo: "Recepcion",
+-    descripcion: "Ingreso del equipo, problema reportado, prioridad y fecha estimada.",
+-  },
+-  {
+-    id: "diagnostico",
+-    titulo: "Diagnostico",
+-    descripcion: "Diagnostico de la orden: tecnico, fecha, descripcion y costo estimado.",
+-  },
+-  {
+-    id: "reparacion",
+-    titulo: "Reparacion",
+-    descripcion: "Trabajo realizado, actividades, costo de mano de obra y estado de la reparacion.",
+-  },
+-  {
+-    id: "repuestos",
+-    titulo: "Repuestos",
+-    descripcion: "Repuestos consumidos con bodega, cantidad y precios historicos.",
+-  },
+-  {
+-    id: "factura",
+-    titulo: "Factura y pagos",
+-    descripcion: "Cero o una factura por orden, con mano de obra, repuestos, impuesto, pagado y saldo.",
+-  },
+-  {
+-    id: "entrega",
+-    titulo: "Entrega",
+-    descripcion: "Cierre con receptor, documento y observaciones, cuando la orden esta lista.",
+-  },
+-  {
+-    id: "historial",
+-    titulo: "Historial",
+-    descripcion: "Eventos de la orden con fecha, usuario y observacion.",
+-  },
+-];
+-
+-const ACCIONES = [
+-  "Registrar diagnostico",
+-  "Iniciar reparacion",
+-  "Registrar actividad",
+-  "Consumir repuesto",
+-  "Finalizar reparacion",
+-  "Emitir factura",
+-  "Registrar pago",
+-  "Registrar entrega",
+-];
+-
++const SECCIONES = ["Recepción", "Diagnóstico", "Reparación", "Repuestos", "Factura y pagos", "Entrega", "Historial"] as const;
++type Seccion = typeof SECCIONES[number];
+ export function OrdenExpedientePage() {
+   const { id } = useParams();
+-  const [seccion, setSeccion] = useState<SeccionId>("recepcion");
+-  const actual = SECCIONES.find((s) => s.id === seccion)!;
+-
+-  return (
+-    <>
+-      <PageHeader
+-        eyebrow="Servicio / Ordenes / Expediente"
+-        titulo={`Orden #${id ?? "—"}`}
+-        descripcion="Recorrido completo del servicio en una sola pantalla."
+-        acciones={
+-          <Link to="/ordenes">
+-            <Button variante="fantasma" icono={<ArrowLeft size={16} />}>
+-              Volver
+-            </Button>
+-          </Link>
+-        }
+-      />
+-
+-      <div className="tc-stack">
+-        <p className="tc-inline-note">
+-          <Info size={16} aria-hidden="true" />
+-          El expediente completo (numero, estado, cliente, equipo, fechas y responsable) se mostrara cuando el
+-          servidor exponga el detalle de la orden. Abrir esta pantalla no cambia ningun estado.
+-        </p>
+-
+-        <Card>
+-          <h2 className="tc-section-title">Cabecera de la orden</h2>
+-          <dl className="tc-dl">
+-            <dt>Numero de orden</dt>
+-            <dd>{id ?? "—"}</dd>
+-            <dt>Estado</dt>
+-            <dd>
+-              <Badge tono="neutral">En preparacion</Badge>
+-            </dd>
+-            <dt>Prioridad</dt>
+-            <dd className="tc-field__hint">En preparacion</dd>
+-            <dt>Cliente / Equipo</dt>
+-            <dd className="tc-field__hint">El cliente se toma del equipo de la orden.</dd>
+-            <dt>Tecnico responsable</dt>
+-            <dd className="tc-field__hint">Sin asignar mientras no haya responsable.</dd>
+-          </dl>
++  const ordenId = Number(id);
++  const valido = Number.isInteger(ordenId) && ordenId > 0 && ordenId <= 2147483647;
++  const sesion = useSession();
++  const gestion = puedeAcceder(sesion, ["ADMIN", "RECEPCION"]);
++  const location = useLocation();
++  const qc = useQueryClient();
++  const [seccion, setSeccion] = useState<Seccion>("Recepción");
++  const [accion, setAccion] = useState<"asignar" | "cancelar" | null>(null);
++  const [tecnicoId, setTecnicoId] = useState("");
++  const [observacion, setObservacion] = useState("");
++  const [error, setError] = useState("");
++  const [mensaje, setMensaje] = useState("");
++  const [guardando, setGuardando] = useState(false);
++  const enCurso = useRef(false);
++  const montado = useRef(true);
++  useEffect(() => { montado.current = true; return () => { montado.current = false; }; }, []);
++  const orden = useQuery({ queryKey: ["orden", ordenId], queryFn: ({ signal }) => ordenesApi.consultar(ordenId, signal), enabled: valido });
++  const historial = useQuery({ queryKey: ["orden", ordenId, "historial"], queryFn: ({ signal }) => ordenesApi.historial(ordenId, signal), enabled: valido && seccion === "Historial" && !!orden.data });
++  const tecnicos = useQuery({ queryKey: ["ordenes", "tecnicos"], queryFn: ({ signal }) => ordenesApi.tecnicos(signal), enabled: gestion && accion === "asignar" });
++  const o = orden.data;
++  async function guardar() {
++    if (enCurso.current || !o || !accion) return;
++    if (accion === "asignar" && (!tecnicoId || Number(tecnicoId) === o.usuarioTecnicoId)) { setError("Elegí un técnico diferente al actual."); return; }
++    if (accion === "cancelar" && !observacion.trim()) { setError("Ingresá el motivo de cancelación."); return; }
++    enCurso.current = true; setGuardando(true); setError("");
++    try {
++      const actualizada = accion === "asignar"
++        ? await ordenesApi.asignar(ordenId, Number(tecnicoId), o.usuarioTecnicoId, observacion.trim())
++        : await ordenesApi.cancelar(ordenId, observacion.trim());
++      if (!montado.current) return;
++      qc.setQueryData(["orden", ordenId], actualizada);
++      setMensaje(accion === "asignar" ? "Se actualizó el técnico responsable." : "La orden fue cancelada y conservó su historial.");
++      setAccion(null);
++      await Promise.all([qc.invalidateQueries({ queryKey: ["ordenes"] }), qc.invalidateQueries({ queryKey: ["orden", ordenId] }), qc.invalidateQueries({ queryKey: ["equipos"] })]);
++    } catch (e) {
++      setError(mensajeDeError(e));
++      if (esApiError(e) && e.status === 409) void orden.refetch();
++    } finally { enCurso.current = false; setGuardando(false); }
++  }
++  const columnas: Columna<EventoOrden>[] = [
++    { clave: "fecha", encabezado: "Fecha", render: e => fechaHora(e.fecha) },
++    { clave: "evento", encabezado: "Evento", render: e => e.tipo === "ASIGNACION" ? `Asignación a ${e.tecnico}` : `${e.estadoAnterior ? nombreEstado(e.estadoAnterior) + " → " : "Ingreso → "}${nombreEstado(e.estadoNuevo || "")}` },
++    { clave: "usuario", encabezado: "Registrado por", render: e => e.nombreUsuario },
++    { clave: "observacion", encabezado: "Observación", render: e => e.observacion || "—" },
++  ];
++  return <>
++    <PageHeader eyebrow="Servicio / Órdenes / Expediente" titulo={o ? o.numeroOrden : "Expediente de la orden"}
++      descripcion="Ingreso, responsable y seguimiento del servicio."
++      acciones={<><Link to="/ordenes"><Button variante="fantasma" icono={<ArrowLeft size={16} />}>Volver</Button></Link>
++        {valido ? <Button disabled={orden.isFetching || guardando} icono={<RefreshCw size={16} />} onClick={() => { void orden.refetch(); if (seccion === "Historial") void historial.refetch(); }}>Actualizar</Button> : null}</>} />
++    {!valido ? <Alert tono="danger">El número de expediente no es válido.</Alert> : orden.isLoading ? <LoadingState titulo="Cargando expediente…" /> : orden.isError ?
++      <Alert tono="danger" titulo="No se pudo consultar la orden" accion={<Button onClick={() => orden.refetch()}>Reintentar</Button>}>{mensajeDeError(orden.error)}</Alert> : o ?
++      <div className="tc-stack tc-ordenes">
++        {(location.state as { nuevaOrden?: boolean } | null)?.nuevaOrden && !mensaje ? <Alert tono="ok">Ingreso registrado. Número de orden: {o.numeroOrden}.</Alert> : null}
++        {mensaje ? <Alert tono="ok">{mensaje}</Alert> : null}
++        <Card><h2 className="tc-section-title">Resumen del servicio</h2><dl className="tc-dl">
++          <dt>Estado</dt><dd><EstadoOrdenBadge codigo={o.estadoCodigo} nombre={o.estado} /></dd>
++          <dt>Prioridad</dt><dd>{o.prioridad}</dd><dt>Cliente</dt><dd>{o.cliente} · NIT {o.nit}</dd>
++          <dt>Equipo</dt><dd>{o.numeroSerie} · {o.marca} {o.modelo}</dd><dt>Técnico responsable</dt><dd>{o.tecnico || "Sin asignar"}</dd>
++          <dt>Ingreso</dt><dd>{fechaHora(o.fechaIngreso)}</dd><dt>Fecha estimada</dt><dd>{fechaHora(o.fechaEstimada)}</dd>
++        </dl>
++          {gestion ? <div className="tc-row" style={{ flexWrap: "wrap", marginTop: 16 }}>
++            {!o.diagnosticoId && ["RECIBIDO", "DIAGNOSTICO"].includes(o.estadoCodigo) ?
++              <Button disabled={guardando} onClick={() => { setAccion("asignar"); setTecnicoId(""); setObservacion(""); setError(""); }}>{o.usuarioTecnicoId ? "Reasignar técnico" : "Asignar técnico"}</Button> : null}
++            {["RECIBIDO", "DIAGNOSTICO", "ESPERANDO_AUTORIZACION"].includes(o.estadoCodigo) ?
++              <Button disabled={guardando} onClick={() => { setAccion("cancelar"); setObservacion(""); setError(""); }}>Cancelar orden</Button> : null}
++          </div> : null}
+         </Card>
+-
+-        <div>
+-          <div className="tc-row" role="tablist" aria-label="Secciones del expediente">
+-            {SECCIONES.map((s) => (
+-              <button
+-                key={s.id}
+-                role="tab"
+-                type="button"
+-                aria-selected={s.id === seccion}
+-                className="tc-btn tc-btn--sm"
+-                style={s.id === seccion ? { background: "var(--tc-interactive)" } : { background: "transparent" }}
+-                onClick={() => setSeccion(s.id)}
+-              >
+-                {s.titulo}
+-              </button>
+-            ))}
+-          </div>
+-
+-          <Card className="tc-stack">
+-            <div role="tabpanel" aria-label={actual.titulo}>
+-              <h2 className="tc-section-title">{actual.titulo}</h2>
+-              <p className="tc-section-sub">{actual.descripcion}</p>
+-              <PendingState
+-                titulo="Todavia no disponible"
+-                descripcion="La ausencia de datos en esta seccion es una situacion valida (por ejemplo, una orden sin diagnostico) y se distingue de un error de consulta."
+-              />
+-            </div>
+-          </Card>
++        <div className="tc-row" role="tablist" aria-label="Secciones del expediente" style={{ flexWrap: "wrap" }}>
++          {SECCIONES.map(s => <button key={s} type="button" role="tab" aria-selected={s === seccion} className="tc-btn tc-btn--sm"
++            style={{ background: s === seccion ? "var(--tc-interactive)" : "transparent" }} onClick={() => setSeccion(s)}>{s}</button>)}
+         </div>
+-
+-        <Card>
+-          <h2 className="tc-section-title">Acciones segun rol y estado</h2>
+-          <p className="tc-section-sub">
+-            Cada accion se habilita cuando existe la conexion con el servidor y el estado de la orden lo permite.
+-            Mientras tanto permanecen bloqueadas; la interfaz no cambia estados por si sola.
+-          </p>
+-          <div className="tc-row">
+-            {ACCIONES.map((etiqueta) => (
+-              <Button key={etiqueta} disabled title="Se habilita cuando exista la conexion con el servidor">
+-                {etiqueta}
+-              </Button>
+-            ))}
+-          </div>
+-        </Card>
+-      </div>
+-    </>
+-  );
++        <Card><div role="tabpanel" aria-label={seccion}>
++          <h2 className="tc-section-title">{seccion}</h2>
++          {seccion === "Recepción" ? <dl className="tc-dl"><dt>Registrado por</dt><dd>{o.recepcionista}</dd>
++            <dt>Problema reportado</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.problemaReportado}</dd>
++            <dt>Descripción del equipo</dt><dd style={{ overflowWrap: "anywhere" }}>{o.equipoDescripcion}</dd>
++            <dt>Observaciones</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.observaciones || "Sin observaciones"}</dd></dl> : null}
++          {seccion === "Diagnóstico" ? o.diagnosticoId ? <dl className="tc-dl"><dt>Fecha</dt><dd>{fechaHora(o.fechaDiagnostico)}</dd>
++            <dt>Descripción</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.descripcionDiagnostico}</dd><dt>Mano de obra estimada</dt><dd>{moneda(o.costoEstimado)}</dd></dl> :
++            <EmptyState titulo="Sin diagnóstico registrado" descripcion="La orden conserva la falla reportada durante la recepción." /> : null}
++          {seccion === "Reparación" ? o.reparacionId ? <dl className="tc-dl"><dt>Estado</dt><dd>{o.estadoReparacion}</dd>
++            <dt>Inicio</dt><dd>{fechaHora(o.fechaInicioReparacion)}</dd><dt>Finalización</dt><dd>{fechaHora(o.fechaFinReparacion)}</dd>
++            <dt>Trabajo realizado</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{o.descripcionTrabajo}</dd><dt>Mano de obra</dt><dd>{moneda(o.costoManoObra)}</dd></dl> :
++            <EmptyState titulo="Sin reparación registrada" descripcion="La reparación requiere un diagnóstico y la autorización del cliente." /> : null}
++          {seccion === "Historial" ? historial.isLoading ? <LoadingState titulo="Cargando historial…" /> : historial.isError ?
++            <Alert tono="danger" accion={<Button onClick={() => historial.refetch()}>Reintentar</Button>}>{mensajeDeError(historial.error)}</Alert> :
++            <DataTable columnas={columnas} filas={historial.data ?? []} claveFila={e => e.eventoId} vacio="Sin eventos registrados." /> : null}
++          {["Repuestos", "Factura y pagos", "Entrega"].includes(seccion) ? <PendingState titulo="Sección pendiente" descripcion="Esta parte del expediente todavía no está disponible." /> : null}
++        </div></Card>
++      </div> : null}
++    {accion && o ? <Dialog abierto titulo={accion === "asignar" ? "Asignar técnico" : "Cancelar orden"}
++      descripcion={accion === "asignar" ? `Responsable actual: ${o.tecnico || "Sin asignar"}.` : "La cancelación conserva el ingreso y su historial."}
++      onCerrar={() => { if (!enCurso.current) setAccion(null); }}>
++      <form className="tc-stack" style={{ marginTop: 16 }} onSubmit={e => { e.preventDefault(); void guardar(); }}>
++        {error ? <Alert tono="danger">{error}</Alert> : null}
++        {accion === "asignar" ? tecnicos.isLoading ? <LoadingState titulo="Cargando técnicos…" /> : tecnicos.isError ?
++          <Alert tono="danger" accion={<Button type="button" onClick={() => tecnicos.refetch()}>Reintentar</Button>}>{mensajeDeError(tecnicos.error)}</Alert> :
++          <Field label="Técnico" htmlFor="asignar-tecnico" requerido><SelectInput id="asignar-tecnico" required disabled={guardando} value={tecnicoId} onChange={e => setTecnicoId(e.target.value)}>
++            <option value="">Elegir técnico activo</option>{tecnicos.data?.filter(t => t.usuarioId !== o.usuarioTecnicoId).map(t => <option key={t.usuarioId} value={t.usuarioId}>{t.nombre} · {t.empleadoCodigo}</option>)}
++          </SelectInput></Field> : null}
++        <Field label={accion === "cancelar" ? "Motivo de cancelación" : "Observación"} htmlFor="orden-observacion" requerido={accion === "cancelar"}>
++          <TextArea id="orden-observacion" rows={3} maxLength={500} required={accion === "cancelar"} disabled={guardando} value={observacion} onChange={e => setObservacion(e.target.value)} /></Field>
++        <div className="tc-row tc-row--end"><Button type="button" disabled={guardando} onClick={() => setAccion(null)}>Volver</Button>
++          <Button type="submit" variante="primario" disabled={guardando || (accion === "asignar" && (tecnicos.isLoading || tecnicos.isError || !tecnicoId))}>
++            {guardando ? "Guardando…" : accion === "asignar" ? "Guardar asignación" : "Confirmar cancelación"}</Button></div>
++      </form>
++    </Dialog> : null}
++  </>;
+ }
+diff --git a/frontend/src/features/ordenes/OrdenNuevaPage.tsx b/frontend/src/features/ordenes/OrdenNuevaPage.tsx
+index f0e0384a2623f969c733080d76689cdde5a6958a..a33ae5ef2f5800665919373608c48fb04711e211 100644
+--- a/frontend/src/features/ordenes/OrdenNuevaPage.tsx
++++ b/frontend/src/features/ordenes/OrdenNuevaPage.tsx
+@@ -1,205 +1,134 @@
+-import { useState } from "react";
+-import { useQuery } from "@tanstack/react-query";
+-import { Link } from "react-router-dom";
+-import { Check, Info } from "lucide-react";
++import { useEffect, useRef, useState } from "react";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import { Link, useNavigate } from "react-router-dom";
++import { Check } from "lucide-react";
+ import { PageHeader, Card } from "../../components/ui/Card";
+ import { Button } from "../../components/ui/Button";
+ import { Alert } from "../../components/ui/Alert";
+-import { SearchInput, SelectInput, TextArea, Field } from "../../components/ui/inputs";
++import { SearchInput, SelectInput, TextArea, Field, TextInput } from "../../components/ui/inputs";
+ import { Badge } from "../../components/ui/Badge";
+-import { EmptyState, LoadingState, PendingState } from "../../components/ui/StateView";
++import { EmptyState, LoadingState } from "../../components/ui/StateView";
+ import { useClientes } from "../clientes/hooks";
+-import { PRIORIDADES, nombreTipoCliente } from "../../services/catalogos";
++import { nombreTipoCliente } from "../../services/catalogos";
+ import { mensajeDeError } from "../../services/errors";
+-import { normalizar } from "../../utils/format";
++import { normalizar, fechaHora } from "../../utils/format";
+ import type { Cliente } from "../../types/api";
+ import { equiposApi } from "../../services/equipos";
++import { ordenesApi } from "../../services/ordenes";
++import "./ordenes.css";
+ 
+ const PASOS = ["Cliente", "Equipo", "Problema", "Confirmar"] as const;
+-
+-/**
+- * Flujo guiado de recepcion de un equipo.
+- *
+- * Cliente y Equipo consultan sus APIs reales. Confirmar el ingreso requiere
+- * POST /api/ordenes; permanece deshabilitado hasta integrar ese endpoint.
+- */
+ export function OrdenNuevaPage() {
+   const [paso, setPaso] = useState(0);
+-  const [clienteSeleccionado, setClienteSeleccionado] = useState<Cliente | null>(null);
+-  const { data, isLoading, isError, error, refetch } = useClientes();
++  const [cliente, setCliente] = useState<Cliente | null>(null);
++  const clientes = useClientes();
+   const [busqueda, setBusqueda] = useState("");
+   const [equipoId, setEquipoId] = useState("");
+-  const equipos = useQuery({
+-    queryKey: ["equipos", "cliente", clienteSeleccionado?.ClienteID],
+-    queryFn: ({ signal }) => equiposApi.listar(clienteSeleccionado!.ClienteID, signal),
+-    enabled: clienteSeleccionado !== null,
+-  });
+-
+-  const filtrados = (data ?? []).filter((c) => {
+-    const q = normalizar(busqueda);
+-    if (!q) return true;
+-    return normalizar(c.Nombre).includes(q) || normalizar(c.NIT).includes(q);
+-  });
+-
+-  return (
+-    <>
+-      <PageHeader
+-        eyebrow="Servicio / Ordenes"
+-        titulo="Nueva orden de servicio"
+-        descripcion="Buscar o registrar el cliente, elegir su equipo y capturar el problema reportado antes de confirmar el ingreso."
+-      />
+-
+-      <div className="tc-stack">
+-        <nav aria-label="Pasos de la recepcion" className="tc-row" style={{ gap: 8 }}>
+-          {PASOS.map((nombre, i) => {
+-            const activo = i === paso;
+-            const completado = i < paso;
+-            return (
+-              <div key={nombre} className="tc-row" style={{ gap: 8 }}>
+-                <Badge tono={activo ? "info" : completado ? "ok" : "neutral"}>
+-                  {completado ? <Check size={13} /> : null} {i + 1}. {nombre}
+-                </Badge>
+-                {i < PASOS.length - 1 ? <span aria-hidden="true" className="tc-field__hint">›</span> : null}
+-              </div>
+-            );
+-          })}
+-        </nav>
+-
+-        {paso === 0 ? (
+-          <Card>
+-            <h2 className="tc-section-title">Paso 1 · Cliente</h2>
+-            <p className="tc-section-sub">
+-              Buscá el cliente que entrega el equipo. Si todavia no existe, registralo en el modulo de Clientes.
+-            </p>
+-            <SearchInput
+-              placeholder="Buscar por nombre o NIT"
+-              aria-label="Buscar cliente"
+-              value={busqueda}
+-              onChange={(e) => setBusqueda(e.target.value)}
+-            />
+-            <div style={{ marginTop: 16 }}>
+-              {isLoading ? (
+-                <LoadingState titulo="Cargando clientes…" />
+-              ) : isError ? (
+-                <Alert tono="danger" titulo="No se pudo cargar clientes" accion={<Button onClick={() => refetch()}>Reintentar</Button>}>
+-                  {mensajeDeError(error, "la lista de clientes")}
+-                </Alert>
+-              ) : filtrados.length === 0 ? (
+-                <EmptyState titulo="Sin coincidencias" descripcion="Proba otro termino o registra un cliente nuevo." />
+-              ) : (
+-                <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+-                  {filtrados.slice(0, 8).map((c) => (
+-                    <li
+-                      key={c.ClienteID}
+-                      className="tc-row"
+-                      style={{ justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid var(--tc-divider)" }}
+-                    >
+-                      <span>
+-                        <strong style={{ fontWeight: 500 }}>{c.Nombre}</strong>
+-                        <div className="tc-field__hint">
+-                          {nombreTipoCliente(c.TipoClienteID)} · NIT {c.NIT} {c.Activo ? "" : "· inactivo"}
+-                        </div>
+-                      </span>
+-                      <Button
+-                        tamano="sm"
+-                        variante={clienteSeleccionado?.ClienteID === c.ClienteID ? "primario" : "secundario"}
+-                        onClick={() => { setClienteSeleccionado(c); setEquipoId(""); }}
+-                        disabled={!c.Activo}
+-                      >
+-                        {clienteSeleccionado?.ClienteID === c.ClienteID ? "Seleccionado" : "Elegir"}
+-                      </Button>
+-                    </li>
+-                  ))}
+-                </ul>
+-              )}
+-            </div>
+-            <div className="tc-row tc-row--end" style={{ marginTop: 16 }}>
+-              <Link to="/clientes">
+-                <Button variante="fantasma">Registrar cliente nuevo</Button>
+-              </Link>
+-              <Button variante="primario" disabled={!clienteSeleccionado} onClick={() => setPaso(1)}>
+-                Continuar con el equipo
+-              </Button>
+-            </div>
+-          </Card>
+-        ) : null}
+-
+-        {paso === 1 ? (
+-          <Card>
+-            <h2 className="tc-section-title">Paso 2 · Equipo</h2>
+-            <div className="tc-row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+-              <span className="tc-field__hint">
+-                Cliente: <strong style={{ color: "var(--tc-text)" }}>{clienteSeleccionado?.Nombre}</strong>
+-              </span>
+-              <Button tamano="sm" variante="fantasma" onClick={() => setPaso(0)}>
+-                Cambiar
+-              </Button>
+-            </div>
+-            {equipos.isLoading ? <LoadingState titulo="Cargando equipos…" /> : equipos.isError ? (
+-              <Alert tono="danger" accion={<Button onClick={() => equipos.refetch()}>Reintentar</Button>}>{mensajeDeError(equipos.error)}</Alert>
+-            ) : (
+-              <Field label="Equipo del cliente" htmlFor="nueva-equipo" requerido>
+-                <SelectInput id="nueva-equipo" value={equipoId} onChange={e => setEquipoId(e.target.value)}>
+-                  <option value="">Elegir equipo</option>
+-                  {equipos.data?.filter(e => e.Activo).map(e => <option key={e.EquipoID} value={e.EquipoID}>{e.NumeroSerie} · {e.Marca} {e.Modelo}</option>)}
+-                </SelectInput>
+-              </Field>
+-            )}
+-            <Link to={`/equipos?clienteId=${clienteSeleccionado?.ClienteID}`}><Button variante="fantasma">Registrar o consultar equipos</Button></Link>
+-            <div className="tc-row tc-row--end">
+-              <Button disabled={!equipoId || equipos.isError} onClick={() => setPaso(2)}>Continuar</Button>
+-            </div>
+-          </Card>
+-        ) : null}
+-
+-        {paso === 2 ? (
+-          <Card>
+-            <h2 className="tc-section-title">Paso 3 · Problema reportado</h2>
+-            <div className="tc-stack">
+-              <Field label="Problema reportado" htmlFor="nueva-problema" requerido hint="Obligatorio (CK_Orden_Problema).">
+-                <TextArea id="nueva-problema" rows={4} placeholder="Describi la falla tal como la reporta el cliente." />
+-              </Field>
+-              <div className="tc-grid tc-grid--2">
+-                <Field label="Prioridad" htmlFor="nueva-prioridad">
+-                  <SelectInput id="nueva-prioridad" defaultValue="NORMAL">
+-                    {PRIORIDADES.map((p) => (
+-                      <option key={p.codigo} value={p.codigo}>
+-                        {p.nombre}
+-                      </option>
+-                    ))}
+-                  </SelectInput>
+-                </Field>
+-                <Field label="Fecha estimada (opcional)" htmlFor="nueva-fecha">
+-                  <input id="nueva-fecha" type="datetime-local" className="tc-input" />
+-                </Field>
+-              </div>
+-              <Field label="Observaciones" htmlFor="nueva-obs">
+-                <TextArea id="nueva-obs" rows={2} />
+-              </Field>
+-            </div>
+-            <div className="tc-row tc-row--end" style={{ marginTop: 16 }}>
+-              <Button variante="fantasma" onClick={() => setPaso(1)}>
+-                Atras
+-              </Button>
+-              <Button variante="primario" disabled>
+-                Revisar
+-              </Button>
+-            </div>
+-            <PendingState titulo="Creación de la orden pendiente" descripcion="La selección del cliente y del equipo está disponible. Falta conectar la confirmación del ingreso con el registro de órdenes." />
+-          </Card>
+-        ) : null}
+-
+-        {paso === 3 ? (
+-          <Card>
+-            <h2 className="tc-section-title">Paso 4 · Confirmar ingreso</h2>
+-            <p className="tc-inline-note">
+-              <Info size={16} aria-hidden="true" />
+-              La confirmacion del ingreso todavia no esta disponible: el servidor debe crear la orden y asignar su
+-              numero. Cuando exista, aparecera aqui con validacion y manejo de duplicados.
+-            </p>
+-          </Card>
+-        ) : null}
+-      </div>
+-    </>
+-  );
++  const [problema, setProblema] = useState("");
++  const [prioridad, setPrioridad] = useState("NORMAL");
++  const [estimada, setEstimada] = useState("");
++  const [observaciones, setObservaciones] = useState("");
++  const [error, setError] = useState("");
++  const [guardando, setGuardando] = useState(false);
++  const enCurso = useRef(false);
++  const montado = useRef(true);
++  useEffect(() => { montado.current = true; return () => { montado.current = false; }; }, []);
++  const navegar = useNavigate();
++  const qc = useQueryClient();
++  const equipos = useQuery({ queryKey: ["equipos", "cliente", cliente?.ClienteID],
++    queryFn: ({ signal }) => equiposApi.listar(cliente!.ClienteID, signal), enabled: cliente !== null });
++  const prioridades = useQuery({ queryKey: ["ordenes", "prioridades"], queryFn: ({ signal }) => ordenesApi.catalogo("prioridades", signal) });
++  const equipo = equipos.data?.find(e => e.EquipoID === Number(equipoId));
++  const filtrados = (clientes.data ?? []).filter(c => normalizar(c.Nombre).includes(normalizar(busqueda)) || normalizar(c.NIT).includes(normalizar(busqueda)));
++  function fechaEstimadaUtc() { return estimada ? new Date(`${estimada}-06:00`).toISOString() : null; }
++  function validar(): boolean {
++    if (!cliente?.Activo || !equipo?.Activo || !equipo.ClienteActivo) { setError("Elegí un cliente y un equipo activos."); return false; }
++    if (!problema.trim() || problema.trim().length > 1000) { setError("El problema es obligatorio y admite hasta 1000 caracteres."); return false; }
++    if (!prioridades.data?.some(p => p.codigo === prioridad)) { setError("Elegí una prioridad válida."); return false; }
++    if (observaciones.trim().length > 1000) { setError("Las observaciones admiten hasta 1000 caracteres."); return false; }
++    if (estimada && (!Number.isFinite(new Date(`${estimada}-06:00`).getTime()) || new Date(`${estimada}-06:00`).getTime() <= Date.now())) {
++      setError("La fecha estimada debe ser posterior al momento actual."); return false;
++    }
++    setError(""); return true;
++  }
++  async function confirmar() {
++    if (enCurso.current || !validar()) return;
++    enCurso.current = true; setGuardando(true);
++    try {
++      const orden = await ordenesApi.crear({ equipoId: Number(equipoId), problema: problema.trim(), prioridad,
++        fechaEstimada: fechaEstimadaUtc(), observaciones: observaciones.trim() || null });
++      if (!montado.current) return;
++      qc.setQueryData(["orden", orden.ordenId], orden);
++      await Promise.all([qc.invalidateQueries({ queryKey: ["ordenes"] }), qc.invalidateQueries({ queryKey: ["equipos"] })]);
++      if (!montado.current) return;
++      navegar(`/ordenes/${orden.ordenId}`, { replace: true, state: { nuevaOrden: true } });
++    } catch (e) {
++      setError(`${mensajeDeError(e)} Si la conexión se interrumpió, consultá el listado antes de volver a confirmar.`);
++    } finally { enCurso.current = false; setGuardando(false); }
++  }
++  return <>
++    <PageHeader eyebrow="Servicio / Órdenes" titulo="Nueva orden de servicio" descripcion="Elegí el cliente y su equipo, describí la falla y confirmá el ingreso." />
++    <div className="tc-stack tc-ordenes">
++      <nav aria-label="Pasos de la recepción" className="tc-row" style={{ gap: 8, flexWrap: "wrap" }}>
++        {PASOS.map((nombre, i) => <Badge key={nombre} tono={i === paso ? "info" : i < paso ? "ok" : "neutral"}>{i < paso ? <Check size={13} /> : null} {i + 1}. {nombre}</Badge>)}
++      </nav>
++      {error ? <Alert tono="danger" titulo="No se pudo continuar">{error}</Alert> : null}
++      {paso === 0 ? <Card>
++        <h2 className="tc-section-title">Paso 1 · Cliente</h2><p className="tc-section-sub">Buscá al cliente que entrega el equipo.</p>
++        <SearchInput aria-label="Buscar cliente" placeholder="Buscar por nombre o NIT" value={busqueda} onChange={e => setBusqueda(e.target.value)} />
++        {clientes.isLoading ? <LoadingState titulo="Cargando clientes…" /> : clientes.isError ?
++          <Alert tono="danger" accion={<Button onClick={() => clientes.refetch()}>Reintentar</Button>}>{mensajeDeError(clientes.error)}</Alert> :
++          filtrados.length === 0 ? <EmptyState titulo="Sin coincidencias" descripcion="Probá otro nombre o registrá un cliente nuevo." /> :
++          <ul style={{ listStyle: "none", padding: 0 }}>{filtrados.slice(0, 10).map(c =>
++            <li key={c.ClienteID} className="tc-row" style={{ justifyContent: "space-between", padding: "12px 0", borderBottom: "1px solid var(--tc-divider)" }}>
++              <span><strong>{c.Nombre}</strong><span className="tc-field__hint" style={{ display: "block" }}>{nombreTipoCliente(c.TipoClienteID)} · NIT {c.NIT}{c.Activo ? "" : " · Inactivo"}</span></span>
++              <Button tamano="sm" disabled={!c.Activo} variante={cliente?.ClienteID === c.ClienteID ? "primario" : "secundario"}
++                onClick={() => { setCliente(c); setEquipoId(""); setError(""); }}>{cliente?.ClienteID === c.ClienteID ? "Seleccionado" : "Elegir"}</Button>
++            </li>)}</ul>}
++        <div className="tc-row tc-row--end"><Link to="/clientes"><Button variante="fantasma">Registrar cliente nuevo</Button></Link>
++          <Button variante="primario" disabled={!cliente || clientes.isError} onClick={() => setPaso(1)}>Continuar con el equipo</Button></div>
++      </Card> : null}
++      {paso === 1 ? <Card>
++        <h2 className="tc-section-title">Paso 2 · Equipo</h2><p className="tc-section-sub">Cliente: {cliente?.Nombre}</p>
++        {equipos.isLoading ? <LoadingState titulo="Cargando equipos…" /> : equipos.isError ?
++          <Alert tono="danger" accion={<Button onClick={() => equipos.refetch()}>Reintentar</Button>}>{mensajeDeError(equipos.error)}</Alert> :
++          <Field label="Equipo del cliente" htmlFor="nueva-equipo" requerido><SelectInput id="nueva-equipo" value={equipoId} onChange={e => setEquipoId(e.target.value)}>
++            <option value="">Elegir equipo</option>{(equipos.data ?? []).filter(e => e.Activo && e.ClienteActivo).map(e =>
++              <option key={e.EquipoID} value={e.EquipoID}>{e.NumeroSerie} · {e.Marca} {e.Modelo}</option>)}
++          </SelectInput></Field>}
++        {!equipos.isLoading && !equipos.isError && !equipos.data?.some(e => e.Activo && e.ClienteActivo) ?
++          <EmptyState titulo="Sin equipos activos" descripcion="Registrá un equipo para este cliente antes de continuar." /> : null}
++        <div className="tc-row" style={{ marginTop: 16 }}><Link to={`/equipos?clienteId=${cliente?.ClienteID}`}><Button variante="fantasma">Registrar o consultar equipos</Button></Link>
++          <Button onClick={() => setPaso(0)}>Atrás</Button><Button variante="primario" disabled={!equipo?.Activo || equipos.isError} onClick={() => { setError(""); setPaso(2); }}>Continuar</Button></div>
++      </Card> : null}
++      {paso === 2 ? <Card>
++        <h2 className="tc-section-title">Paso 3 · Problema reportado</h2>
++        <form className="tc-stack" onSubmit={e => { e.preventDefault(); if (validar()) setPaso(3); }}>
++          <Field label="Problema reportado" htmlFor="nueva-problema" requerido hint={`${problema.length}/1000 caracteres`}>
++            <TextArea id="nueva-problema" required rows={4} maxLength={1000} value={problema} onChange={e => setProblema(e.target.value)} /></Field>
++          <div className="tc-grid tc-grid--2">
++            <Field label="Prioridad" htmlFor="nueva-prioridad" requerido><SelectInput id="nueva-prioridad" required value={prioridad} disabled={prioridades.isLoading || prioridades.isError} onChange={e => setPrioridad(e.target.value)}>
++              {(prioridades.data ?? []).map(p => <option key={p.codigo} value={p.codigo}>{p.nombre}</option>)}
++            </SelectInput></Field>
++            <Field label="Fecha estimada (opcional)" htmlFor="nueva-fecha" hint="Hora de Guatemala."><TextInput id="nueva-fecha" type="datetime-local" value={estimada} onChange={e => setEstimada(e.target.value)} /></Field>
++          </div>
++          {prioridades.isError ? <Alert tono="danger" accion={<Button type="button" onClick={() => prioridades.refetch()}>Reintentar</Button>}>{mensajeDeError(prioridades.error)}</Alert> : null}
++          <Field label="Observaciones" htmlFor="nueva-obs" hint={`${observaciones.length}/1000 caracteres`}><TextArea id="nueva-obs" rows={3} maxLength={1000} value={observaciones} onChange={e => setObservaciones(e.target.value)} /></Field>
++          <div className="tc-row tc-row--end"><Button type="button" onClick={() => setPaso(1)}>Atrás</Button><Button type="submit" variante="primario" disabled={prioridades.isLoading || prioridades.isError}>Revisar</Button></div>
++        </form>
++      </Card> : null}
++      {paso === 3 ? <Card>
++        <h2 className="tc-section-title">Paso 4 · Confirmar ingreso</h2>
++        <dl className="tc-dl"><dt>Cliente</dt><dd>{cliente?.Nombre} · NIT {cliente?.NIT}</dd>
++          <dt>Equipo</dt><dd>{equipo?.NumeroSerie} · {equipo?.Marca} {equipo?.Modelo}</dd>
++          <dt>Problema reportado</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{problema}</dd>
++          <dt>Prioridad</dt><dd>{prioridades.data?.find(p => p.codigo === prioridad)?.nombre}</dd>
++          <dt>Fecha estimada</dt><dd>{estimada ? fechaHora(fechaEstimadaUtc()) : "Sin fecha estimada"}</dd>
++          <dt>Observaciones</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{observaciones || "Sin observaciones"}</dd></dl>
++        <p className="tc-section-sub">Al confirmar se asignará el número de orden y se registrará el ingreso a tu nombre.</p>
++        <div className="tc-row tc-row--end"><Button disabled={guardando} onClick={() => { setError(""); setPaso(2); }}>Atrás</Button>
++          <Button variante="primario" disabled={guardando} onClick={confirmar}>{guardando ? "Registrando…" : "Confirmar ingreso"}</Button></div>
++      </Card> : null}
++    </div>
++  </>;
+ }
+diff --git a/frontend/src/features/ordenes/OrdenesListPage.tsx b/frontend/src/features/ordenes/OrdenesListPage.tsx
+index 2b35df21c171c23cb5c5f0c26dcd1fed84efd4e3..b7d5c7eb1731c2bae60b713b0ff27f4efe88bef2 100644
+--- a/frontend/src/features/ordenes/OrdenesListPage.tsx
++++ b/frontend/src/features/ordenes/OrdenesListPage.tsx
+@@ -1,11 +1,83 @@
+-﻿import { PendingModule } from "../../components/ui/PendingModule";
++import { useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Link } from "react-router-dom";
++import { Plus, RefreshCw } from "lucide-react";
++import { puedeAcceder, useSession } from "../../app/session";
++import { PageHeader, Card } from "../../components/ui/Card";
++import { Button } from "../../components/ui/Button";
++import { Alert } from "../../components/ui/Alert";
++import { EstadoOrdenBadge } from "../../components/ui/Badge";
++import { Field, SearchInput, SelectInput, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { DataTable, Paginacion, type Columna } from "../../components/ui/DataTable";
++import { ordenesApi, type FiltrosOrden, type Orden } from "../../services/ordenes";
++import { mensajeDeError } from "../../services/errors";
++import { fechaHora } from "../../utils/format";
+ 
++const INICIALES: FiltrosOrden = { buscar: "", estado: "", prioridad: "", tecnicoId: "", desde: "", hasta: "" };
+ export function OrdenesListPage() {
+-  return (
+-    <PendingModule
+-      modulo="Ordenes"
+-      titulo="Ordenes de servicio"
+-      descripcion="Todas las ordenes de servicio con busqueda y filtros por estado, prioridad, tecnico y fechas."
+-    />
+-  );
++  const sesion = useSession();
++  const gestion = puedeAcceder(sesion, ["ADMIN", "RECEPCION"]);
++  const [formulario, setFormulario] = useState(INICIALES);
++  const [filtros, setFiltros] = useState(INICIALES);
++  const [pagina, setPagina] = useState(1);
++  const [error, setError] = useState("");
++  const ordenes = useQuery({ queryKey: ["ordenes", "lista", filtros], queryFn: ({ signal }) => ordenesApi.listar(filtros, signal) });
++  const estados = useQuery({ queryKey: ["ordenes", "estados"], queryFn: ({ signal }) => ordenesApi.catalogo("estados", signal) });
++  const prioridades = useQuery({ queryKey: ["ordenes", "prioridades"], queryFn: ({ signal }) => ordenesApi.catalogo("prioridades", signal) });
++  const tecnicos = useQuery({ queryKey: ["ordenes", "tecnicos"], queryFn: ({ signal }) => ordenesApi.tecnicos(signal), enabled: gestion });
++  function cambiar(clave: keyof FiltrosOrden, valor: string) { setFormulario(f => ({ ...f, [clave]: valor })); }
++  const filas = ordenes.data ?? [];
++  const paginas = Math.max(1, Math.ceil(filas.length / 10));
++  const actual = Math.min(pagina, paginas);
++  const columnas: Columna<Orden>[] = [
++    { clave: "orden", encabezado: "Orden", render: o => <Link to={`/ordenes/${o.ordenId}`}>{o.numeroOrden}</Link> },
++    { clave: "cliente", encabezado: "Cliente", render: o => o.cliente },
++    { clave: "equipo", encabezado: "Equipo", render: o => <>{o.numeroSerie}<div className="tc-field__hint">{o.marca} {o.modelo}</div></> },
++    { clave: "estado", encabezado: "Estado", render: o => <EstadoOrdenBadge codigo={o.estadoCodigo} nombre={o.estado} /> },
++    { clave: "prioridad", encabezado: "Prioridad", render: o => o.prioridad },
++    { clave: "tecnico", encabezado: "Técnico", render: o => o.tecnico || "Sin asignar" },
++    { clave: "fecha", encabezado: "Ingreso", render: o => fechaHora(o.fechaIngreso) },
++  ];
++  return <>
++    <PageHeader eyebrow="Servicio" titulo="Órdenes de servicio" descripcion={gestion || sesion.roles.includes("CAJA")
++      ? "Consultá los ingresos y el avance de cada servicio." : "Consultá las órdenes asignadas a tu usuario."}
++      acciones={<>{gestion ? <Link to="/ordenes/nueva"><Button variante="primario" icono={<Plus size={16} />}>Nueva orden</Button></Link> : null}
++        <Button icono={<RefreshCw size={16} />} disabled={ordenes.isFetching} onClick={() => ordenes.refetch()}>Actualizar</Button></>} />
++    <div className="tc-stack">
++      <Card>
++        <form className="tc-stack" onSubmit={e => { e.preventDefault();
++          if (formulario.desde && formulario.hasta && formulario.desde > formulario.hasta) { setError("La fecha inicial debe ser anterior o igual a la final."); return; }
++          setError(""); setPagina(1); setFiltros({ ...formulario, buscar: formulario.buscar.trim() });
++        }}>
++          <SearchInput aria-label="Buscar órdenes" placeholder="Número de orden, cliente, NIT o serie" maxLength={150} value={formulario.buscar} onChange={e => cambiar("buscar", e.target.value)} />
++          <div className="tc-grid tc-grid--3">
++            <Field label="Estado" htmlFor="ordenes-estado"><SelectInput id="ordenes-estado" value={formulario.estado} onChange={e => cambiar("estado", e.target.value)}>
++              <option value="">Todos los estados</option>{estados.data?.map(o => <option key={o.codigo} value={o.codigo}>{o.nombre}</option>)}
++            </SelectInput></Field>
++            <Field label="Prioridad" htmlFor="ordenes-prioridad"><SelectInput id="ordenes-prioridad" value={formulario.prioridad} onChange={e => cambiar("prioridad", e.target.value)}>
++              <option value="">Todas las prioridades</option>{prioridades.data?.map(o => <option key={o.codigo} value={o.codigo}>{o.nombre}</option>)}
++            </SelectInput></Field>
++            {gestion ? <Field label="Técnico" htmlFor="ordenes-tecnico"><SelectInput id="ordenes-tecnico" value={formulario.tecnicoId} onChange={e => cambiar("tecnicoId", e.target.value)}>
++              <option value="">Todos los técnicos</option><option value="0">Sin asignar</option>{tecnicos.data?.map(t => <option key={t.usuarioId} value={t.usuarioId}>{t.nombre}</option>)}
++            </SelectInput></Field> : null}
++            <Field label="Ingreso desde" htmlFor="ordenes-desde"><TextInput id="ordenes-desde" type="date" value={formulario.desde} onChange={e => cambiar("desde", e.target.value)} /></Field>
++            <Field label="Ingreso hasta" htmlFor="ordenes-hasta" hint="Incluye el día completo en Guatemala."><TextInput id="ordenes-hasta" type="date" value={formulario.hasta} onChange={e => cambiar("hasta", e.target.value)} /></Field>
++          </div>
++          {error ? <Alert tono="danger">{error}</Alert> : null}
++          <div className="tc-row tc-row--end"><Button type="button" onClick={() => { setFormulario(INICIALES); setFiltros(INICIALES); setPagina(1); setError(""); }}>Limpiar filtros</Button>
++            <Button type="submit" variante="primario">Buscar</Button></div>
++        </form>
++      </Card>
++      {estados.isError || prioridades.isError || tecnicos.isError ? <Alert tono="warn" titulo="Algunos filtros no se pudieron cargar"
++        accion={<Button onClick={() => { void estados.refetch(); void prioridades.refetch(); if (gestion) void tecnicos.refetch(); }}>Reintentar filtros</Button>}>
++        {mensajeDeError(estados.error || prioridades.error || tecnicos.error)}
++      </Alert> : null}
++      <Card>{ordenes.isLoading ? <LoadingState titulo="Cargando órdenes…" /> : ordenes.isError ?
++        <Alert tono="danger" titulo="No se pudo cargar el listado" accion={<Button onClick={() => ordenes.refetch()}>Reintentar</Button>}>{mensajeDeError(ordenes.error)}</Alert> : <>
++          <DataTable columnas={columnas} filas={filas.slice((actual - 1) * 10, actual * 10)} claveFila={o => o.ordenId} vacio="No hay órdenes disponibles con estos filtros." />
++          <Paginacion pagina={actual} totalPaginas={paginas} total={filas.length} onCambiar={setPagina} />
++        </>}</Card>
++    </div>
++  </>;
+ }
+diff --git a/frontend/src/features/ordenes/ordenes.css b/frontend/src/features/ordenes/ordenes.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..6cbfe7de1494704a804b5895537ec9d11ce2372a
+--- /dev/null
++++ b/frontend/src/features/ordenes/ordenes.css
+@@ -0,0 +1,5 @@
++.tc-ordenes .tc-dl dd { min-width: 0; overflow-wrap: anywhere; }
++@media (max-width: 640px) {
++  .tc-ordenes .tc-dl { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
++  .tc-ordenes .tc-dl dd { margin: 0 0 12px; }
++}
+diff --git a/frontend/src/services/ordenes.ts b/frontend/src/services/ordenes.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..819bc75b588c3bb867ef5f2a05d47969dede0bd4
+--- /dev/null
++++ b/frontend/src/services/ordenes.ts
+@@ -0,0 +1,35 @@
++import { http } from "./http";
++export interface Orden {
++  ordenId: number; numeroOrden: string; equipoId: number; numeroSerie: string;
++  equipoDescripcion: string; marca: string; modelo: string; clienteId: number; cliente: string; nit: string;
++  usuarioRecepcionId: number; recepcionista: string; fechaIngreso: string; problemaReportado: string;
++  prioridadCodigo: string; prioridad: string; estadoCodigo: string; estado: string; esFinal: boolean;
++  fechaEstimada: string | null; observaciones: string | null; usuarioTecnicoId: number | null; tecnico: string | null;
++  diagnosticoId: number | null; fechaDiagnostico: string | null; descripcionDiagnostico: string | null;
++  costoEstimado: number | null; reparacionId: number | null; fechaInicioReparacion: string | null;
++  fechaFinReparacion: string | null; descripcionTrabajo: string | null; costoManoObra: number | null;
++  estadoReparacion: string | null;
++}
++export interface EventoOrden {
++  eventoId: string; tipo: "ESTADO" | "ASIGNACION"; fecha: string; usuario: string; nombreUsuario: string;
++  estadoAnterior: string | null; estadoNuevo: string | null; tecnico: string | null; observacion: string | null;
++}
++export interface CatalogoOrden { codigo: string; nombre: string; nivel: number | null; esFinal: boolean | null }
++export interface TecnicoOrden { usuarioId: number; empleadoCodigo: string; nombre: string }
++export interface NuevaOrden { equipoId: number; problema: string; prioridad: string; fechaEstimada: string | null; observaciones: string | null }
++export interface FiltrosOrden { buscar: string; estado: string; prioridad: string; tecnicoId: string; desde: string; hasta: string }
++export const ordenesApi = {
++  listar: (filtros: FiltrosOrden, signal?: AbortSignal) => {
++    const parametros = new URLSearchParams();
++    Object.entries(filtros).forEach(([clave, valor]) => { if (valor) parametros.set(clave, valor); });
++    return http.get<Orden[]>(`/ordenes?${parametros}`, signal);
++  },
++  consultar: (id: number, signal?: AbortSignal) => http.get<Orden>(`/ordenes/${id}`, signal),
++  historial: (id: number, signal?: AbortSignal) => http.get<EventoOrden[]>(`/ordenes/${id}/historial`, signal),
++  catalogo: (tipo: "estados" | "prioridades", signal?: AbortSignal) => http.get<CatalogoOrden[]>(`/ordenes/catalogos/${tipo}`, signal),
++  tecnicos: (signal?: AbortSignal) => http.get<TecnicoOrden[]>("/ordenes/catalogos/tecnicos", signal),
++  crear: (datos: NuevaOrden) => http.post<Orden>("/ordenes", datos),
++  asignar: (id: number, tecnicoId: number, tecnicoAnteriorId: number | null, observacion: string) =>
++    http.put<Orden>(`/ordenes/${id}/tecnico`, { tecnicoId, tecnicoAnteriorId, observacion }),
++  cancelar: (id: number, motivo: string) => http.post<Orden>(`/ordenes/${id}/cancelacion`, { motivo }),
++};

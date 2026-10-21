@@ -41,7 +41,7 @@ export const NAVEGACION: NavGrupo[] = [
   {
     etiqueta: "Servicio",
     items: [
-      { etiqueta: "Ordenes", ruta: "/ordenes", icono: ClipboardList },
+      { etiqueta: "Ordenes", ruta: "/ordenes", icono: ClipboardList, roles: ["ADMIN", "RECEPCION", "TECNICO", "CAJA"] },
       { etiqueta: "Nueva orden", ruta: "/ordenes/nueva", icono: Wrench, roles: ["RECEPCION", "ADMIN"] },
       { etiqueta: "Clientes", ruta: "/clientes", icono: Users, roles: ["RECEPCION", "TECNICO", "CAJA", "ADMIN"] },
       { etiqueta: "Equipos", ruta: "/equipos", icono: LayoutGrid, roles: ["RECEPCION", "TECNICO", "ADMIN"] },

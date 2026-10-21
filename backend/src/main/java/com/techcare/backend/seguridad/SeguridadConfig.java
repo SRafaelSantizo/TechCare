@@ -58,6 +58,12 @@ public class SeguridadConfig {
                         .requestMatchers(HttpMethod.GET,"/api/admin/usuarios","/api/admin/usuarios/*",
                                 "/api/admin/roles","/api/admin/empleados-disponibles").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.POST,"/api/admin/usuarios").hasRole("ADMIN")
+                        .requestMatchers(HttpMethod.GET,"/api/ordenes/catalogos/tecnicos").hasAnyRole("ADMIN","RECEPCION")
+                        .requestMatchers(HttpMethod.GET,"/api/ordenes","/api/ordenes/**")
+                            .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
+                        .requestMatchers(HttpMethod.POST,"/api/ordenes","/api/ordenes/*/cancelacion")
+                            .hasAnyRole("ADMIN","RECEPCION")
+                        .requestMatchers(HttpMethod.PUT,"/api/ordenes/*/tecnico").hasAnyRole("ADMIN","RECEPCION")
                         .requestMatchers(HttpMethod.GET,"/api/clientes","/api/clientes/**")
                             .hasAnyRole("ADMIN","RECEPCION","TECNICO","CAJA")
                         .requestMatchers(HttpMethod.POST,"/api/clientes").hasAnyRole("ADMIN","RECEPCION")
