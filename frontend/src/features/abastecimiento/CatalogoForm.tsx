@@ -16,7 +16,7 @@ export function CatalogoForm({ tipo, registro, onGuardado, onCancelar, onRecarga
   const [nombre, setNombre] = useState(registro?.nombre ?? ""), [activo, setActivo] = useState(registro?.activo ?? true);
   const [categoria, setCategoria] = useState(registro && "categoriaId" in registro ? String(registro.categoriaId) : "");
   const [descripcion, setDescripcion] = useState(registro && "descripcion" in registro ? registro.descripcion ?? "" : "");
-  const [costo, setCosto] = useState(registro && "costoReferencia" in registro ? String(registro.costoReferencia) : "0.00");
+  const [costo] = useState(registro && "costoReferencia" in registro ? String(registro.costoReferencia) : "0.00");
   const [precio, setPrecio] = useState(registro && "precioVenta" in registro ? String(registro.precioVenta) : "0.00");
   const [nit, setNit] = useState(registro && "nit" in registro ? registro.nit : "");
   const [email, setEmail] = useState(registro && "email" in registro ? registro.email ?? "" : "");
@@ -30,7 +30,7 @@ export function CatalogoForm({ tipo, registro, onGuardado, onCancelar, onRecarga
     e.preventDefault(); if (bloqueo.current) return;
     if (tipo !== "proveedores" && !/^[0-9A-Za-z._/\-]+$/.test(codigo.trim())) { setError("El código admite letras, números, puntos, guiones, guiones bajos y barras, sin espacios."); return; }
     if (tipo === "proveedores" && !/^[0-9A-Za-z-]+$/.test(nit.trim())) { setError("El NIT admite letras, números y guiones."); return; }
-    if (tipo === "repuestos" && (![costo, precio].every(v => /^\d{1,10}(?:\.\d{1,2})?$/.test(v.trim())) || !categoria)) { setError("Elegí categoría e ingresá costo y precio desde cero, con hasta dos decimales."); return; }
+    if (tipo === "repuestos" && (![costo, precio].every(v => /^\d{1,10}(?:\.\d{1,2})?$/.test(v.trim())) || !categoria)) { setError("Elegí categoría e ingresá un precio desde cero, con hasta dos decimales."); return; }
     bloqueo.current = true; setGuardando(true); onOcupado(true); setError(""); setConflicto(false);
     const revision = registro?.revision ?? null;
     try {
@@ -59,9 +59,8 @@ export function CatalogoForm({ tipo, registro, onGuardado, onCancelar, onRecarga
     </div>
     {tipo === "repuestos" ? <>
       <Field label="Descripción" htmlFor="cat-descripcion"><TextArea id="cat-descripcion" maxLength={500} rows={3} disabled={guardando} value={descripcion} onChange={e => setDescripcion(e.target.value)} /></Field>
-      <div className="tc-grid tc-grid--2"><Field label="Costo de referencia (Q)" htmlFor="cat-costo" requerido><TextInput id="cat-costo" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={costo} onChange={e => setCosto(e.target.value)} /></Field>
-        <Field label="Precio de venta (Q)" htmlFor="cat-precio" requerido><TextInput id="cat-precio" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={precio} onChange={e => setPrecio(e.target.value)} /></Field></div>
-      <p className="tc-field__hint">Los cambios de costo y precio quedan en el historial. Los consumos y facturas anteriores conservan sus importes.</p>
+      <div className="tc-grid tc-grid--2"><Field label="Precio de venta (Q)" htmlFor="cat-precio" requerido><TextInput id="cat-precio" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={precio} onChange={e => setPrecio(e.target.value)} /></Field></div>
+      <p className="tc-field__hint">El costo promedio se calcula por bodega desde las compras recibidas. Consultalo en Costos por bodega; los consumos y facturas anteriores conservan sus importes.</p>
     </> : <>
       {tipo === "proveedores" ? <div className="tc-grid tc-grid--2"><Field label="Correo" htmlFor="cat-email"><TextInput id="cat-email" type="email" maxLength={254} disabled={guardando} value={email} onChange={e => setEmail(e.target.value)} /></Field>
         <Field label="Teléfono" htmlFor="cat-telefono"><TextInput id="cat-telefono" maxLength={25} disabled={guardando} value={telefono} onChange={e => setTelefono(e.target.value)} /></Field></div> : null}

@@ -1,0 +1,2105 @@
+diff --git a/26_Abastecimiento_Procedimientos.sql b/26_Abastecimiento_Procedimientos.sql
+index 15e612af1ab20148c57b1a6379a5a7085dacbbce..7b17c0ccb38c72ba61eb5ce3cc22a5d68967aace 100644
+--- a/26_Abastecimiento_Procedimientos.sql
++++ b/26_Abastecimiento_Procedimientos.sql
+@@ -139,6 +139,10 @@ BEGIN
+             THROW 52000,N'Los precios admiten valores desde cero y hasta dos decimales.',1;
+         IF @CategoriaID IS NULL OR NOT EXISTS (SELECT 1 FROM dbo.CategoriaRepuesto WITH (HOLDLOCK) WHERE CategoriaID=@CategoriaID)
+             THROW 52001,N'La categoría del repuesto no existe.',1;
++        -- Desde el bloque 30 el costo de inventario se calcula por bodega.
++        IF ((@RepuestoID IS NULL AND @CostoReferencia<>0)
++             OR (@RepuestoID IS NOT NULL AND EXISTS(SELECT 1 FROM dbo.Repuesto WHERE RepuestoID=@RepuestoID AND CostoReferencia<>@CostoReferencia)))
++            THROW 52000,N'El costo se calcula desde las compras recibidas por bodega. No se edita desde el catálogo.',1;
+         IF @RepuestoID IS NULL
+         BEGIN
+             INSERT dbo.Repuesto(CategoriaID,Codigo,Nombre,Descripcion,CostoReferencia,PrecioVenta,Activo)
+diff --git a/27_Pruebas_Abastecimiento.sql b/27_Pruebas_Abastecimiento.sql
+index f9a5ff33f9d99c1f1a4fcba9c53fd433370f3867..21ff5f28dfd45c9564691385f30acf20c40ce3a7 100644
+--- a/27_Pruebas_Abastecimiento.sql
++++ b/27_Pruebas_Abastecimiento.sql
+@@ -241,8 +241,8 @@ BEGIN
+         IF @Caso=15 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'REP-漢字',N'Prueba',NULL,1,1,1;
+         IF @Caso=16
+         BEGIN
+-            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,13.50,30,1,@RevR;
+-            IF NOT EXISTS(SELECT 1 FROM dbo.AuditoriaPrecioRepuesto WHERE RepuestoID=@Repuesto AND CostoAnterior=12.25 AND CostoNuevo=13.50
++            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,12.25,30,1,@RevR;
++            IF NOT EXISTS(SELECT 1 FROM dbo.AuditoriaPrecioRepuesto WHERE RepuestoID=@Repuesto AND CostoAnterior=12.25 AND CostoNuevo=12.25
+                           AND PrecioAnterior=25.50 AND PrecioNuevo=30 AND UsuarioAplicacionID=@Bodeguero)
+                 THROW 52091,N'La auditoría no conservó valores y usuario.',1;
+         END;
+@@ -375,7 +375,7 @@ BEGIN
+             INSERT #ResultadoOrden EXEC dbo.spUsarRepuestoOrden @Tec1,@Orden,@Bodega,@Repuesto,1,25.50;
+             INSERT #ResultadoOrden EXEC dbo.spFinalizarReparacionOrden @Tec1,@Orden;
+             SET @Codigo='FACT-'+@Sufijo;EXEC dbo.spGenerarFactura @Orden,@Codigo,@Admin,@Factura OUTPUT;
+-            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,13.50,30,1,@RevR;
++            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,12.25,30,1,@RevR;
+             IF NOT EXISTS(SELECT 1 FROM dbo.ReparacionRepuesto rr JOIN dbo.Reparacion r ON r.ReparacionID=rr.ReparacionID JOIN dbo.Diagnostico d ON d.DiagnosticoID=r.DiagnosticoID
+                           WHERE d.OrdenID=@Orden AND rr.CostoUnitario=12.25 AND rr.PrecioUnitario=25.50)
+                OR NOT EXISTS(SELECT 1 FROM dbo.FacturaDetalle WHERE FacturaID=@Factura AND TipoConcepto='REP' AND PrecioUnitario=25.50)
+@@ -383,7 +383,7 @@ BEGIN
+                OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos+1
+                 THROW 52091,N'El cambio reescribió valores históricos.',1;
+         END;
+-        IF @Caso=55 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@ExtraCodigo,N'Duplicado',NULL,13.50,30,1,@RevR;
++        IF @Caso=55 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@ExtraCodigo,N'Duplicado',NULL,12.25,30,1,@RevR;
+         IF @Caso=56
+         BEGIN
+             SET @Codigo='R-'+REPLICATE('A',19)+'-'+@Sufijo;
+diff --git a/30_Compras_Procedimientos.sql b/30_Compras_Procedimientos.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..121676c417f3ee593ea0dddd510b9a6e9fddf4e5
+--- /dev/null
++++ b/30_Compras_Procedimientos.sql
+@@ -0,0 +1,437 @@
++-- Compras, recepción y promedio móvil por bodega. Ejecutar después del 26.
++-- Detener el backend mientras se instala. No reiniciar la base ni los datos.
++USE [TechCare];
++GO
++SET NOCOUNT ON; SET XACT_ABORT ON;
++IF OBJECT_ID(N'dbo.spGuardarRepuestoGestion',N'P') IS NULL
++    THROW 52190,N'Ejecutá primero 26_Abastecimiento_Procedimientos.sql.',1;
++GO
++CREATE OR ALTER FUNCTION dbo.fnPromedioEntrada
++(@Stock bigint,@Costo decimal(18,6),@Cantidad int,@CostoEntrada decimal(12,2))
++RETURNS decimal(18,6) AS
++BEGIN
++    -- Los productos caben en decimal(37,6); su suma conserva seis decimales.
++    RETURN CONVERT(decimal(18,6),
++       (CONVERT(decimal(37,6),CONVERT(decimal(19,0),@Stock)*@Costo)
++       +CONVERT(decimal(37,6),CONVERT(decimal(19,0),@Cantidad)*@CostoEntrada))
++       /NULLIF(CONVERT(decimal(19,0),@Stock)+@Cantidad,0));
++END;
++GO
++BEGIN TRY
++    BEGIN TRANSACTION;
++    DECLARE @Bloqueo bigint;
++    SELECT @Bloqueo=COUNT_BIG(*) FROM dbo.Inventario WITH(TABLOCKX,HOLDLOCK);
++    SELECT @Bloqueo=COUNT_BIG(*) FROM dbo.MovimientoInventario WITH(TABLOCKX,HOLDLOCK);
++    IF COL_LENGTH(N'dbo.Inventario',N'CostoPromedio') IS NULL
++        EXEC(N'ALTER TABLE dbo.Inventario ADD CostoPromedio decimal(18,6) NOT NULL CONSTRAINT DF_Inventario_CostoPromedio DEFAULT 0;');
++    IF OBJECT_ID(N'dbo.ValoracionInventario',N'U') IS NULL
++    BEGIN
++        CREATE TABLE dbo.ValoracionInventario(
++            MovimientoID bigint NOT NULL CONSTRAINT PK_ValoracionInventario PRIMARY KEY,
++            CostoAnterior decimal(18,6) NOT NULL,CostoPosterior decimal(18,6) NOT NULL,
++            EsMigracion bit NOT NULL,
++            CONSTRAINT FK_ValoracionInventario_Movimiento FOREIGN KEY(MovimientoID) REFERENCES dbo.MovimientoInventario(MovimientoID),
++            CONSTRAINT CK_ValoracionInventario_Costos CHECK(CostoAnterior>=0 AND CostoPosterior>=0));
++    END;
++    IF OBJECT_ID(N'dbo.SolicitudCompraApi',N'U') IS NULL
++    BEGIN
++        CREATE TABLE dbo.SolicitudCompraApi(
++            SolicitudID uniqueidentifier NOT NULL CONSTRAINT PK_SolicitudCompraApi PRIMARY KEY,
++            CompraID int NOT NULL CONSTRAINT UQ_SolicitudCompraApi_Compra UNIQUE,
++            UsuarioID int NOT NULL,Firma binary(32) NOT NULL,
++            CONSTRAINT FK_SolicitudCompraApi_Compra FOREIGN KEY(CompraID) REFERENCES dbo.Compra(CompraID),
++            CONSTRAINT FK_SolicitudCompraApi_Usuario FOREIGN KEY(UsuarioID) REFERENCES dbo.Usuario(UsuarioID));
++    END;
++    IF OBJECT_ID(N'dbo.EventoCompraApi',N'U') IS NULL
++    BEGIN
++        CREATE TABLE dbo.EventoCompraApi(
++            CompraID int NOT NULL,Tipo varchar(12) NOT NULL,UsuarioID int NOT NULL,
++            Responsable nvarchar(161) NOT NULL,Fecha datetime2(0) NOT NULL,
++            Observacion nvarchar(1000) NULL,
++            CONSTRAINT PK_EventoCompraApi PRIMARY KEY(CompraID,Tipo),
++            CONSTRAINT FK_EventoCompraApi_Compra FOREIGN KEY(CompraID) REFERENCES dbo.Compra(CompraID),
++            CONSTRAINT FK_EventoCompraApi_Usuario FOREIGN KEY(UsuarioID) REFERENCES dbo.Usuario(UsuarioID),
++            CONSTRAINT CK_EventoCompraApi_Tipo CHECK(Tipo IN('REGISTRO','RECEPCION','ANULACION')));
++    END;
++    -- Se recorre el orden real del kardex, no el precio editable del catálogo.
++    -- Las salidas históricas mantienen sus importes; sólo se inicializa el promedio futuro.
++    IF EXISTS(SELECT 1 FROM dbo.MovimientoInventario m LEFT JOIN dbo.ValoracionInventario v ON v.MovimientoID=m.MovimientoID WHERE v.MovimientoID IS NULL)
++        EXEC sys.sp_executesql N'
++        CREATE TABLE #CostoInicial(BodegaID int,RepuestoID int,Stock bigint,Costo decimal(18,6),PRIMARY KEY(BodegaID,RepuestoID));
++        INSERT #CostoInicial SELECT BodegaID,RepuestoID,0,0 FROM dbo.Inventario;
++        DECLARE @M bigint,@B int,@R int,@Tipo char(1),@Cantidad int,@Entrada decimal(12,2),@Stock bigint,@Costo decimal(18,6),@Nuevo decimal(18,6),@Resultado bigint;
++        DECLARE movimientos CURSOR LOCAL FAST_FORWARD FOR
++          SELECT m.MovimientoID,m.BodegaID,m.RepuestoID,m.Tipo,m.Cantidad,d.CostoUnitario,m.ExistenciaResultante
++          FROM dbo.vMovimientoInventario m LEFT JOIN dbo.DetalleCompra d ON d.CompraID=m.CompraID AND d.Linea=m.LineaCompra ORDER BY m.MovimientoID;
++        OPEN movimientos;FETCH NEXT FROM movimientos INTO @M,@B,@R,@Tipo,@Cantidad,@Entrada,@Resultado;
++        WHILE @@FETCH_STATUS=0
++        BEGIN
++          SET @Stock=NULL;SET @Costo=NULL;
++          SELECT @Stock=Stock,@Costo=Costo FROM #CostoInicial WHERE BodegaID=@B AND RepuestoID=@R;
++          IF @Stock IS NULL THROW 52191,N''Hay movimientos sin asociación de inventario. Revisá el kardex.'',1;
++          SET @Nuevo=CASE WHEN @Tipo=''E'' THEN dbo.fnPromedioEntrada(@Stock,@Costo,@Cantidad,@Entrada) WHEN @Stock=@Cantidad THEN 0 ELSE @Costo END;
++          SET @Stock=@Stock+CASE WHEN @Tipo=''E'' THEN CONVERT(bigint,@Cantidad) ELSE -CONVERT(bigint,@Cantidad) END;
++          IF @Stock<>@Resultado OR @Stock<0 THROW 52191,N''El kardex requiere revisión antes de migrar los costos.'',1;
++          IF NOT EXISTS(SELECT 1 FROM dbo.ValoracionInventario WHERE MovimientoID=@M)
++             INSERT dbo.ValoracionInventario VALUES(@M,@Costo,@Nuevo,1);
++          UPDATE #CostoInicial SET Stock=@Stock,Costo=@Nuevo WHERE BodegaID=@B AND RepuestoID=@R;
++          FETCH NEXT FROM movimientos INTO @M,@B,@R,@Tipo,@Cantidad,@Entrada,@Resultado;
++        END;
++        CLOSE movimientos;DEALLOCATE movimientos;
++        UPDATE i SET CostoPromedio=c.Costo FROM dbo.Inventario i JOIN #CostoInicial c ON c.BodegaID=i.BodegaID AND c.RepuestoID=i.RepuestoID;
++        DROP TABLE #CostoInicial;';
++    -- Se instala dentro de la misma transacción que inicializa la valoración.
++    EXEC sys.sp_executesql N'
++    CREATE OR ALTER TRIGGER dbo.trValorarMovimientoInventario ON dbo.MovimientoInventario AFTER INSERT AS
++    BEGIN
++      SET NOCOUNT ON;
++      DECLARE @M bigint,@B int,@R int,@Tipo char(1),@Cantidad int,@Entrada decimal(12,2),@Stock bigint,@Costo decimal(18,6),@Nuevo decimal(18,6),@Salida decimal(12,2);
++      DECLARE nuevos CURSOR LOCAL FAST_FORWARD FOR
++        SELECT m.MovimientoID,m.BodegaID,m.RepuestoID,m.Tipo,m.Cantidad,d.CostoUnitario,
++               m.ExistenciaResultante-m.CantidadFirmada,r.CostoUnitario
++        FROM inserted n JOIN dbo.vMovimientoInventario m ON m.MovimientoID=n.MovimientoID
++        LEFT JOIN dbo.DetalleCompra d ON d.CompraID=m.CompraID AND d.Linea=m.LineaCompra
++        LEFT JOIN dbo.ReparacionRepuesto r ON r.ReparacionID=m.ReparacionID AND r.Linea=m.LineaReparacion ORDER BY m.MovimientoID;
++      OPEN nuevos;FETCH NEXT FROM nuevos INTO @M,@B,@R,@Tipo,@Cantidad,@Entrada,@Stock,@Salida;
++      WHILE @@FETCH_STATUS=0
++      BEGIN
++        SET @Costo=NULL;
++        SELECT @Costo=CostoPromedio FROM dbo.Inventario WITH(UPDLOCK,HOLDLOCK) WHERE BodegaID=@B AND RepuestoID=@R;
++        IF @Costo IS NULL OR @Stock<0 THROW 52101,N''Inventario sin valoración válida.'',1;
++        IF @Tipo=''S'' AND @Salida<>CONVERT(decimal(12,2),@Costo)
++           THROW 52103,N''El costo del consumo debe corresponder al promedio vigente de la bodega.'',1;
++        SET @Nuevo=CASE WHEN @Tipo=''E'' THEN dbo.fnPromedioEntrada(@Stock,@Costo,@Cantidad,@Entrada) WHEN @Stock=@Cantidad THEN 0 ELSE @Costo END;
++        UPDATE dbo.Inventario SET CostoPromedio=@Nuevo WHERE BodegaID=@B AND RepuestoID=@R;
++        INSERT dbo.ValoracionInventario VALUES(@M,@Costo,@Nuevo,0);
++        FETCH NEXT FROM nuevos INTO @M,@B,@R,@Tipo,@Cantidad,@Entrada,@Stock,@Salida;
++      END;
++      CLOSE nuevos;DEALLOCATE nuevos;
++    END;';
++    COMMIT TRANSACTION;
++END TRY
++BEGIN CATCH
++    IF XACT_STATE()<>0 ROLLBACK TRANSACTION;
++    THROW;
++END CATCH;
++GO
++CREATE OR ALTER TRIGGER dbo.trValoracionInventarioInmutable ON dbo.ValoracionInventario AFTER UPDATE,DELETE AS
++BEGIN SET NOCOUNT ON;IF EXISTS(SELECT 1 FROM deleted) THROW 52105,N'La valoración histórica no se modifica ni se borra.',1;END;
++GO
++CREATE OR ALTER TRIGGER dbo.trSolicitudCompraApiInmutable ON dbo.SolicitudCompraApi AFTER UPDATE,DELETE AS
++BEGIN SET NOCOUNT ON;IF EXISTS(SELECT 1 FROM deleted) THROW 52105,N'La solicitud de una compra registrada es histórica.',1;END;
++GO
++CREATE OR ALTER TRIGGER dbo.trEventoCompraApiInmutable ON dbo.EventoCompraApi AFTER UPDATE,DELETE AS
++BEGIN SET NOCOUNT ON;IF EXISTS(SELECT 1 FROM deleted) THROW 52105,N'Los responsables y eventos de compra son históricos.',1;END;
++GO
++CREATE OR ALTER VIEW dbo.vCompraApi AS
++SELECT c.CompraID,c.NumeroCompra,c.ProveedorID,p.NIT,p.Nombre AS Proveedor,c.Fecha,c.Estado,c.FechaRecepcion,c.Observaciones,
++       c.UsuarioRegistroID,COALESCE(er.Responsable,e.Nombres+N' '+e.Apellidos) AS RegistradaPor,
++       ec.Responsable AS RecibidaPor,ea.Responsable AS AnuladaPor,ea.Fecha AS FechaAnulacion,ea.Observacion AS MotivoAnulacion,
++       x.Lineas,x.Total,
++       CONVERT(varchar(64),HASHBYTES('SHA2_256',CONCAT(CONVERT(nvarchar(max),c.CompraID),N'|',c.Estado,N'|',
++         COALESCE(DATALENGTH(c.Observaciones),-1),N':',c.Observaciones,N'|',x.Firma)),2) AS Revision
++FROM dbo.Compra c JOIN dbo.Proveedor p ON p.ProveedorID=c.ProveedorID
++JOIN dbo.Usuario u ON u.UsuarioID=c.UsuarioRegistroID JOIN dbo.Empleado e ON e.EmpleadoID=u.EmpleadoID
++LEFT JOIN dbo.EventoCompraApi er ON er.CompraID=c.CompraID AND er.Tipo='REGISTRO'
++LEFT JOIN dbo.EventoCompraApi ec ON ec.CompraID=c.CompraID AND ec.Tipo='RECEPCION'
++LEFT JOIN dbo.EventoCompraApi ea ON ea.CompraID=c.CompraID AND ea.Tipo='ANULACION'
++CROSS APPLY(SELECT COUNT(*) AS Lineas,COALESCE(SUM(CONVERT(decimal(28,2),CONVERT(decimal(19,0),d.Cantidad)*d.CostoUnitario)),0) AS Total,
++  STRING_AGG(CONVERT(nvarchar(max),CONCAT(d.Linea,N'|',d.BodegaID,N'|',d.RepuestoID,N'|',d.Cantidad,N'|',d.CostoUnitario)),N';') WITHIN GROUP(ORDER BY d.Linea) AS Firma
++  FROM dbo.DetalleCompra d WHERE d.CompraID=c.CompraID)x;
++GO
++CREATE OR ALTER VIEW dbo.vRepuestoBodegaGestion AS
++SELECT i.BodegaID,i.RepuestoID,r.Codigo,r.Nombre,r.Activo,i.StockMinimo,i.Existencia,iv.CostoPromedio
++FROM dbo.vInventario i JOIN dbo.Repuesto r ON r.RepuestoID=i.RepuestoID JOIN dbo.Inventario iv ON iv.BodegaID=i.BodegaID AND iv.RepuestoID=i.RepuestoID;
++GO
++CREATE OR ALTER PROCEDURE dbo.spListarComprasApi
++ @UsuarioActorID int,@Buscar nvarchar(max)=NULL,@Estado nvarchar(max)=NULL,@ProveedorID int=NULL,@Desde date=NULL,@Hasta date=NULL AS
++BEGIN
++ SET NOCOUNT ON;EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++ SET @Buscar=NULLIF(LTRIM(RTRIM(@Buscar)),N'');SET @Estado=NULLIF(@Estado,N'');
++ IF DATALENGTH(@Buscar)>300 OR @ProveedorID<=0 OR (@Estado IS NOT NULL AND @Estado NOT IN('PENDIENTE','RECIBIDA','ANULADA')) OR @Desde>@Hasta
++    THROW 52100,N'Revisá búsqueda, estado, proveedor y rango de fechas.',1;
++ SELECT * FROM dbo.vCompraApi WHERE(@ProveedorID IS NULL OR ProveedorID=@ProveedorID) AND(@Estado IS NULL OR Estado=@Estado)
++   AND(@Desde IS NULL OR CONVERT(date,Fecha)>=@Desde) AND(@Hasta IS NULL OR CONVERT(date,Fecha)<=@Hasta)
++   AND(@Buscar IS NULL OR CHARINDEX(@Buscar,NumeroCompra)>0 OR CHARINDEX(@Buscar,Proveedor)>0 OR CHARINDEX(@Buscar,NIT)>0)
++ ORDER BY Fecha DESC,CompraID DESC;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spConsultarCompraApi @UsuarioActorID int,@CompraID int AS
++BEGIN
++ SET NOCOUNT ON;EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++ IF @CompraID IS NULL OR @CompraID<=0 THROW 52100,N'El ID de compra no es válido.',1;
++ IF NOT EXISTS(SELECT 1 FROM dbo.Compra WHERE CompraID=@CompraID) THROW 52102,N'La compra no existe.',1;
++ SELECT * FROM dbo.vCompraApi WHERE CompraID=@CompraID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spDetalleCompraApi @UsuarioActorID int,@CompraID int AS
++BEGIN
++ SET NOCOUNT ON;EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++ IF NOT EXISTS(SELECT 1 FROM dbo.Compra WHERE CompraID=@CompraID) THROW 52102,N'La compra no existe.',1;
++ SELECT d.Linea,d.BodegaID,b.Nombre AS Bodega,d.RepuestoID,r.Codigo,r.Nombre AS Repuesto,d.Cantidad,d.CostoUnitario,
++   CONVERT(decimal(28,2),CONVERT(decimal(19,0),d.Cantidad)*d.CostoUnitario) AS Importe,
++   i.Existencia,iv.CostoPromedio,m.MovimientoID,m.ExistenciaResultante,
++   v.CostoAnterior,v.CostoPosterior,em.Nombres+N' '+em.Apellidos AS RecibidaPor
++ FROM dbo.DetalleCompra d JOIN dbo.Bodega b ON b.BodegaID=d.BodegaID JOIN dbo.Repuesto r ON r.RepuestoID=d.RepuestoID
++ JOIN dbo.vInventario i ON i.BodegaID=d.BodegaID AND i.RepuestoID=d.RepuestoID
++ JOIN dbo.Inventario iv ON iv.BodegaID=d.BodegaID AND iv.RepuestoID=d.RepuestoID
++ LEFT JOIN dbo.MovimientoInventario m ON m.CompraID=d.CompraID AND m.LineaCompra=d.Linea
++ LEFT JOIN dbo.ValoracionInventario v ON v.MovimientoID=m.MovimientoID
++ LEFT JOIN dbo.Usuario u ON u.UsuarioID=m.UsuarioID LEFT JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ WHERE d.CompraID=@CompraID ORDER BY d.Linea;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spEventosCompraApi @UsuarioActorID int,@CompraID int AS
++BEGIN
++ SET NOCOUNT ON;EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++ IF NOT EXISTS(SELECT 1 FROM dbo.Compra WHERE CompraID=@CompraID) THROW 52102,N'La compra no existe.',1;
++ SELECT Tipo,Responsable,Fecha,Observacion FROM dbo.EventoCompraApi WHERE CompraID=@CompraID ORDER BY Fecha,Tipo;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spDestinosCompraApi @UsuarioActorID int,@ProveedorID int AS
++BEGIN
++ SET NOCOUNT ON;EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++ IF NOT EXISTS(SELECT 1 FROM dbo.Proveedor WHERE ProveedorID=@ProveedorID AND Activo=1) THROW 52101,N'El proveedor debe estar activo.',1;
++ SELECT r.RepuestoID,r.Codigo,r.Nombre AS Repuesto,b.BodegaID,b.Nombre AS Bodega,pr.CodigoProveedor,i.Existencia,i.StockMinimo,iv.CostoPromedio
++ FROM dbo.ProveedorRepuesto pr JOIN dbo.Repuesto r ON r.RepuestoID=pr.RepuestoID
++ JOIN dbo.vInventario i ON i.RepuestoID=r.RepuestoID JOIN dbo.Bodega b ON b.BodegaID=i.BodegaID
++ JOIN dbo.Inventario iv ON iv.BodegaID=i.BodegaID AND iv.RepuestoID=i.RepuestoID
++ WHERE pr.ProveedorID=@ProveedorID AND r.Activo=1 AND b.Activo=1 ORDER BY r.Nombre,r.RepuestoID,b.Nombre,b.BodegaID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spCostosRepuestoApi @UsuarioActorID int,@RepuestoID int AS
++BEGIN
++ SET NOCOUNT ON;EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++ IF NOT EXISTS(SELECT 1 FROM dbo.Repuesto WHERE RepuestoID=@RepuestoID) THROW 52102,N'El repuesto no existe.',1;
++ SELECT b.BodegaID,b.Codigo,b.Nombre AS Bodega,b.Activo,i.Existencia,i.StockMinimo,iv.CostoPromedio
++ FROM dbo.vInventario i JOIN dbo.Inventario iv ON iv.BodegaID=i.BodegaID AND iv.RepuestoID=i.RepuestoID JOIN dbo.Bodega b ON b.BodegaID=i.BodegaID
++ WHERE i.RepuestoID=@RepuestoID ORDER BY b.Nombre,b.BodegaID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spRegistrarCompraApi
++ @UsuarioActorID int,@SolicitudID nvarchar(max),@NumeroCompra nvarchar(max),@ProveedorID int,@Observaciones nvarchar(max),@Detalle nvarchar(max) AS
++BEGIN
++ SET NOCOUNT ON;SET XACT_ABORT ON;
++ DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++ BEGIN TRY
++  IF @Propia=1 BEGIN TRANSACTION;ELSE SAVE TRANSACTION APICompraRegistro;
++  EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++  SET @NumeroCompra=NULLIF(LTRIM(RTRIM(@NumeroCompra)),N'');SET @Observaciones=NULLIF(LTRIM(RTRIM(@Observaciones)),N'');
++  DECLARE @Solicitud uniqueidentifier=TRY_CONVERT(uniqueidentifier,@SolicitudID);
++  IF @Solicitud IS NULL OR DATALENGTH(@SolicitudID)<>72 OR @NumeroCompra IS NULL OR DATALENGTH(@NumeroCompra)>60
++    OR @NumeroCompra COLLATE Latin1_General_100_BIN2 LIKE N'%[^-0-9A-Za-z._/]%' OR @ProveedorID IS NULL OR @ProveedorID<=0
++    OR DATALENGTH(@Observaciones)>2000 OR DATALENGTH(@Detalle)>200000 OR ISJSON(@Detalle)<>1 OR @Detalle IS NULL OR LEFT(LTRIM(@Detalle),1)<>N'['
++    THROW 52100,N'Revisá solicitud, número de compra (30), proveedor, observaciones (1000) y detalle.',1;
++  IF (SELECT COUNT(*) FROM OPENJSON(@Detalle)) NOT BETWEEN 1 AND 200 OR EXISTS(SELECT 1 FROM OPENJSON(@Detalle) WHERE type<>5)
++    THROW 52100,N'La compra requiere entre 1 y 200 líneas válidas.',1;
++  DECLARE @Crudo TABLE(Linea int,Bodega nvarchar(max),Repuesto nvarchar(max),Cantidad nvarchar(max),Costo nvarchar(max));
++  INSERT @Crudo SELECT CONVERT(int,j.[key])+1,x.Bodega,x.Repuesto,x.Cantidad,x.Costo FROM OPENJSON(@Detalle)j
++    CROSS APPLY OPENJSON(j.value) WITH(Bodega nvarchar(max) '$.bodegaId',Repuesto nvarchar(max) '$.repuestoId',Cantidad nvarchar(max) '$.cantidad',Costo nvarchar(max) '$.costoUnitario')x;
++  IF EXISTS(SELECT 1 FROM @Crudo WHERE Bodega IS NULL OR Repuesto IS NULL OR Cantidad IS NULL OR Costo IS NULL OR LEN(Costo)=0
++    OR Bodega COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9]%' OR Repuesto COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9]%'
++    OR Cantidad COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9]%' OR Costo COLLATE Latin1_General_100_BIN2 LIKE N'%[^0-9.]%'
++    OR TRY_CONVERT(int,Bodega) IS NULL OR TRY_CONVERT(int,Bodega)<=0 OR TRY_CONVERT(int,Repuesto) IS NULL OR TRY_CONVERT(int,Repuesto)<=0
++    OR TRY_CONVERT(int,Cantidad) IS NULL OR TRY_CONVERT(int,Cantidad)<=0 OR TRY_CONVERT(decimal(12,2),Costo) IS NULL
++    OR Costo LIKE N'%.%.%' OR (CHARINDEX(N'.',Costo)>0 AND LEN(Costo)-CHARINDEX(N'.',Costo)>2))
++    THROW 52100,N'Cantidades e IDs deben ser enteros positivos; los costos admiten cero y hasta dos decimales.',1;
++  DECLARE @Lineas dbo.TipoDetalleCompra;
++  INSERT @Lineas SELECT Linea,CONVERT(int,Bodega),CONVERT(int,Repuesto),CONVERT(int,Cantidad),CONVERT(decimal(12,2),Costo) FROM @Crudo;
++  IF EXISTS(SELECT 1 FROM @Lineas GROUP BY BodegaID,RepuestoID HAVING COUNT(*)>1)
++    THROW 52100,N'No repitás el mismo repuesto y bodega en dos líneas.',1;
++  DECLARE @Canon nvarchar(max)=(SELECT Linea,BodegaID,RepuestoID,Cantidad,CostoUnitario FROM @Lineas ORDER BY Linea FOR JSON PATH);
++  DECLARE @Firma binary(32)=HASHBYTES('SHA2_256',CONCAT(CONVERT(nvarchar(max),DATALENGTH(@NumeroCompra)),N':',@NumeroCompra,N'|',@ProveedorID,N'|',
++    COALESCE(DATALENGTH(@Observaciones),-1),N':',@Observaciones,N'|',@Canon)),@Anterior binary(32),@Actor int,@CompraID int;
++  SELECT @CompraID=CompraID,@Anterior=Firma,@Actor=UsuarioID FROM dbo.SolicitudCompraApi WITH(UPDLOCK,HOLDLOCK) WHERE SolicitudID=@Solicitud;
++  IF @CompraID IS NOT NULL
++  BEGIN
++    IF @Actor<>@UsuarioActorID OR @Anterior<>@Firma THROW 52103,N'La solicitud ya corresponde a otra compra o a otros datos. Revisá el listado.',1;
++  END
++  ELSE
++  BEGIN
++    IF NOT EXISTS(SELECT 1 FROM dbo.Proveedor WITH(UPDLOCK,HOLDLOCK) WHERE ProveedorID=@ProveedorID AND Activo=1)
++       THROW 52101,N'El proveedor debe estar activo.',1;
++    IF EXISTS(SELECT 1 FROM @Lineas l LEFT JOIN dbo.Repuesto r WITH(HOLDLOCK) ON r.RepuestoID=l.RepuestoID
++      LEFT JOIN dbo.Bodega b WITH(HOLDLOCK) ON b.BodegaID=l.BodegaID
++      LEFT JOIN dbo.Inventario i WITH(HOLDLOCK) ON i.BodegaID=l.BodegaID AND i.RepuestoID=l.RepuestoID
++      LEFT JOIN dbo.ProveedorRepuesto pr WITH(HOLDLOCK) ON pr.ProveedorID=@ProveedorID AND pr.RepuestoID=l.RepuestoID
++      WHERE r.RepuestoID IS NULL OR r.Activo=0 OR b.BodegaID IS NULL OR b.Activo=0 OR i.RepuestoID IS NULL OR pr.RepuestoID IS NULL)
++       THROW 52101,N'Cada repuesto debe estar activo, ofrecido por el proveedor y asociado a una bodega activa.',1;
++    EXEC dbo.spRegistrarCompra @NumeroCompra,@ProveedorID,@UsuarioActorID,@Lineas,@CompraID OUTPUT,@Observaciones=@Observaciones;
++    INSERT dbo.SolicitudCompraApi VALUES(@Solicitud,@CompraID,@UsuarioActorID,@Firma);
++    INSERT dbo.EventoCompraApi SELECT @CompraID,'REGISTRO',u.UsuarioID,e.Nombres+N' '+e.Apellidos,c.Fecha,@Observaciones
++      FROM dbo.Usuario u JOIN dbo.Empleado e ON e.EmpleadoID=u.EmpleadoID CROSS JOIN dbo.Compra c WHERE u.UsuarioID=@UsuarioActorID AND c.CompraID=@CompraID;
++  END;
++  IF @Propia=1 COMMIT TRANSACTION;
++  SELECT * FROM dbo.vCompraApi WHERE CompraID=@CompraID;
++ END TRY
++ BEGIN CATCH
++  IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APICompraRegistro;
++  THROW;
++ END CATCH;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spRecibirCompraApi @UsuarioActorID int,@CompraID int,@Revision nvarchar(max) AS
++BEGIN
++ SET NOCOUNT ON;SET XACT_ABORT ON;
++ DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++ BEGIN TRY
++  IF @Propia=1 BEGIN TRANSACTION;ELSE SAVE TRANSACTION APICompraRecepcion;
++  EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++  DECLARE @Estado varchar(12),@Proveedor int,@Actual varchar(64);
++  SELECT @Estado=Estado,@Proveedor=ProveedorID FROM dbo.Compra WITH(UPDLOCK,HOLDLOCK) WHERE CompraID=@CompraID;
++  IF @Estado IS NULL THROW 52102,N'La compra no existe.',1;
++  IF @Estado<>'PENDIENTE' THROW 52103,N'La compra ya fue recibida o anulada. Actualizá el expediente.',1;
++  SELECT @Actual=Revision FROM dbo.vCompraApi WHERE CompraID=@CompraID;
++  IF @Revision IS NULL OR DATALENGTH(@Revision)<>128 OR @Actual COLLATE Latin1_General_100_BIN2<>@Revision COLLATE Latin1_General_100_BIN2
++     THROW 52103,N'La compra cambió. Volvé a revisar antes de recibir.',1;
++  IF NOT EXISTS(SELECT 1 FROM dbo.Proveedor WITH(HOLDLOCK) WHERE ProveedorID=@Proveedor AND Activo=1) THROW 52101,N'Reactivá el proveedor antes de recibir su compra.',1;
++  EXEC dbo.spRecibirCompra @CompraID,@UsuarioActorID;
++  INSERT dbo.EventoCompraApi SELECT @CompraID,'RECEPCION',u.UsuarioID,e.Nombres+N' '+e.Apellidos,c.FechaRecepcion,NULL
++    FROM dbo.Usuario u JOIN dbo.Empleado e ON e.EmpleadoID=u.EmpleadoID CROSS JOIN dbo.Compra c WHERE u.UsuarioID=@UsuarioActorID AND c.CompraID=@CompraID;
++  IF @Propia=1 COMMIT TRANSACTION;
++  SELECT * FROM dbo.vCompraApi WHERE CompraID=@CompraID;
++ END TRY
++ BEGIN CATCH
++  IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APICompraRecepcion;
++  THROW;
++ END CATCH;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spAnularCompraApi @UsuarioActorID int,@CompraID int,@Revision nvarchar(max),@Motivo nvarchar(max) AS
++BEGIN
++ SET NOCOUNT ON;SET XACT_ABORT ON;
++ DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++ BEGIN TRY
++  IF @Propia=1 BEGIN TRANSACTION;ELSE SAVE TRANSACTION APICompraAnulacion;
++  EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++  SET @Motivo=NULLIF(LTRIM(RTRIM(@Motivo)),N'');
++  IF @Motivo IS NULL OR DATALENGTH(@Motivo)>2000 THROW 52100,N'Ingresá el motivo de anulación, hasta 1000 caracteres.',1;
++  DECLARE @Estado varchar(12),@Actual varchar(64);
++  SELECT @Estado=Estado FROM dbo.Compra WITH(UPDLOCK,HOLDLOCK) WHERE CompraID=@CompraID;
++  IF @Estado IS NULL THROW 52102,N'La compra no existe.',1;
++  IF @Estado<>'PENDIENTE' THROW 52103,N'Solo se anulan compras pendientes.',1;
++  SELECT @Actual=Revision FROM dbo.vCompraApi WHERE CompraID=@CompraID;
++  IF @Revision IS NULL OR DATALENGTH(@Revision)<>128 OR @Actual COLLATE Latin1_General_100_BIN2<>@Revision COLLATE Latin1_General_100_BIN2
++     THROW 52103,N'La compra cambió. Volvé a revisar antes de anular.',1;
++  IF EXISTS(SELECT 1 FROM dbo.MovimientoInventario WHERE CompraID=@CompraID) THROW 52103,N'La compra ya tiene entradas.',1;
++  UPDATE dbo.Compra SET Estado='ANULADA' WHERE CompraID=@CompraID;
++  INSERT dbo.EventoCompraApi SELECT @CompraID,'ANULACION',u.UsuarioID,e.Nombres+N' '+e.Apellidos,SYSUTCDATETIME(),@Motivo
++    FROM dbo.Usuario u JOIN dbo.Empleado e ON e.EmpleadoID=u.EmpleadoID WHERE u.UsuarioID=@UsuarioActorID;
++  IF @Propia=1 COMMIT TRANSACTION;
++  SELECT * FROM dbo.vCompraApi WHERE CompraID=@CompraID;
++ END TRY
++ BEGIN CATCH
++  IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APICompraAnulacion;
++  THROW;
++ END CATCH;
++END;
++GO
++-- Los consumos nuevos congelan el promedio vigente de su bodega.
++CREATE OR ALTER PROCEDURE dbo.spConsumirRepuesto
++    @ReparacionID int,@BodegaID int,@RepuestoID int,@Cantidad int,@UsuarioID int,@Fecha datetime2(0)=NULL
++AS
++BEGIN
++SET NOCOUNT ON; SET XACT_ABORT ON;
++DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++BEGIN TRY
++IF @Propia=1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION spConsumirRepuesto;
++
++IF dbo.fnTieneRol(@UsuarioID,'TECNICO')=0 THROW 51014,N'Usuario sin rol técnico.',1;
++IF @Cantidad IS NULL OR @Cantidad<=0 THROW 51015,N'Cantidad inválida.',1;
++IF NOT EXISTS (SELECT 1 FROM dbo.Reparacion WITH (UPDLOCK,HOLDLOCK) WHERE ReparacionID=@ReparacionID AND Estado='EN_PROCESO') THROW 51016,N'Reparación no activa.',1;
++DECLARE @Dummy int,@Stock bigint,@Linea smallint,@Costo decimal(12,2),@Precio decimal(12,2);
++SELECT @Dummy=RepuestoID FROM dbo.Inventario WITH (UPDLOCK,HOLDLOCK) WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID;
++IF @Dummy IS NULL THROW 51017,N'Repuesto sin registro en la bodega.',1;
++SELECT @Costo=CONVERT(decimal(12,2),CostoPromedio) FROM dbo.Inventario WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID;
++SELECT @Precio=PrecioVenta FROM dbo.Repuesto WITH(HOLDLOCK) WHERE RepuestoID=@RepuestoID AND Activo=1;
++IF @Precio IS NULL OR NOT EXISTS(SELECT 1 FROM dbo.Bodega WHERE BodegaID=@BodegaID AND Activo=1) THROW 51018,N'Repuesto/bodega inactivo.',1;
++SET @Stock=dbo.fnExistencia(@BodegaID,@RepuestoID);
++IF @Stock<@Cantidad THROW 51019,N'Stock insuficiente; no se aplicaron cambios.',1;
++SELECT @Linea=CONVERT(smallint,COALESCE(MAX(Linea),0)+1) FROM dbo.ReparacionRepuesto WHERE ReparacionID=@ReparacionID;
++INSERT dbo.ReparacionRepuesto (ReparacionID,Linea,BodegaID,RepuestoID,Cantidad,CostoUnitario,PrecioUnitario)
++VALUES (@ReparacionID,@Linea,@BodegaID,@RepuestoID,@Cantidad,@Costo,@Precio);
++INSERT dbo.MovimientoInventario (ReparacionID,LineaReparacion,Fecha,UsuarioID,ExistenciaResultante)
++VALUES (@ReparacionID,@Linea,COALESCE(@Fecha,SYSUTCDATETIME()),@UsuarioID,@Stock-@Cantidad);
++-- La salida disminuye inmediatamente vInventario; no existe un contador de stock editable.
++
++ IF @Propia=1 COMMIT TRANSACTION;
++END TRY
++BEGIN CATCH
++IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION spConsumirRepuesto;
++ THROW;
++END CATCH;
++END;
++GO
++
++-- Protección del costo de referencia legado, incluso si el cliente usa la API anterior.
++CREATE OR ALTER PROCEDURE dbo.spGuardarRepuestoGestion
++    @UsuarioActorID int,@RepuestoID int,@CategoriaID int,@Codigo nvarchar(max),@Nombre nvarchar(max),@Descripcion nvarchar(max),
++    @CostoReferencia decimal(19,4),@PrecioVenta decimal(19,4),@Activo bit,@Revision nvarchar(max)=NULL
++AS
++BEGIN
++    SET NOCOUNT ON; SET XACT_ABORT ON;
++    DECLARE @Propia bit=CASE WHEN @@TRANCOUNT=0 THEN 1 ELSE 0 END;
++    DECLARE @Contexto sql_variant=SESSION_CONTEXT(N'UsuarioID'),@ContextoCambiado bit=0;
++    BEGIN TRY
++        IF @Propia=1 BEGIN TRANSACTION; ELSE SAVE TRANSACTION APIRepuestoGestion;
++        EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++        SET @Codigo=NULLIF(LTRIM(RTRIM(@Codigo)),N''); SET @Nombre=NULLIF(LTRIM(RTRIM(@Nombre)),N'');
++        SET @Descripcion=NULLIF(LTRIM(RTRIM(@Descripcion)),N'');
++        IF @RepuestoID<=0 OR (@RepuestoID IS NULL AND @Revision IS NOT NULL) OR @Activo IS NULL
++           -- El guion literal va primero dentro del conjunto; no forma un rango con la barra.
++           OR @Codigo IS NULL OR DATALENGTH(@Codigo)>60 OR @Codigo COLLATE Latin1_General_100_BIN2 LIKE N'%[^-0-9A-Za-z._/]%'
++           OR @Nombre IS NULL OR DATALENGTH(@Nombre)>200 OR DATALENGTH(@Descripcion)>1000
++            THROW 52000,N'Revisá código (30), nombre (100), descripción (500) y estado del repuesto.',1;
++        IF @CostoReferencia IS NULL OR @PrecioVenta IS NULL OR @CostoReferencia<0 OR @PrecioVenta<0
++           OR @CostoReferencia>9999999999.99 OR @PrecioVenta>9999999999.99
++           OR ROUND(@CostoReferencia,2)<>@CostoReferencia OR ROUND(@PrecioVenta,2)<>@PrecioVenta
++            THROW 52000,N'Los precios admiten valores desde cero y hasta dos decimales.',1;
++        IF @CategoriaID IS NULL OR NOT EXISTS (SELECT 1 FROM dbo.CategoriaRepuesto WITH (HOLDLOCK) WHERE CategoriaID=@CategoriaID)
++            THROW 52001,N'La categoría del repuesto no existe.',1;
++        -- Desde el bloque 30 el costo de inventario se calcula por bodega.
++        IF ((@RepuestoID IS NULL AND @CostoReferencia<>0)
++             OR (@RepuestoID IS NOT NULL AND EXISTS(SELECT 1 FROM dbo.Repuesto WHERE RepuestoID=@RepuestoID AND CostoReferencia<>@CostoReferencia)))
++            THROW 52000,N'El costo se calcula desde las compras recibidas por bodega. No se edita desde el catálogo.',1;
++        IF @RepuestoID IS NULL
++        BEGIN
++            INSERT dbo.Repuesto(CategoriaID,Codigo,Nombre,Descripcion,CostoReferencia,PrecioVenta,Activo)
++            VALUES (@CategoriaID,@Codigo,@Nombre,@Descripcion,@CostoReferencia,@PrecioVenta,@Activo);
++            SET @RepuestoID=CONVERT(int,SCOPE_IDENTITY());
++        END
++        ELSE
++        BEGIN
++            DECLARE @Actual varchar(64),@BloqueoRepuesto int;
++            SELECT @BloqueoRepuesto=RepuestoID FROM dbo.Repuesto WITH (UPDLOCK,HOLDLOCK) WHERE RepuestoID=@RepuestoID;
++            SELECT @Actual=Revision FROM dbo.vRepuestoGestion WHERE RepuestoID=@RepuestoID;
++            EXEC dbo.spValidarRevisionAbastecimiento @Actual,@Revision;
++            -- El trigger existente registra al usuario autenticado que cambió costo/precio.
++            EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@UsuarioActorID;
++            SET @ContextoCambiado=1;
++            UPDATE dbo.Repuesto SET CategoriaID=@CategoriaID,Codigo=@Codigo,Nombre=@Nombre,Descripcion=@Descripcion,
++                CostoReferencia=@CostoReferencia,PrecioVenta=@PrecioVenta,Activo=@Activo WHERE RepuestoID=@RepuestoID;
++            EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@Contexto;
++            SET @ContextoCambiado=0;
++        END;
++        IF @Propia=1 COMMIT TRANSACTION;
++        SELECT * FROM dbo.vRepuestoGestion WHERE RepuestoID=@RepuestoID;
++    END TRY
++    BEGIN CATCH
++        IF @Propia=1 AND XACT_STATE()<>0 ROLLBACK TRANSACTION;
++        ELSE IF @Propia=0 AND XACT_STATE()=1 ROLLBACK TRANSACTION APIRepuestoGestion;
++        IF @ContextoCambiado=1 EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@Contexto;
++        THROW;
++    END CATCH;
++END;
++GO
++IF DATABASE_PRINCIPAL_ID(N'techcare_app') IS NOT NULL
++BEGIN
++ GRANT EXECUTE ON SCHEMA::dbo TO techcare_app;
++ DENY INSERT,UPDATE,DELETE ON dbo.Compra TO techcare_app;
++ DENY INSERT,UPDATE,DELETE ON dbo.DetalleCompra TO techcare_app;
++ DENY INSERT,UPDATE,DELETE ON dbo.Inventario TO techcare_app;
++ DENY INSERT,UPDATE,DELETE ON dbo.ValoracionInventario TO techcare_app;
++ DENY INSERT,UPDATE,DELETE ON dbo.SolicitudCompraApi TO techcare_app;
++ DENY INSERT,UPDATE,DELETE ON dbo.EventoCompraApi TO techcare_app;
++END;
++GO
+diff --git a/31_Pruebas_Compras.sql b/31_Pruebas_Compras.sql
+new file mode 100644
+index 0000000000000000000000000000000000000000..73e794ac3b043be7a0490d72fe24822af36f13c4
+--- /dev/null
++++ b/31_Pruebas_Compras.sql
+@@ -0,0 +1,402 @@
++-- Ejecutar después del 30 en DESARROLLO, sin otras escrituras concurrentes.
++-- Datos propios por caso, ROLLBACK y verificación de cantidades antes/después.
++-- Las identidades pueden dejar huecos. No es prueba entre sesiones concurrentes.
++USE [TechCare];
++GO
++SET NOCOUNT ON; SET XACT_ABORT ON;
++IF @@TRANCOUNT<>0 THROW 52090,N'Ejecutá sin una transacción abierta.',1;
++IF OBJECT_ID(N'dbo.spRegistrarCompraApi',N'P') IS NULL
++    THROW 52090,N'Ejecutá primero 30_Compras_Procedimientos.sql.',1;
++DECLARE @Admin int=(SELECT TOP (1) UsuarioID FROM dbo.Usuario WHERE dbo.fnTieneRol(UsuarioID,'ADMIN')=1 ORDER BY UsuarioID);
++DECLARE @Modelo int=(SELECT TOP (1) ModeloEquipoID FROM dbo.ModeloEquipo ORDER BY ModeloEquipoID);
++DECLARE @Tipo int=(SELECT TOP (1) TipoClienteID FROM dbo.TipoCliente ORDER BY TipoClienteID);
++IF @Admin IS NULL OR @Modelo IS NULL OR @Tipo IS NULL THROW 52090,N'Se requiere ADMIN activo y catálogos base.',1;
++DECLARE @ContextoInicial sql_variant=SESSION_CONTEXT(N'UsuarioID');
++DECLARE @Casos TABLE (ID int PRIMARY KEY,Caso nvarchar(200),ErrorEsperado int);
++INSERT @Casos VALUES
++(1,N'Registrar compra no cambia existencia ni promedio',0),
++(2,N'Compra conserva observaciones Unicode y costos exactos',0),
++(3,N'Reintentar solicitud no duplica compra ni detalle',0),
++(4,N'Reutilizar solicitud con otro costo se rechaza',52103),
++(5,N'Otra persona no reutiliza la solicitud',52103),
++(6,N'Número de compra repetido se rechaza',2627),
++(7,N'Cantidad negativa rechazada',52100),
++(8,N'Cantidad cero rechazada',52100),
++(9,N'Cantidad fraccionaria rechazada',52100),
++(10,N'Costo negativo rechazado',52100),
++(11,N'Costo con tres decimales rechazado',52100),
++(12,N'Costo fuera de límite rechazado',52100),
++(13,N'Detalle vacío rechazado',52100),
++(14,N'Par repuesto y bodega repetido rechazado',52100),
++(15,N'Proveedor inexistente rechazado',52101),
++(16,N'Repuesto no ofrecido rechazado',52101),
++(17,N'Destino no asociado rechazado',52101),
++(18,N'Proveedor inactivo no registra compra',52101),
++(19,N'Repuesto inactivo no registra compra',52101),
++(20,N'Bodega inactiva no registra compra',52101),
++(21,N'Técnico no recibe compras',52004),
++(22,N'Recepción no consulta compras',52004),
++(23,N'Caja no anula compras',52004),
++(24,N'Usuario de bodega inactivo rechazado',52004),
++(25,N'ADMIN consulta compras',0),
++(26,N'Recepción genera stock, promedio y responsable',0),
++(27,N'Una compra no se recibe dos veces',52103),
++(28,N'Anulación conserva observaciones y no mueve stock',0),
++(29,N'Una compra recibida no se anula',52103),
++(30,N'Una compra anulada no se recibe',52103),
++(31,N'Recepción desactualizada rechazada',52103),
++(32,N'Anulación desactualizada rechazada',52103),
++(33,N'Motivo de anulación obligatorio',52100),
++(34,N'Motivo largo rechazado sin truncar',52100),
++(35,N'Costo de catálogo deja de ser editable',52000),
++(36,N'Nuevo repuesto no recibe un costo manual',52000),
++(37,N'Un repuesto conserva promedios distintos por bodega',0),
++(38,N'Consumo utiliza el promedio de su bodega',0),
++(39,N'Salida parcial conserva promedio y valoración histórica',0),
++(40,N'Agotar existencias deja promedio en cero',0),
++(41,N'Reponer después de agotar usa el nuevo costo',0),
++(42,N'Nueva compra no reescribe consumo ni factura',0),
++(43,N'Promedio usa existencia remanente y no total comprado',0),
++(44,N'Dos proveedores abastecen el mismo repuesto',0),
++(45,N'Compra sin cargo actualiza promedio correctamente',0),
++(46,N'Valoración histórica no se modifica',52105),
++(47,N'Solicitud histórica no se borra',52105),
++(48,N'Responsables históricos no se modifican',52105),
++(49,N'Recepción de varias bodegas revierte completa ante error',51030),
++(50,N'Consulta de costos conserva seis decimales',0),
++(51,N'Destino nuevo sin entradas tiene costo cero',0),
++(52,N'JSON inválido rechazado',52100),
++(53,N'Número de compra largo rechazado sin truncar',52100),
++(54,N'Solicitud inválida rechazada',52100),
++(55,N'Observaciones largas rechazadas sin truncar',52100),
++(56,N'Recepción no altera precio de venta',0),
++(57,N'Detalle histórico de compra no se modifica',51140),
++(58,N'Consulta inexistente devuelve error controlado',52102),
++(59,N'Rango de fechas invertido rechazado',52100),
++(60,N'Costo máximo conserva centavos en compra y promedio',0);
++DECLARE @Antes TABLE (Nombre sysname PRIMARY KEY,Cantidad bigint);
++INSERT @Antes
++SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Cliente UNION ALL
++SELECT 'Equipo' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Equipo UNION ALL
++SELECT 'Usuario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Usuario UNION ALL
++SELECT 'Empleado' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Bodega UNION ALL
++SELECT 'Inventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ProveedorRepuesto UNION ALL
++SELECT 'Compra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AuditoriaPrecioRepuesto UNION ALL
++SELECT 'Factura' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Factura UNION ALL
++SELECT 'FacturaDetalle' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.FacturaDetalle UNION ALL
++SELECT 'Pago' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Pago UNION ALL
++SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
++SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi UNION ALL
++SELECT 'ValoracionInventario',COUNT_BIG(*) FROM dbo.ValoracionInventario UNION ALL
++SELECT 'SolicitudCompraApi',COUNT_BIG(*) FROM dbo.SolicitudCompraApi UNION ALL
++SELECT 'EventoCompraApi',COUNT_BIG(*) FROM dbo.EventoCompraApi;
++SELECT TOP (0) * INTO #ResultadoOrden FROM dbo.vOrdenAcceso;
++SELECT TOP (0) * INTO #Repuestos FROM dbo.vRepuestoGestion;
++-- La expresión +0 conserva el valor/tipo del ID sin copiar IDENTITY.
++-- INSERT ... EXEC debe recibir también el ID devuelto por el procedimiento.
++SELECT TOP (0) CategoriaID+0 AS CategoriaID,Nombre,Revision INTO #Categorias FROM dbo.vCategoriaRepuestoGestion;
++SELECT TOP (0) ProveedorID+0 AS ProveedorID,NIT,Nombre,Email,Telefono,Direccion,Activo,Revision INTO #Proveedores FROM dbo.vProveedorGestion;
++SELECT TOP (0) BodegaID+0 AS BodegaID,Codigo,Nombre,Direccion,Activo,Revision INTO #Bodegas FROM dbo.vBodegaGestion;
++SELECT TOP (0) * INTO #Ofertas FROM dbo.vOfertaProveedorGestion;
++SELECT TOP (0) * INTO #Minimos FROM dbo.vRepuestoBodegaGestion;
++DECLARE @Resultados TABLE (ID int,Caso nvarchar(200),Resultado varchar(4),Detalle nvarchar(4000));
++DECLARE @Caso int=1,@Esperado int,@Nombre nvarchar(200),@Resultado varchar(4),@Detalle nvarchar(4000),@Preparado bit;
++DECLARE @Sufijo varchar(8),@Codigo varchar(30),@Usuario varchar(50),@Nit varchar(20),@Serie varchar(80),@Texto nvarchar(max);
++DECLARE @Cliente int,@Equipo int,@Empleado int,@Tec1 int,@Tec2 int,@Recepcion int,@Orden int,@Categoria int,@Repuesto int,@Bodega int,@Proveedor int,@Compra int,@Actividad int,@Reparacion int;
++DECLARE @Bodeguero int,@Caja int,@Extra int,@CompraPendiente int,@Factura int;
++DECLARE @RevR varchar(64),@RevP varchar(64),@RevB varchar(64),@RevC varchar(64),@RevO varchar(64),@CodigoR varchar(30),@CodigoB varchar(20),@NitP varchar(20),@CategoriaNombre nvarchar(80),@ExtraCodigo varchar(30);
++DECLARE @Movimientos bigint,@Inventarios bigint,@Auditorias bigint;
++DECLARE @Lineas dbo.TipoDetalleCompra;
++SELECT TOP (0) * INTO #Compras FROM dbo.vCompraApi;
++DECLARE @Solicitud nvarchar(36),@OtraSolicitud nvarchar(36),@NumeroCompra nvarchar(max),@NumeroNuevo nvarchar(max),@Json nvarchar(max),@CompraNueva int,@RevisionNueva varchar(64),@Bodega2 int,@Proveedor2 int,@Consumo bigint;
++DECLARE @Hash varchar(255)='$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
++WHILE @Caso<=60
++BEGIN
++    SELECT @Nombre=Caso,@Esperado=ErrorEsperado FROM @Casos WHERE ID=@Caso;
++    SET @Resultado='PASS';SET @Detalle=NULL;SET @Preparado=0;
++    SET @Sufijo=LEFT(REPLACE(CONVERT(varchar(36),NEWID()),'-',''),8);
++    DELETE FROM #Compras;DELETE FROM #ResultadoOrden;DELETE FROM #Repuestos;DELETE FROM #Categorias;DELETE FROM #Proveedores;
++    DELETE FROM #Bodegas;DELETE FROM #Ofertas;DELETE FROM #Minimos;DELETE FROM @Lineas;
++    BEGIN TRY
++        BEGIN TRANSACTION;
++        SET @Nit = 'TCAB-C-' + @Sufijo; SET @Serie = 'TCAB-E-' + @Sufijo;
++        INSERT dbo.Cliente(TipoClienteID, NIT, Nombre, Activo) VALUES (@Tipo, @Nit, N'Cliente de prueba técnica', 1);
++        SET @Cliente = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Equipo(ClienteID, ModeloEquipoID, NumeroSerie, Descripcion, Activo)
++            VALUES (@Cliente, @Modelo, @Serie, N'Equipo de prueba técnica', 1);
++        SET @Equipo = CONVERT(int, SCOPE_IDENTITY());
++
++        SET @Codigo = 'TCABT1-' + @Sufijo; SET @Usuario = 'tcst1_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Uno', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec1 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCABT2-' + @Sufijo; SET @Usuario = 'tcst2_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Dos', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec2 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCABR-' + @Sufijo; SET @Usuario = 'tcsr_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Recepción', N'Prueba', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Recepcion = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.UsuarioRol VALUES (@Tec1, 'TECNICO'), (@Tec2, 'TECNICO'), (@Recepcion, 'RECEPCION');
++
++        SET @Codigo = 'TCAB-' + @Sufijo;
++        EXEC dbo.spCrearOrden @Codigo, @Equipo, @Admin, N'No enciende ñ 漢字', @Orden OUTPUT;
++        INSERT #ResultadoOrden EXEC dbo.spAsignarTecnicoOrden @Admin, @Orden, @Tec1;
++        DELETE FROM #ResultadoOrden;
++        SET @Texto = N'Categoría de prueba ' + @Sufijo;
++        INSERT dbo.CategoriaRepuesto(Nombre) VALUES (@Texto);
++        SET @Categoria = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Repuesto(CategoriaID, Codigo, Nombre, CostoReferencia, PrecioVenta, Activo)
++            VALUES (@Categoria, @Codigo, N'Fuente de prueba ñ', 12.25, 25.50, 1);
++        SET @Repuesto = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Bodega(Codigo, Nombre, Activo) VALUES (@Codigo, N'Bodega técnica de prueba', 1);
++        SET @Bodega = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Inventario(BodegaID, RepuestoID, StockMinimo) VALUES (@Bodega, @Repuesto, 2);
++        SET @Nit = 'TCAB-P-' + @Sufijo;
++        INSERT dbo.Proveedor(NIT, Nombre, Activo) VALUES (@Nit, N'Proveedor de prueba técnica', 1);
++        SET @Proveedor = CONVERT(int, SCOPE_IDENTITY());
++        -- El detalle de compra exige que el proveedor ofrezca este repuesto.
++        INSERT dbo.ProveedorRepuesto(ProveedorID, RepuestoID) VALUES (@Proveedor, @Repuesto);
++        INSERT @Lineas VALUES (1, @Bodega, @Repuesto, 10, 12.25);
++        EXEC dbo.spRegistrarCompra @Codigo, @Proveedor, @Admin, @Lineas, @Compra OUTPUT;
++        EXEC dbo.spRecibirCompra @Compra, @Admin;
++        SET @Texto = N'Prueba con carga ' + @Sufijo;
++        INSERT dbo.Actividad(Nombre, Activo) VALUES (@Texto, 1);
++        SET @Actividad = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo='TCABG-'+@Sufijo;SET @Usuario='tcabg_'+@Sufijo;
++        INSERT dbo.Empleado(Codigo,Nombres,Apellidos,Activo) VALUES (@Codigo,N'Bodega',N'Prueba',1);
++        SET @Empleado=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID,NombreUsuario,PasswordHash,Activo) VALUES (@Empleado,@Usuario,@Hash,1);
++        SET @Bodeguero=CONVERT(int,SCOPE_IDENTITY());INSERT dbo.UsuarioRol VALUES (@Bodeguero,'BODEGA');
++        SET @Codigo='TCABC-'+@Sufijo;SET @Usuario='tcabc_'+@Sufijo;
++        INSERT dbo.Empleado(Codigo,Nombres,Apellidos,Activo) VALUES (@Codigo,N'Caja',N'Prueba',1);
++        SET @Empleado=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID,NombreUsuario,PasswordHash,Activo) VALUES (@Empleado,@Usuario,@Hash,1);
++        SET @Caja=CONVERT(int,SCOPE_IDENTITY());INSERT dbo.UsuarioRol VALUES (@Caja,'CAJA');
++        SET @ExtraCodigo='EXTRA-'+@Sufijo;
++        INSERT dbo.Repuesto(CategoriaID,Codigo,Nombre,CostoReferencia,PrecioVenta,Activo) VALUES (@Categoria,@ExtraCodigo,N'Repuesto adicional',0,0,1);
++        SET @Extra=CONVERT(int,SCOPE_IDENTITY());
++        SELECT @RevR=Revision,@CodigoR=Codigo FROM dbo.vRepuestoGestion WHERE RepuestoID=@Repuesto;
++        SELECT @RevP=Revision,@NitP=NIT FROM dbo.vProveedorGestion WHERE ProveedorID=@Proveedor;
++        SELECT @RevB=Revision,@CodigoB=Codigo FROM dbo.vBodegaGestion WHERE BodegaID=@Bodega;
++        SELECT @RevC=Revision,@CategoriaNombre=Nombre FROM dbo.vCategoriaRepuestoGestion WHERE CategoriaID=@Categoria;
++        SELECT @RevO=Revision FROM dbo.vOfertaProveedorGestion WHERE ProveedorID=@Proveedor AND RepuestoID=@Repuesto;
++        SELECT @Movimientos=COUNT_BIG(*) FROM dbo.MovimientoInventario;
++        SELECT @Inventarios=COUNT_BIG(*) FROM dbo.Inventario;
++        SELECT @Auditorias=COUNT_BIG(*) FROM dbo.AuditoriaPrecioRepuesto;
++        EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@Admin;
++        SET @Preparado=1;
++
++        SET @Preparado=0;
++        SET @Codigo='B2-'+@Sufijo;
++        INSERT dbo.Bodega(Codigo,Nombre,Activo) VALUES(@Codigo,N'Segunda bodega',1);SET @Bodega2=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Inventario(BodegaID,RepuestoID,StockMinimo) VALUES(@Bodega2,@Repuesto,0);
++        SET @Solicitud=CONVERT(nvarchar(36),NEWID());SET @OtraSolicitud=CONVERT(nvarchar(36),NEWID());
++        SET @NumeroCompra=N'CP-'+@Sufijo;SET @NumeroNuevo=N'NUEVA-'+@Sufijo;
++        SET @Json=CONCAT(N'[{"bodegaId":',@Bodega,N',"repuestoId":',@Repuesto,N',"cantidad":10,"costoUnitario":20.00}]');
++        INSERT #Compras EXEC dbo.spRegistrarCompraApi @Bodeguero,@Solicitud,@NumeroCompra,@Proveedor,N'Garantía ñ 漢字',@Json;
++        SELECT @CompraNueva=CompraID,@RevisionNueva=Revision FROM #Compras;
++        SET @Preparado=1;
++
++        IF @Caso=1
++        BEGIN
++          IF dbo.fnExistencia(@Bodega,@Repuesto)<>10 OR (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>12.25
++             OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos THROW 52192,N'El registro movió stock o promedio.',1;
++        END;
++        IF @Caso=2 AND NOT EXISTS(SELECT 1 FROM #Compras WHERE Observaciones=N'Garantía ñ 漢字' AND Total=200 AND Estado='PENDIENTE') THROW 52192,N'La compra perdió sus datos.',1;
++        IF @Caso=3
++        BEGIN
++          INSERT #Compras EXEC dbo.spRegistrarCompraApi @Bodeguero,@Solicitud,@NumeroCompra,@Proveedor,N'Garantía ñ 漢字',@Json;
++          IF (SELECT COUNT(*) FROM dbo.Compra WHERE NumeroCompra=@NumeroCompra)<>1 OR (SELECT COUNT(*) FROM dbo.DetalleCompra WHERE CompraID=@CompraNueva)<>1
++             OR EXISTS(SELECT 1 FROM #Compras WHERE CompraID<>@CompraNueva) THROW 52192,N'Se duplicó la compra.',1;
++        END;
++        IF @Caso=4 BEGIN SET @Json=REPLACE(@Json,N'20.00',N'21.00');EXEC dbo.spRegistrarCompraApi @Bodeguero,@Solicitud,@NumeroCompra,@Proveedor,N'Garantía ñ 漢字',@Json;END;
++        IF @Caso=5 EXEC dbo.spRegistrarCompraApi @Admin,@Solicitud,@NumeroCompra,@Proveedor,N'Garantía ñ 漢字',@Json;
++        IF @Caso=6 EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroCompra,@Proveedor,N'Garantía ñ 漢字',@Json;
++        IF @Caso BETWEEN 7 AND 12
++        BEGIN
++          SET @Json=CASE @Caso WHEN 7 THEN REPLACE(@Json,N'"cantidad":10',N'"cantidad":-1') WHEN 8 THEN REPLACE(@Json,N'"cantidad":10',N'"cantidad":0')
++            WHEN 9 THEN REPLACE(@Json,N'"cantidad":10',N'"cantidad":1.5') WHEN 10 THEN REPLACE(@Json,N'20.00',N'-1')
++            WHEN 11 THEN REPLACE(@Json,N'20.00',N'1.234') ELSE REPLACE(@Json,N'20.00',N'10000000000') END;
++          EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,@Json;
++        END;
++        IF @Caso=13 EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,N'[]';
++        IF @Caso=14 BEGIN SET @Json=LEFT(@Json,LEN(@Json)-1)+N','+SUBSTRING(@Json,2,LEN(@Json));EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,@Json;END;
++        IF @Caso=15 EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,2147483647,NULL,@Json;
++        IF @Caso IN(16,17)
++        BEGIN
++          IF @Caso=17 INSERT dbo.ProveedorRepuesto(ProveedorID,RepuestoID) VALUES(@Proveedor,@Extra);
++          SET @Json=(SELECT @Bodega2 AS bodegaId,@Extra AS repuestoId,1 AS cantidad,1 AS costoUnitario FOR JSON PATH);
++          EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,@Json;
++        END;
++        IF @Caso=18 BEGIN UPDATE dbo.Proveedor SET Activo=0 WHERE ProveedorID=@Proveedor;EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,@Json;END;
++        IF @Caso=19 BEGIN UPDATE dbo.Repuesto SET Activo=0 WHERE RepuestoID=@Repuesto;EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,@Json;END;
++        IF @Caso=20 BEGIN UPDATE dbo.Bodega SET Activo=0 WHERE BodegaID=@Bodega;EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,@Json;END;
++        IF @Caso=21 EXEC dbo.spRecibirCompraApi @Tec1,@CompraNueva,@RevisionNueva;
++        IF @Caso=22 EXEC dbo.spListarComprasApi @Recepcion;
++        IF @Caso=23 EXEC dbo.spAnularCompraApi @Caja,@CompraNueva,@RevisionNueva,N'No autorizado';
++        IF @Caso=24 BEGIN UPDATE dbo.Usuario SET Activo=0 WHERE UsuarioID=@Bodeguero;EXEC dbo.spRecibirCompraApi @Bodeguero,@CompraNueva,@RevisionNueva;END;
++        IF @Caso=25 BEGIN DELETE #Compras;INSERT #Compras EXEC dbo.spListarComprasApi @Admin,@NumeroCompra;IF NOT EXISTS(SELECT 1 FROM #Compras WHERE CompraID=@CompraNueva) THROW 52192,N'ADMIN no pudo consultar.',1;END;
++        IF @Caso IN(26,27,29,37,38,39,40,41,42,43,44,46,50,56)
++        BEGIN
++          INSERT #Compras EXEC dbo.spRecibirCompraApi @Bodeguero,@CompraNueva,@RevisionNueva;
++          IF dbo.fnExistencia(@Bodega,@Repuesto)<>20 OR (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>16.125
++             OR NOT EXISTS(SELECT 1 FROM dbo.EventoCompraApi WHERE CompraID=@CompraNueva AND Tipo='RECEPCION' AND UsuarioID=@Bodeguero)
++             OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos+1 THROW 52192,N'La recepción perdió stock, promedio o actor.',1;
++        END;
++        IF @Caso=27 EXEC dbo.spRecibirCompraApi @Bodeguero,@CompraNueva,@RevisionNueva;
++        IF @Caso IN(28,30)
++        BEGIN
++          INSERT #Compras EXEC dbo.spAnularCompraApi @Bodeguero,@CompraNueva,@RevisionNueva,N'Cancelación ñ 漢字';
++          IF dbo.fnExistencia(@Bodega,@Repuesto)<>10 OR (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>12.25
++             OR NOT EXISTS(SELECT 1 FROM dbo.EventoCompraApi WHERE CompraID=@CompraNueva AND Observacion=N'Cancelación ñ 漢字' AND Tipo='ANULACION')
++             OR NOT EXISTS(SELECT 1 FROM dbo.Compra WHERE CompraID=@CompraNueva AND Observaciones=N'Garantía ñ 漢字') THROW 52192,N'La anulación alteró stock u observaciones.',1;
++        END;
++        IF @Caso=29 EXEC dbo.spAnularCompraApi @Bodeguero,@CompraNueva,@RevisionNueva,N'No permitido';
++        IF @Caso=30 EXEC dbo.spRecibirCompraApi @Bodeguero,@CompraNueva,@RevisionNueva;
++        IF @Caso=31 EXEC dbo.spRecibirCompraApi @Bodeguero,@CompraNueva,N'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF';
++        IF @Caso=32 EXEC dbo.spAnularCompraApi @Bodeguero,@CompraNueva,N'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF',N'Fuera de fecha';
++        IF @Caso=33 EXEC dbo.spAnularCompraApi @Bodeguero,@CompraNueva,@RevisionNueva,N' ';
++        IF @Caso=34 BEGIN SET @Texto=REPLICATE(N'a',1001);EXEC dbo.spAnularCompraApi @Bodeguero,@CompraNueva,@RevisionNueva,@Texto;END;
++        IF @Caso=35 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente',NULL,99,25.50,1,@RevR;
++        IF @Caso=36 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'NO-COSTO',N'Fuente',NULL,99,25.50,1;
++        IF @Caso=37
++        BEGIN
++          DELETE #Compras;SET @Json=(SELECT @Bodega2 AS bodegaId,@Repuesto AS repuestoId,10 AS cantidad,30 AS costoUnitario FOR JSON PATH);
++          INSERT #Compras EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,@Json;
++          SELECT @Extra=CompraID,@RevO=Revision FROM #Compras;
++          INSERT #Compras EXEC dbo.spRecibirCompraApi @Bodeguero,@Extra,@RevO;
++          IF (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega2 AND RepuestoID=@Repuesto)<>30
++             OR (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>16.125 THROW 52192,N'Se mezclaron costos entre bodegas.',1;
++        END;
++        IF @Caso IN(38,39,40,41,42,43)
++        BEGIN
++          INSERT #ResultadoOrden EXEC dbo.spRegistrarDiagnosticoOrden @Tec1,@Orden,N'Diagnóstico',0;
++          INSERT #ResultadoOrden EXEC dbo.spIniciarReparacionOrden @Tec1,@Orden,N'Cambiar pieza',0,N'Autorizado';
++          SET @Extra=CASE WHEN @Caso IN(40,41) THEN 20 WHEN @Caso=43 THEN 15 ELSE 1 END;
++          INSERT #ResultadoOrden EXEC dbo.spUsarRepuestoOrden @Tec1,@Orden,@Bodega,@Repuesto,@Extra,25.50;
++          SELECT @Reparacion=ReparacionID FROM dbo.vOrdenAcceso WHERE OrdenID=@Orden;
++          IF NOT EXISTS(SELECT 1 FROM dbo.ReparacionRepuesto WHERE ReparacionID=@Reparacion AND CostoUnitario=16.13)
++             THROW 52192,N'El consumo no congeló el promedio redondeado a centavos.',1;
++        END;
++        IF @Caso=39 AND (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>16.125 THROW 52192,N'La salida parcial cambió el promedio.',1;
++        IF @Caso IN(40,41) AND (dbo.fnExistencia(@Bodega,@Repuesto)<>0 OR (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>0) THROW 52192,N'El inventario agotado conservó un promedio.',1;
++        IF @Caso=42
++        BEGIN
++          INSERT #ResultadoOrden EXEC dbo.spFinalizarReparacionOrden @Tec1,@Orden;
++          SET @Codigo='F-'+@Sufijo;EXEC dbo.spGenerarFactura @Orden,@Codigo,@Admin,@Factura OUTPUT;
++        END;
++        IF @Caso IN(41,42,43,44,45,60)
++        BEGIN
++          IF @Caso=44
++          BEGIN
++            SET @Nit='PR2-'+@Sufijo;INSERT dbo.Proveedor(NIT,Nombre,Activo) VALUES(@Nit,N'Segundo proveedor',1);SET @Proveedor2=CONVERT(int,SCOPE_IDENTITY());
++            INSERT dbo.ProveedorRepuesto(ProveedorID,RepuestoID) VALUES(@Proveedor2,@Repuesto);
++          END ELSE SET @Proveedor2=@Proveedor;
++          SET @Json=(SELECT @Bodega AS bodegaId,@Repuesto AS repuestoId,10 AS cantidad,
++            CONVERT(decimal(12,2),CASE WHEN @Caso=45 THEN 0 WHEN @Caso=60 THEN 9999999999.99 ELSE 30 END) AS costoUnitario FOR JSON PATH);
++          DELETE #Compras;INSERT #Compras EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor2,NULL,@Json;
++          SELECT @Extra=CompraID,@RevO=Revision FROM #Compras;
++          INSERT #Compras EXEC dbo.spRecibirCompraApi @Bodeguero,@Extra,@RevO;
++          IF @Caso=41 AND (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>30 THROW 52192,N'La reposición no tomó su costo nuevo.',1;
++          IF @Caso=42 AND (NOT EXISTS(SELECT 1 FROM dbo.ReparacionRepuesto WHERE ReparacionID=@Reparacion AND CostoUnitario=16.13)
++            OR NOT EXISTS(SELECT 1 FROM dbo.FacturaDetalle WHERE FacturaID=@Factura AND TipoConcepto='REP' AND PrecioUnitario=25.50)) THROW 52192,N'Se reescribió historia.',1;
++          IF @Caso=43 AND (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>25.375 THROW 52192,N'El promedio usó unidades ya consumidas.',1;
++          IF @Caso=44 AND (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>20.75 THROW 52192,N'Se separó indebidamente el costo por proveedor.',1;
++          IF @Caso=45 AND (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>6.125 THROW 52192,N'La entrada sin cargo perdió el promedio.',1;
++          IF @Caso=60 AND (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>5000000006.12 THROW 52192,N'El costo máximo perdió centavos.',1;
++        END;
++        IF @Caso=46 UPDATE dbo.ValoracionInventario SET CostoPosterior=0 WHERE MovimientoID=(SELECT TOP(1) MovimientoID FROM dbo.MovimientoInventario WHERE CompraID=@CompraNueva);
++        IF @Caso=47 DELETE dbo.SolicitudCompraApi WHERE CompraID=@CompraNueva;
++        IF @Caso=48 UPDATE dbo.EventoCompraApi SET Responsable=N'Otra persona' WHERE CompraID=@CompraNueva;
++        IF @Caso=49
++        BEGIN
++          SET @Json=(SELECT BodegaID AS bodegaId,@Repuesto AS repuestoId,1 AS cantidad,30 AS costoUnitario FROM dbo.Bodega WHERE BodegaID IN(@Bodega,@Bodega2) FOR JSON PATH);
++          DELETE #Compras;INSERT #Compras EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,@Json;
++          SELECT @Extra=CompraID,@RevO=Revision FROM #Compras;
++          UPDATE dbo.Bodega SET Activo=0 WHERE BodegaID=@Bodega2;
++          EXEC dbo.spRecibirCompraApi @Bodeguero,@Extra,@RevO;
++        END;
++        IF @Caso=50 AND NOT EXISTS(SELECT 1 FROM dbo.ValoracionInventario v JOIN dbo.MovimientoInventario m ON m.MovimientoID=v.MovimientoID WHERE m.CompraID=@CompraNueva AND v.CostoAnterior=12.25 AND v.CostoPosterior=16.125 AND v.EsMigracion=0) THROW 52192,N'La valoración no conservó precisión.',1;
++        IF @Caso=51 AND (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega2 AND RepuestoID=@Repuesto)<>0 THROW 52192,N'Un destino nuevo heredó un costo ficticio.',1;
++        IF @Caso=52 EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,NULL,N'no-json';
++        IF @Caso=53 BEGIN SET @Texto=REPLICATE(N'A',31);EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@Texto,@Proveedor,NULL,@Json;END;
++        IF @Caso=54 EXEC dbo.spRegistrarCompraApi @Bodeguero,N'invalido',@NumeroNuevo,@Proveedor,NULL,@Json;
++        IF @Caso=55 BEGIN SET @Texto=REPLICATE(N'a',1001);EXEC dbo.spRegistrarCompraApi @Bodeguero,@OtraSolicitud,@NumeroNuevo,@Proveedor,@Texto,@Json;END;
++        IF @Caso=56 AND NOT EXISTS(SELECT 1 FROM dbo.Repuesto WHERE RepuestoID=@Repuesto AND PrecioVenta=25.50) THROW 52192,N'La recepción alteró precio de venta.',1;
++        IF @Caso=57 UPDATE dbo.DetalleCompra SET CostoUnitario=99 WHERE CompraID=@CompraNueva;
++        IF @Caso=58 EXEC dbo.spConsultarCompraApi @Bodeguero,2147483647;
++        IF @Caso=59 EXEC dbo.spListarComprasApi @Bodeguero,@Desde='2026-10-21',@Hasta='2026-10-01';
++        IF @Esperado<>0 THROW 52091,N'La operación debía rechazarse y fue aceptada.',1;
++        ROLLBACK TRANSACTION;
++    END TRY
++    BEGIN CATCH
++        SET @Detalle=ERROR_MESSAGE();
++        IF @Preparado=0 OR @Esperado=0 OR ERROR_NUMBER()<>@Esperado SET @Resultado='FAIL';
++        IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
++    END CATCH;
++    IF @Preparado=1 AND (TRY_CONVERT(int,SESSION_CONTEXT(N'UsuarioID')) IS NULL OR TRY_CONVERT(int,SESSION_CONTEXT(N'UsuarioID'))<>@Admin)
++    BEGIN SET @Resultado='FAIL';SET @Detalle=COALESCE(@Detalle+N' | ',N'')+N'El contexto de auditoría no fue restaurado.';END;
++    EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@ContextoInicial;
++    ;WITH Despues AS (
++SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Cliente UNION ALL
++SELECT 'Equipo' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Equipo UNION ALL
++SELECT 'Usuario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Usuario UNION ALL
++SELECT 'Empleado' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Bodega UNION ALL
++SELECT 'Inventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ProveedorRepuesto UNION ALL
++SELECT 'Compra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AuditoriaPrecioRepuesto UNION ALL
++SELECT 'Factura' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Factura UNION ALL
++SELECT 'FacturaDetalle' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.FacturaDetalle UNION ALL
++SELECT 'Pago' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Pago UNION ALL
++SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
++SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi UNION ALL
++SELECT 'ValoracionInventario',COUNT_BIG(*) FROM dbo.ValoracionInventario UNION ALL
++SELECT 'SolicitudCompraApi',COUNT_BIG(*) FROM dbo.SolicitudCompraApi UNION ALL
++SELECT 'EventoCompraApi',COUNT_BIG(*) FROM dbo.EventoCompraApi
++    )
++    SELECT @Resultado=CASE WHEN EXISTS(SELECT 1 FROM Despues d JOIN @Antes a ON a.Nombre=d.Nombre WHERE a.Cantidad<>d.Cantidad) THEN 'FAIL' ELSE @Resultado END;
++    IF @Resultado='FAIL' AND @Detalle IS NULL SET @Detalle=N'La prueba dejó cantidades persistentes diferentes.';
++    INSERT @Resultados VALUES(@Caso,@Nombre,@Resultado,@Detalle);SET @Caso+=1;
++END;
++DROP TABLE #Compras;DROP TABLE #ResultadoOrden;DROP TABLE #Repuestos;DROP TABLE #Categorias;DROP TABLE #Proveedores;DROP TABLE #Bodegas;DROP TABLE #Ofertas;DROP TABLE #Minimos;
++SELECT ID,Caso,Resultado,Detalle FROM @Resultados ORDER BY ID;
++IF EXISTS(SELECT 1 FROM @Resultados WHERE Resultado='FAIL') THROW 52092,N'Una o más pruebas de compras fallaron. Revisá los resultados.',1;
++GO
+diff --git a/INTEGRACION_ABASTECIMIENTO.md b/INTEGRACION_ABASTECIMIENTO.md
+index b93b05da92a4a16c21184aa586881ef6d47197ce..61075729da44c918aab8c605d3fdb5d1d8ff3af6 100644
+--- a/INTEGRACION_ABASTECIMIENTO.md
++++ b/INTEGRACION_ABASTECIMIENTO.md
+@@ -160,3 +160,13 @@ https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp
+ Referencias de la corrección SQL:
+ https://learn.microsoft.com/sql/t-sql/language-elements/like-transact-sql
+ https://learn.microsoft.com/sql/t-sql/queries/select-into-clause-transact-sql
++
++## Actualización con el bloque 30
++
++Una vez instalado `30_Compras_Procedimientos.sql`, el costo de inventario se
++calcula por bodega desde las entradas recibidas. El catálogo permite editar
++el precio de venta y consultar **Costos por bodega**; el costo de referencia
++legado permanece para compatibilidad y no admite modificaciones desde la API.
++Los casos 16, 54 y 55 del 27 actualizados cambian el precio de venta manteniendo
++el costo legado. La auditoría y la restauración del contexto siguen verificadas.
++Compras y recepción ya están disponibles; consultar `INTEGRACION_COMPRAS.md`.
+diff --git a/INTEGRACION_COMPRAS.md b/INTEGRACION_COMPRAS.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..4994cfc8729f8c91d603de45beb24f50cf347d9d
+--- /dev/null
++++ b/INTEGRACION_COMPRAS.md
+@@ -0,0 +1,170 @@
++# Compras, recepción y costo promedio por bodega
++
++Continuación del commit `1f02354` (repuestos, proveedores y bodegas).
++El patch conecta compras pendientes, recepción completa, anulación y consulta de
++costos por bodega. El costo de inventario deja de ser un dato editable del catálogo.
++
++## Instalación en la base existente
++
++1. Detener el backend durante la actualización SQL. Guardar
++   `32_Compras_Recepcion_API.patch` en la raíz de TechCare y ejecutar en la
++   terminal de IntelliJ:
++
++   ```bash
++   git apply --check 32_Compras_Recepcion_API.patch
++   git apply 32_Compras_Recepcion_API.patch
++   ```
++
++2. En SSMS ejecutar completo el **26 actualizado** y después
++   `30_Compras_Procedimientos.sql`. No volver a ejecutar 01 ni 02.
++   El 30 es repetible: no reinicia compras, identidades, stock ni costos ya valorados.
++3. En desarrollo, sin otras escrituras ni una transacción abierta, ejecutar
++   `31_Pruebas_Compras.sql`: 60 casos con datos propios y ROLLBACK por caso.
++   Comprueba también las cantidades persistentes de las tres tablas nuevas.
++   Pueden quedar huecos en identidades y secuencias.
++4. Reiniciar backend y frontend. No se agregan dependencias ni se modifican
++   credenciales, DLL o configuración local.
++
++El 27 incluido también se actualizó: los casos 16, 54 y 55 cambian el precio
++de venta conservando el costo legado. Sus 59 escenarios continúan siendo útiles.
++Para regresión adicional ejecutar 20, 24 y 27 después del 30; sus consumos de
++prueba reciben previamente compras a Q12.25 y deben conservar ese costo.
++
++## Uso en la aplicación
++
++Entrar con BODEGA o ADMIN en **Servicios → Compras**.
++
++1. **Nueva compra**: ingresar número único, proveedor activo y observaciones
++   opcionales. Agregar una o varias líneas de repuesto, bodega, cantidad entera
++   y costo unitario pagado al proveedor. Se permite costo cero.
++2. El selector ofrece únicamente los repuestos del catálogo de ese proveedor
++   que tienen una bodega asociada y activa. Si no hay opciones, configurarlos
++   desde **Proveedores → Catálogo ofrecido** y **Bodegas → Repuestos y mínimos**.
++   Un mismo repuesto puede comprarse a proveedores distintos.
++3. Usar **Revisar compra** y revisar cantidades, destinos, costos y total.
++   **Registrar compra pendiente** conserva el documento; todavía no genera entradas.
++4. En el expediente, **Recibir compra** exige confirmar que llegaron todas las
++   unidades. **Confirmar recepción** registra las entradas y el responsable,
++   calcula cada promedio y deja la compra RECIBIDA en una sola transacción.
++5. Una compra PENDIENTE puede anularse con motivo obligatorio. Conserva sus
++   observaciones originales y registra quién anuló, cuándo y por qué. Recibidas
++   y anuladas ya no admiten recepción ni anulación desde esta pantalla.
++
++No se editan líneas ya registradas. Si una compra pendiente tiene un error,
++anularla con su motivo y registrar otra con un número distinto. No se incorporan
++recepciones parciales, devoluciones ni edición de costos históricos.
++
++El listado permite filtrar por texto literal, estado, proveedor y fechas.
++Los intervalos de fechas de registro son inclusivos y usan la fecha UTC de la BD;
++la presentación de horas continúa usando la configuración es-GT existente.
++
++La respuesta de un registro puede perderse después de guardarlo. El formulario
++mantiene la misma solicitud al usar **Reintentar registro**. Una repetición con
++los mismos datos y actor devuelve la compra ya creada; cambiar sus datos o actor
++con ese identificador se rechaza. El número único da una segunda protección.
++
++## Costo promedio móvil
++
++En **Repuestos → Costos por bodega** y **Bodegas → Repuestos y mínimos** se
++consultan existencia y promedio. No hay un campo editable de costo en el formulario
++del repuesto. El precio de venta sigue siendo administrable y auditado.
++
++Al recibir una entrada:
++
++```text
++nuevo promedio =
++  (existencia anterior × promedio anterior + unidades recibidas × costo unitario)
++  / (existencia anterior + unidades recibidas)
++```
++
++Por ejemplo, 10 unidades a Q45 y otras 10 recibidas a Q55 dejan 20 unidades
++con promedio Q50. Se calcula por bodega, independientemente del proveedor.
++Una salida parcial conserva el promedio. Al agotar las unidades queda en cero;
++la siguiente entrada determina el nuevo promedio sin arrastrar unidades agotadas.
++
++- `Inventario.CostoPromedio` conserva seis decimales. El stock sigue derivado
++  de `vMovimientoInventario` y no se agrega un contador editable de existencias.
++- Cada movimiento tiene una fila inmutable en `ValoracionInventario`, con
++  promedio anterior, posterior y una marca de migración.
++- El trigger de valoración toma el mismo bloqueo de Inventario que las entradas
++  y salidas. La recepción original bloquea parejas en orden bodega/repuesto y la
++  compra pendiente se bloquea antes de recibir. Dos intentos sobre la misma compra
++  no pueden confirmar dos veces ni multiplicar stock o costo.
++- `spConsumirRepuesto` ahora congela el promedio vigente de esa bodega, redondeado
++  a centavos en el campo histórico existente de ReparacionRepuesto. La valoración
++  conserva el promedio de seis decimales, independientemente de ese redondeo.
++- Los importes de compras viajan como texto decimal en la API. El navegador
++  calcula los totales de revisión con centavos enteros para evitar pérdida de
++  precisión en compras grandes.
++- `CostoReferencia` se conserva como dato legado por compatibilidad. El SQL
++  rechaza cambiarlo desde el catálogo y crear un repuesto con costo manual distinto
++  de cero. No interviene en los nuevos consumos ni equivale al promedio actual.
++
++### Inicialización de existencias anteriores
++
++La instalación recorre los movimientos existentes por MovimientoID y calcula
++el promedio móvil de cada pareja usando los costos de las entradas recibidas.
++Las salidas reducen unidades y conservan el promedio hasta agotar stock.
++Esto inicializa el criterio de valoración para operaciones futuras.
++
++No cambia cantidades, movimientos, costos guardados en consumos anteriores,
++precios de venta, compras ni facturas. Las valoraciones migradas quedan marcadas.
++El proceso valida que los saldos recorridos coincidan con el kardex antes de
++confirmar; esquema, inicialización y nuevo trigger se instalan en una transacción.
++Una repetición sin movimientos pendientes de valorar no recalcula ni modifica el
++promedio existente.
++
++## Historial, permisos y confirmaciones
++
++- Compras, recepción, anulación y costos por bodega requieren BODEGA o ADMIN
++  activos en la BD, además del control de sesión/rol HTTP. El actor sale de la sesión.
++- POST exige CSRF. Cantidades e IDs fraccionarios no se convierten silenciosamente
++  a enteros. Se validan longitudes y decimales antes de convertir en SQL.
++- Se permiten entre 1 y 200 líneas por compra, con cantidad de 1 a 2147483647
++  y costo de 0 a 9999999999.99. No se repite la pareja repuesto/bodega.
++- La recepción y la anulación comparan la revisión de la compra bajo bloqueo.
++  Los promedios se calculan con el inventario vigente al recibir; no se envían
++  stock ni promedio desde el formulario.
++- Los eventos API conservan nombre del responsable, usuario, fecha y observación.
++  La anulación no sustituye las observaciones de registro. Compras anteriores
++  muestran al usuario original y al receptor disponible en sus movimientos;
++  no se inventan responsables ni fechas desconocidos de anulaciones antiguas.
++- `SolicitudCompraApi`, `EventoCompraApi` y `ValoracionInventario` son inmutables.
++  `techcare_app` no escribe directamente compras, detalles, inventario ni las tres
++  tablas nuevas: los procedimientos dbo mantienen la cadena de propiedad.
++- Las consultas de catálogo muestran los nombres vigentes de proveedor, bodega
++  y repuesto; los costos, cantidades, movimientos y eventos conservan su historia.
++
++## Rutas
++
++| Método | Ruta | Uso |
++|---|---|---|
++| GET | `/api/compras` | Listado con buscar, estado, proveedorId, desde y hasta |
++| POST | `/api/compras` | Registro con solicitudId y detalle |
++| GET | `/api/compras/{id}` | Cabecera, líneas, recepción y eventos |
++| POST | `/api/compras/{id}/recepcion` | Recepción completa con revision |
++| POST | `/api/compras/{id}/anulacion` | Anulación con revision y motivo |
++| GET | `/api/compras/catalogos/destinos?proveedorId=…` | Ofertas y destinos activos |
++| GET | `/api/repuestos/{id}/costos` | Promedio y existencia por bodega |
++
++## Validación entregada
++
++- Backend: 230 pruebas aprobadas, incluidas 34 nuevas de compras. Las pruebas HTTP
++  simulan JDBC y el gestor de transacciones; verifican roles, CSRF, actor,
++  solicitudes, validaciones, precisión de importes, lecturas y errores.
++- Frontend: TypeScript y compilación de producción.
++- Navegador con API simulada: 10 escenarios aprobados, incluyendo líneas en dos
++  bodegas, pares repetidos, respuesta perdida y reintento, revisión desactualizada,
++  recepción, anulación, historia de recepción, costos de consulta, móvil y roles.
++- SQL: revisión de sintaxis T-SQL del 30 y 31, también del SQL dinámico de migración
++  y del trigger. Los 60 casos del 31 requieren ejecución en su instancia real.
++- SQL Server no puede ejecutarse en este entorno. No se declaran aprobados aquí
++  los casos SQL ni las pruebas con dos sesiones concurrentes. El 31 es secuencial;
++  los bloqueos deben validarse entre sesiones antes de poner el sistema en producción.
++
++Inventario general, kardex navegable, reportes y manuales con capturas siguen
++siendo bloques posteriores. La consulta de promedio ya está disponible desde el
++catálogo de Repuestos y las asociaciones de Bodegas.
++
++Referencia del método de promedio móvil:
++https://learn.microsoft.com/es-es/dynamics365/supply-chain/cost-management/moving-average
+diff --git a/README.md b/README.md
+index 98168714449e7592118ae5ff3a4d5efb560e27b3..4f2ba7a06c6215c22eb359d77906a4a681c26d75 100644
+--- a/README.md
++++ b/README.md
+@@ -4,14 +4,14 @@ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional
+ normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
+ Clientes, equipos, órdenes, servicio técnico, facturación, pagos, entrega y los catálogos de
+ abastecimiento tienen API e interfaz conectadas. El acceso usa las cuentas y roles de la BD,
+-con login, sesión y cierre de sesión. Compras, inventario general, reportes y manuales con
++con login, sesión y cierre de sesión. Compras y recepción también están conectadas; inventario general, reportes y manuales con
+ capturas aún deben completarse.
+ 
+ Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
+ La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
+ las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
+ Una instalación nueva con un maestro anterior debe incluir también las
+-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega) y 26 (Abastecimiento).
++actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento) y 30 (Compras y costos por bodega).
+ 
+ Administración permite consultar y registrar cuentas, empleados y roles desde
+ una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
+@@ -78,9 +78,10 @@ TasaImpuesto es una tasa de prueba configurable (0.1200); no constituye configur
+   movimientos fechados antes de movimientos ya registrados en la misma pareja.
+ - Las compras se reciben completas, una sola vez. Las pendientes no aumentan stock.
+   Cada línea puede tener su propia bodega. No se implementan recepciones parciales.
+-- El costo del consumo es el **costo de referencia congelado** en ese momento.
+-  No implementa valoración por promedio ponderado o PEPS. PrecioUnitario conserva
+-  la venta histórica; los valores de compras, consumos y facturas no se reescriben.
++- Desde el 30, el costo de cada consumo nuevo es el **promedio móvil de su bodega**,
++  congelado a centavos. Las entradas recalculan el promedio con seis decimales;
++  el catálogo ya no permite editar el costo. Compras, consumos y facturas históricos
++  conservan sus importes. No se incorpora PEPS ni revalorización de consumos pasados.
+ - Factura conserva identificación fiscal, tasa histórica, fecha y estado. Sus líneas
+   inmutables conservan conceptos, cantidades y precios. **Subtotal, Impuesto, Total,
+   Pagado, Saldo y EstadoPago** se obtienen de `vFacturaSaldo`; no se editan a mano.
+@@ -191,6 +192,7 @@ Documentos para el equipo:
+ 
+ - `INTEGRACION_FACTURACION_ENTREGA.md`: caja, abonos, entrega y factura PDF detallada; scripts 23 y 24.
+ - `INTEGRACION_ABASTECIMIENTO.md`: repuestos, categorías, proveedores, bodegas y asociaciones; scripts 26 y 27.
++- `INTEGRACION_COMPRAS.md`: compras pendientes, recepción, anulación y promedio por bodega; scripts 30 y 31.
+ 
+ - `GUIA_TRIGGERS.md`: definición, inserted/deleted, ejemplo reversible y los 16 objetos.
+ - `GUIA_GITHUB.md`: publicación privada con GitHub Desktop y trabajo por ramas.
+diff --git a/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoServicio.java b/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoServicio.java
+index 75216be0e1d75f516305b7e09611a6f3088a656d..42838d2a97fc8d330b6e26a10568129097561dd5 100644
+--- a/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoServicio.java
++++ b/backend/src/main/java/com/techcare/backend/abastecimiento/AbastecimientoServicio.java
+@@ -34,6 +34,8 @@ public class AbastecimientoServicio {
+     }
+     public Repuesto guardarRepuesto(int actor,Integer id,AbastecimientoController.RepuestoDatos d) {
+         revision(id,d.revision());
++        if(id==null&&d.costoReferencia().signum()!=0)
++            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"El costo se calcula desde las compras recibidas por bodega. Registrá el repuesto con costo inicial cero.");
+         return una(jdbc.queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",actor,id,d.categoriaId().intValueExact(),
+                 d.codigo(),d.nombre(),d.descripcion(),d.costoReferencia(),d.precioVenta(),d.activo(),d.revision()),AbastecimientoServicio::repuesto);
+     }
+@@ -90,7 +92,7 @@ public class AbastecimientoServicio {
+     private static Proveedor proveedor(Map<String,Object> r) { return new Proveedor(entero(r,"ProveedorID"),texto(r,"NIT"),texto(r,"Nombre"),texto(r,"Email"),texto(r,"Telefono"),texto(r,"Direccion"),activo(r),texto(r,"Revision")); }
+     private static Bodega bodega(Map<String,Object> r) { return new Bodega(entero(r,"BodegaID"),texto(r,"Codigo"),texto(r,"Nombre"),texto(r,"Direccion"),activo(r),texto(r,"Revision")); }
+     private static Oferta oferta(Map<String,Object> r) { return new Oferta(entero(r,"ProveedorID"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Nombre"),entero(r,"CategoriaID"),texto(r,"Categoria"),activo(r),decimal(r,"PrecioVenta"),texto(r,"CodigoProveedor"),texto(r,"Revision")); }
+-    private static RepuestoBodega repuestoBodega(Map<String,Object> r) { return new RepuestoBodega(entero(r,"BodegaID"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Nombre"),activo(r),entero(r,"StockMinimo"),largo(r,"Existencia")); }
++    private static RepuestoBodega repuestoBodega(Map<String,Object> r) { return new RepuestoBodega(entero(r,"BodegaID"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Nombre"),activo(r),entero(r,"StockMinimo"),largo(r,"Existencia"),texto(r,"CostoPromedio")); }
+     private static String texto(Map<String,Object> r,String k) { return r.get(k)==null?null:r.get(k).toString(); }
+     private static Integer entero(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.intValue():null; }
+     private static Long largo(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.longValue():null; }
+@@ -105,6 +107,6 @@ public class AbastecimientoServicio {
+     public record Proveedor(Integer proveedorId,String nit,String nombre,String email,String telefono,String direccion,boolean activo,String revision) {}
+     public record Bodega(Integer bodegaId,String codigo,String nombre,String direccion,boolean activo,String revision) {}
+     public record Oferta(Integer proveedorId,Integer repuestoId,String codigo,String nombre,Integer categoriaId,String categoria,boolean activo,BigDecimal precioVenta,String codigoProveedor,String revision) {}
+-    public record RepuestoBodega(Integer bodegaId,Integer repuestoId,String codigo,String nombre,boolean activo,Integer stockMinimo,Long existencia) {}
++    public record RepuestoBodega(Integer bodegaId,Integer repuestoId,String codigo,String nombre,boolean activo,Integer stockMinimo,Long existencia,String costoPromedio) {}
+     public record Precio(Long auditoriaId,OffsetDateTime fecha,BigDecimal costoAnterior,BigDecimal costoNuevo,BigDecimal precioAnterior,BigDecimal precioNuevo,String registradoPor) {}
+ }
+diff --git a/backend/src/main/java/com/techcare/backend/compras/ComprasController.java b/backend/src/main/java/com/techcare/backend/compras/ComprasController.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b435de86a0a9e3ac7956da36071720bdd7d8e336
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/compras/ComprasController.java
+@@ -0,0 +1,69 @@
++package com.techcare.backend.compras;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import jakarta.validation.Valid;
++import jakarta.validation.constraints.*;
++import org.springframework.http.ResponseEntity;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.web.bind.annotation.*;
++
++import java.math.BigDecimal;
++import java.net.URI;
++import java.time.LocalDate;
++import java.util.List;
++import java.util.UUID;
++
++@RestController
++@RequestMapping("/api")
++public class ComprasController {
++    private final ComprasServicio servicio;
++    public ComprasController(ComprasServicio servicio) { this.servicio=servicio; }
++    @GetMapping("/compras")
++    public List<ComprasServicio.Compra> listar(@AuthenticationPrincipal UsuarioAutenticado actor,
++            @RequestParam(required=false) String buscar,@RequestParam(required=false) String estado,
++            @RequestParam(required=false) Integer proveedorId,@RequestParam(required=false) LocalDate desde,
++            @RequestParam(required=false) LocalDate hasta) {
++        return servicio.listar(actor.getUsuarioId(),buscar,estado,proveedorId,desde,hasta);
++    }
++    @GetMapping("/compras/{id}")
++    public ComprasServicio.Documento consultar(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id) {
++        return servicio.documento(actor.getUsuarioId(),id);
++    }
++    @GetMapping("/compras/catalogos/destinos")
++    public List<ComprasServicio.Destino> destinos(@AuthenticationPrincipal UsuarioAutenticado actor,@RequestParam int proveedorId) {
++        return servicio.destinos(actor.getUsuarioId(),proveedorId);
++    }
++    @GetMapping("/repuestos/{id}/costos")
++    public List<ComprasServicio.CostoBodega> costos(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id) {
++        return servicio.costos(actor.getUsuarioId(),id);
++    }
++    @PostMapping("/compras")
++    public ResponseEntity<ComprasServicio.Compra> registrar(@AuthenticationPrincipal UsuarioAutenticado actor,@Valid @RequestBody Registro d) {
++        var compra=servicio.registrar(actor.getUsuarioId(),d);
++        return ResponseEntity.created(URI.create("/api/compras/"+compra.compraId())).body(compra);
++    }
++    @PostMapping("/compras/{id}/recepcion")
++    public ComprasServicio.Compra recibir(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id,@Valid @RequestBody Confirmacion d) {
++        return servicio.recibir(actor.getUsuarioId(),id,d.revision());
++    }
++    @PostMapping("/compras/{id}/anulacion")
++    public ComprasServicio.Compra anular(@AuthenticationPrincipal UsuarioAutenticado actor,@PathVariable int id,@Valid @RequestBody Anulacion d) {
++        return servicio.anular(actor.getUsuarioId(),id,d.revision(),d.motivo());
++    }
++    public record Registro(@NotNull UUID solicitudId,
++        @NotBlank @Size(max=30) @Pattern(regexp="[0-9A-Za-z._/\\-]+") String numeroCompra,
++        @NotNull @DecimalMin("1") @DecimalMax("2147483647") @Digits(integer=10,fraction=0) BigDecimal proveedorId,
++        @Size(max=1000) String observaciones,@NotEmpty @Size(max=200) List<@NotNull @Valid Linea> detalle) {
++        public Registro { numeroCompra=limpiar(numeroCompra);observaciones=limpiar(observaciones); }
++    }
++    public record Linea(
++        @NotNull @DecimalMin("1") @DecimalMax("2147483647") @Digits(integer=10,fraction=0) BigDecimal bodegaId,
++        @NotNull @DecimalMin("1") @DecimalMax("2147483647") @Digits(integer=10,fraction=0) BigDecimal repuestoId,
++        @NotNull @DecimalMin("1") @DecimalMax("2147483647") @Digits(integer=10,fraction=0) BigDecimal cantidad,
++        @NotNull @DecimalMin("0") @Digits(integer=10,fraction=2) BigDecimal costoUnitario) {}
++    public record Confirmacion(@NotNull @Pattern(regexp="[A-F0-9]{64}") String revision) {}
++    public record Anulacion(@NotNull @Pattern(regexp="[A-F0-9]{64}") String revision,@NotBlank @Size(max=1000) String motivo) {
++        public Anulacion { motivo=limpiar(motivo); }
++    }
++    private static String limpiar(String v) { return v==null||v.isBlank()?null:v.strip(); }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/compras/ComprasErrores.java b/backend/src/main/java/com/techcare/backend/compras/ComprasErrores.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5da91d52f46ca46820bb1bf0a422336f83dd084a
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/compras/ComprasErrores.java
+@@ -0,0 +1,38 @@
++package com.techcare.backend.compras;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.dao.DataAccessException;
++import org.springframework.http.ResponseEntity;
++import org.springframework.http.converter.HttpMessageNotReadableException;
++import org.springframework.web.bind.MethodArgumentNotValidException;
++import org.springframework.web.bind.annotation.ExceptionHandler;
++import org.springframework.web.bind.annotation.RestControllerAdvice;
++import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
++import org.springframework.web.server.ResponseStatusException;
++import java.sql.SQLException;
++import java.util.Map;
++
++@RestControllerAdvice(assignableTypes=ComprasController.class)
++public class ComprasErrores {
++    private static final Logger LOG=LoggerFactory.getLogger(ComprasErrores.class);
++    @ExceptionHandler({MethodArgumentNotValidException.class,HttpMessageNotReadableException.class,MethodArgumentTypeMismatchException.class})
++    ResponseEntity<Map<String,Object>> entrada(Exception e) { return error(400,"Revisá número de compra, proveedor, líneas, cantidades, costos y confirmación."); }
++    @ExceptionHandler(ResponseStatusException.class)
++    ResponseEntity<Map<String,Object>> estado(ResponseStatusException e) { return error(e.getStatusCode().value(),e.getReason()); }
++    @ExceptionHandler(DataAccessException.class)
++    ResponseEntity<Map<String,Object>> sql(DataAccessException e) {
++        for(Throwable c=e;c!=null;c=c.getCause())if(c instanceof SQLException s)
++            for(SQLException x=s;x!=null;x=x.getNextException())switch(x.getErrorCode()) {
++                case 52100,52101: return error(400,x.getMessage());
++                case 52102: return error(404,"La compra o el repuesto no existe.");
++                case 52103: return error(409,x.getMessage());
++                case 52004: return error(403,"Se requiere un usuario activo de bodega o administración.");
++                case 2601,2627: return error(409,"Ese número de compra ya está registrado. Revisá el listado antes de repetirla.");
++                case 51027,51030,51120,51125,547,1205: return error(409,"La compra o su destino cambió. Actualizá el expediente y volvé a revisar.");
++                default: break;
++            }
++        LOG.error("No se pudo completar la operación de compras.",e);return error(503,"No se pudo confirmar la operación. Actualizá el listado o reintentá la misma solicitud.");
++    }
++    private static ResponseEntity<Map<String,Object>> error(int estado,String mensaje) { return ResponseEntity.status(estado).body(Map.of("estado",estado,"mensaje",mensaje)); }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/compras/ComprasServicio.java b/backend/src/main/java/com/techcare/backend/compras/ComprasServicio.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..432b8775600c3d990f14293b29359bf70d40d0f6
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/compras/ComprasServicio.java
+@@ -0,0 +1,90 @@
++package com.techcare.backend.compras;
++
++import org.springframework.http.HttpStatus;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Isolation;
++import org.springframework.transaction.annotation.Transactional;
++import org.springframework.web.server.ResponseStatusException;
++
++import java.math.BigDecimal;
++import java.sql.Timestamp;
++import java.time.LocalDate;
++import java.time.LocalDateTime;
++import java.time.OffsetDateTime;
++import java.time.ZoneOffset;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.stream.Collectors;
++
++@Service
++public class ComprasServicio {
++    private final JdbcTemplate jdbc;
++    public ComprasServicio(JdbcTemplate jdbc) { this.jdbc=jdbc; }
++    public List<Compra> listar(int actor,String buscar,String estado,Integer proveedor,LocalDate desde,LocalDate hasta) {
++        if(buscar!=null&&buscar.length()>150)mal("La búsqueda admite hasta 150 caracteres.");
++        if(estado!=null&&!estado.isEmpty()&&!List.of("PENDIENTE","RECIBIDA","ANULADA").contains(estado))mal("El estado de compra no es válido.");
++        if(proveedor!=null)id(proveedor);
++        if(desde!=null&&hasta!=null&&desde.isAfter(hasta))mal("La fecha inicial no puede ser posterior a la final.");
++        return jdbc.queryForList("EXEC dbo.spListarComprasApi ?, ?, ?, ?, ?, ?",actor,buscar,estado,proveedor,desde,hasta).stream().map(ComprasServicio::compra).toList();
++    }
++    @Transactional(readOnly=true,isolation=Isolation.SERIALIZABLE)
++    public Documento documento(int actor,int compraId) {
++        id(compraId);
++        var cabecera=primera(jdbc.queryForList("EXEC dbo.spConsultarCompraApi ?, ?",actor,compraId));
++        var lineas=jdbc.queryForList("EXEC dbo.spDetalleCompraApi ?, ?",actor,compraId).stream().map(r->new Detalle(
++            entero(r,"Linea"),entero(r,"BodegaID"),texto(r,"Bodega"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Repuesto"),entero(r,"Cantidad"),
++            importe(r,"CostoUnitario"),importe(r,"Importe"),largo(r,"Existencia"),importe(r,"CostoPromedio"),largo(r,"MovimientoID"),
++            largo(r,"ExistenciaResultante"),importe(r,"CostoAnterior"),importe(r,"CostoPosterior"),texto(r,"RecibidaPor"))).toList();
++        var eventos=jdbc.queryForList("EXEC dbo.spEventosCompraApi ?, ?",actor,compraId).stream().map(r->new Evento(
++            texto(r,"Tipo"),texto(r,"Responsable"),fecha(r,"Fecha"),texto(r,"Observacion"))).toList();
++        return new Documento(cabecera,lineas,eventos);
++    }
++    public List<Destino> destinos(int actor,int proveedor) {
++        id(proveedor);return jdbc.queryForList("EXEC dbo.spDestinosCompraApi ?, ?",actor,proveedor).stream().map(r->new Destino(
++            entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Repuesto"),entero(r,"BodegaID"),texto(r,"Bodega"),texto(r,"CodigoProveedor"),
++            largo(r,"Existencia"),entero(r,"StockMinimo"),importe(r,"CostoPromedio"))).toList();
++    }
++    public List<CostoBodega> costos(int actor,int repuesto) {
++        id(repuesto);return jdbc.queryForList("EXEC dbo.spCostosRepuestoApi ?, ?",actor,repuesto).stream().map(r->new CostoBodega(
++            entero(r,"BodegaID"),texto(r,"Codigo"),texto(r,"Bodega"),Boolean.TRUE.equals(r.get("Activo"))||r.get("Activo") instanceof Number n&&n.intValue()!=0,
++            largo(r,"Existencia"),entero(r,"StockMinimo"),importe(r,"CostoPromedio"))).toList();
++    }
++    public Compra registrar(int actor,ComprasController.Registro d) {
++        var pares=new HashSet<String>();
++        for(var linea:d.detalle())if(!pares.add(linea.bodegaId().intValueExact()+":"+linea.repuestoId().intValueExact()))mal("No repitás el mismo repuesto y bodega en dos líneas.");
++        // Sólo números ya validados forman este JSON; ningún texto del usuario se concatena en SQL.
++        String detalle=d.detalle().stream().map(l->"{\"bodegaId\":"+l.bodegaId().intValueExact()+",\"repuestoId\":"+l.repuestoId().intValueExact()
++            +",\"cantidad\":"+l.cantidad().intValueExact()+",\"costoUnitario\":"+l.costoUnitario().stripTrailingZeros().toPlainString()+"}").collect(Collectors.joining(",","[","]"));
++        return primera(jdbc.queryForList("EXEC dbo.spRegistrarCompraApi ?, ?, ?, ?, ?, ?",actor,d.solicitudId().toString(),d.numeroCompra(),d.proveedorId().intValueExact(),d.observaciones(),detalle));
++    }
++    public Compra recibir(int actor,int compraId,String revision) { id(compraId);return primera(jdbc.queryForList("EXEC dbo.spRecibirCompraApi ?, ?, ?",actor,compraId,revision)); }
++    public Compra anular(int actor,int compraId,String revision,String motivo) { id(compraId);return primera(jdbc.queryForList("EXEC dbo.spAnularCompraApi ?, ?, ?, ?",actor,compraId,revision,motivo)); }
++    private static void id(int id) { if(id<=0)mal("El identificador debe ser positivo."); }
++    private static void mal(String mensaje) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST,mensaje); }
++    private static Compra primera(List<Map<String,Object>> filas) {
++        if(filas.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"La compra no existe.");return compra(filas.get(0));
++    }
++    private static Compra compra(Map<String,Object> r) { return new Compra(entero(r,"CompraID"),texto(r,"NumeroCompra"),entero(r,"ProveedorID"),texto(r,"NIT"),texto(r,"Proveedor"),
++        fecha(r,"Fecha"),texto(r,"Estado"),fecha(r,"FechaRecepcion"),texto(r,"Observaciones"),texto(r,"RegistradaPor"),texto(r,"RecibidaPor"),texto(r,"AnuladaPor"),
++        fecha(r,"FechaAnulacion"),texto(r,"MotivoAnulacion"),entero(r,"Lineas"),importe(r,"Total"),texto(r,"Revision")); }
++    private static String texto(Map<String,Object> r,String k) { return r.get(k)==null?null:r.get(k).toString(); }
++    private static Integer entero(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.intValue():null; }
++    private static Long largo(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.longValue():null; }
++    private static String importe(Map<String,Object> r,String k) { return r.get(k) instanceof BigDecimal n?n.toPlainString():texto(r,k); }
++    private static OffsetDateTime fecha(Map<String,Object> r,String k) {
++        var v=r.get(k);if(v instanceof Timestamp t)return t.toLocalDateTime().atOffset(ZoneOffset.UTC);
++        if(v instanceof LocalDateTime t)return t.atOffset(ZoneOffset.UTC);return v instanceof OffsetDateTime t?t:null;
++    }
++    // Los importes se envían como texto decimal para no perder centavos en JavaScript.
++    public record Compra(Integer compraId,String numeroCompra,Integer proveedorId,String nit,String proveedor,OffsetDateTime fecha,String estado,
++        OffsetDateTime fechaRecepcion,String observaciones,String registradaPor,String recibidaPor,String anuladaPor,OffsetDateTime fechaAnulacion,
++        String motivoAnulacion,Integer lineas,String total,String revision) {}
++    public record Detalle(Integer linea,Integer bodegaId,String bodega,Integer repuestoId,String codigo,String repuesto,Integer cantidad,String costoUnitario,
++        String importe,Long existencia,String costoPromedio,Long movimientoId,Long existenciaResultante,String costoAnterior,String costoPosterior,String recibidaPor) {}
++    public record Evento(String tipo,String responsable,OffsetDateTime fecha,String observacion) {}
++    public record Documento(Compra compra,List<Detalle> detalle,List<Evento> eventos) {}
++    public record Destino(Integer repuestoId,String codigo,String repuesto,Integer bodegaId,String bodega,String codigoProveedor,Long existencia,Integer stockMinimo,String costoPromedio) {}
++    public record CostoBodega(Integer bodegaId,String codigo,String bodega,boolean activo,Long existencia,Integer stockMinimo,String costoPromedio) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+index bfe258452f61df7721d6f5588a6528e6508c7203..a7f9bfa5a73df4e1251e0c1d1ce322cf866a95f3 100644
+--- a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
++++ b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+@@ -53,6 +53,8 @@ public class SeguridadConfig {
+                 .authorizeHttpRequests(a -> a
+                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+                         .requestMatchers(HttpMethod.GET,"/api/auth/csrf").permitAll()
++                        .requestMatchers(HttpMethod.GET,"/api/compras","/api/compras/**").hasAnyRole("ADMIN","BODEGA")
++                        .requestMatchers(HttpMethod.POST,"/api/compras","/api/compras/*/recepcion","/api/compras/*/anulacion").hasAnyRole("ADMIN","BODEGA")
+                         .requestMatchers(HttpMethod.POST,"/api/auth/login").permitAll()
+                         .requestMatchers(HttpMethod.GET,"/api/auth/sesion").authenticated()
+                         .requestMatchers(HttpMethod.GET,"/api/admin/usuarios","/api/admin/usuarios/*",
+diff --git a/backend/src/test/java/com/techcare/backend/abastecimiento/AbastecimientoApiTests.java b/backend/src/test/java/com/techcare/backend/abastecimiento/AbastecimientoApiTests.java
+index 1b0c144d3026e6967f0dc4be4233024de43a496e..25992062b148b3ac81d87151ecf0a536238c8c12 100644
+--- a/backend/src/test/java/com/techcare/backend/abastecimiento/AbastecimientoApiTests.java
++++ b/backend/src/test/java/com/techcare/backend/abastecimiento/AbastecimientoApiTests.java
+@@ -77,11 +77,11 @@ class AbastecimientoApiTests {
+     }
+     @ParameterizedTest @ValueSource(strings={"ADMIN","BODEGA"})
+     void crearRepuestoUsaActorAutenticadoYConservaUnicodeYCentavos(String rol) throws Exception {
+-        mvc.perform(post("/api/repuestos").with(actor(rol)).with(csrf()).contentType("application/json").content(REP))
++        mvc.perform(post("/api/repuestos").with(actor(rol)).with(csrf()).contentType("application/json").content(REP.replace("12.25","0")))
+                 .andExpect(status().isCreated()).andExpect(header().string("Location","/api/repuestos/9"))
+                 .andExpect(jsonPath("$.nombre").value("Fuente ñ 漢字")).andExpect(jsonPath("$.precioVenta").value(25.5))
+                 .andExpect(content().string(not(containsString("PRIVADO"))));
+-        verify(jdbc).queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",42,null,3,"REP-9","Fuente ñ 漢字","Descripción ñ",new BigDecimal("12.25"),new BigDecimal("25.50"),true,null);
++        verify(jdbc).queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",42,null,3,"REP-9","Fuente ñ 漢字","Descripción ñ",new BigDecimal("0"),new BigDecimal("25.50"),true,null);
+     }
+     @Test void actualizacionEnviaLaRevisionLeida() throws Exception {
+         mvc.perform(put("/api/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(revisado(REP))).andExpect(status().isOk());
+@@ -120,6 +120,10 @@ class AbastecimientoApiTests {
+     @Test void costoYPrecioCeroSonValidos() throws Exception {
+         mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(REP.replace("12.25","0").replace("25.50","0"))).andExpect(status().isCreated());
+     }
++    @Test void costoManualPositivoNoSeAceptaAlCrearUnRepuesto() throws Exception {
++        mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(REP)).andExpect(status().isBadRequest());
++        verifyNoInteractions(jdbc);
++    }
+     @ParameterizedTest @ValueSource(strings={"-1","1.5","2147483648","null"})
+     void minimoFraccionarioOInvalidoNoSeTrunca(String valor) throws Exception {
+         mvc.perform(put("/api/bodegas/2/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json").content("{\"stockMinimo\":"+valor+"}")).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
+diff --git a/backend/src/test/java/com/techcare/backend/compras/ComprasApiTests.java b/backend/src/test/java/com/techcare/backend/compras/ComprasApiTests.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3c794e89ff201e7f29ea68e6534417baa01621f
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/compras/ComprasApiTests.java
+@@ -0,0 +1,145 @@
++package com.techcare.backend.compras;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.junit.jupiter.params.provider.ValueSource;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.jdbc.UncategorizedSQLException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.request.RequestPostProcessor;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.transaction.PlatformTransactionManager;
++import org.springframework.transaction.support.SimpleTransactionStatus;
++import org.springframework.web.context.WebApplicationContext;
++
++import java.math.BigDecimal;
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.time.LocalDate;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.not;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.*;
++import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(properties="spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class ComprasApiTests {
++    private static final String REV="A".repeat(64),UUID="465a0112-0e98-43ce-b63f-2636e6942b0a";
++    private static final String LINEA="{\"bodegaId\":2,\"repuestoId\":9,\"cantidad\":10,\"costoUnitario\":20.25}";
++    private static final String BODY="{\"solicitudId\":\""+UUID+"\",\"numeroCompra\":\" CP-9 \",\"proveedorId\":5,\"observaciones\":\" Garantía ñ 漢字 \",\"detalle\":["+LINEA+"],\"usuarioActorId\":999}";
++    @Autowired WebApplicationContext context;
++    @MockitoBean JdbcTemplate jdbc;
++    @MockitoBean PlatformTransactionManager transactions;
++    private MockMvc mvc;
++    @BeforeEach void preparar() {
++        reset(jdbc,transactions);when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
++        mvc=MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
++        var r=new HashMap<String,Object>();
++        r.put("CompraID",7);r.put("NumeroCompra","CP-9");r.put("ProveedorID",5);r.put("Proveedor","Proveedor ñ 漢字");r.put("NIT","1234-5");
++        r.put("Revision",REV);r.put("Estado","PENDIENTE");r.put("Total",new BigDecimal("21474836469978525163.53"));
++        r.put("RegistradaPor","Bodega prueba");r.put("Observaciones","Garantía ñ 漢字");r.put("Fecha",Timestamp.valueOf("2026-10-21 18:00:00"));
++        r.put("CostoPromedio",new BigDecimal("16.125000"));r.put("PasswordHash","PRIVADO");r.put("LoginSQL","INTERNO");
++        when(jdbc.queryForList(anyString(),any(Object[].class))).thenReturn(List.of(r));
++    }
++    private RequestPostProcessor actor(String rol) {
++        var u=new UsuarioAutenticado(42,"bodega","Bodega prueba","EMP-42",List.of(rol),true,null);
++        return authentication(UsernamePasswordAuthenticationToken.authenticated(u,null,u.getAuthorities()));
++    }
++    @ParameterizedTest @ValueSource(strings={"TECNICO","RECEPCION","CAJA"})
++    void rolesAjenosNoLeenNiEscribenCompras(String rol) throws Exception {
++        for(String p:List.of("/compras","/compras/7","/compras/catalogos/destinos?proveedorId=5","/repuestos/9/costos"))
++            mvc.perform(get("/api"+p).with(actor(rol))).andExpect(status().isForbidden());
++        for(String p:List.of("/compras","/compras/7/recepcion","/compras/7/anulacion"))
++            mvc.perform(post("/api"+p).with(actor(rol)).with(csrf()).contentType("application/json").content(BODY)).andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void escriturasExigenSesionYCsrf() throws Exception {
++        for(String p:List.of("/compras","/compras/7/recepcion","/compras/7/anulacion")) {
++            mvc.perform(post("/api"+p).with(csrf()).contentType("application/json").content(BODY)).andExpect(status().isUnauthorized());
++            mvc.perform(post("/api"+p).with(actor("BODEGA")).contentType("application/json").content(BODY)).andExpect(status().isForbidden());
++        }
++        verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings={"ADMIN","BODEGA"})
++    void registroConservaIdentidadSolicitudActorUnicodeYCentavos(String rol) throws Exception {
++        mvc.perform(post("/api/compras").with(actor(rol)).with(csrf()).contentType("application/json").content(BODY)).andExpect(status().isCreated())
++            .andExpect(header().string("Location","/api/compras/7")).andExpect(jsonPath("$.total").value("21474836469978525163.53"))
++            .andExpect(jsonPath("$.observaciones").value("Garantía ñ 漢字")).andExpect(content().string(not(containsString("PRIVADO"))));
++        verify(jdbc).queryForList("EXEC dbo.spRegistrarCompraApi ?, ?, ?, ?, ?, ?",42,UUID,"CP-9",5,"Garantía ñ 漢字","[{\"bodegaId\":2,\"repuestoId\":9,\"cantidad\":10,\"costoUnitario\":20.25}]");
++    }
++    @Test void reintentoEnviaLaMismaSolicitudSinGenerarOtraEnServidor() throws Exception {
++        for(int i=0;i<2;i++)mvc.perform(post("/api/compras").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(BODY)).andExpect(status().isCreated());
++        verify(jdbc,times(2)).queryForList(eq("EXEC dbo.spRegistrarCompraApi ?, ?, ?, ?, ?, ?"),eq(42),eq(UUID),eq("CP-9"),eq(5),eq("Garantía ñ 漢字"),anyString());
++    }
++    @ParameterizedTest @ValueSource(strings={"0","-1","1.5","2147483648","null"})
++    void cantidadesInvalidasNoSeTruncan(String valor) throws Exception {
++        mvc.perform(post("/api/compras").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(BODY.replace("\"cantidad\":10","\"cantidad\":"+valor))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings={"-0.01","1.234","10000000000","null"})
++    void costosInvalidosNoLleganASql(String valor) throws Exception {
++        mvc.perform(post("/api/compras").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(BODY.replace("20.25",valor))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void costoCeroYParesEnBodegasDistintasSonValidos() throws Exception {
++        var body=BODY.replace("20.25","0").replace("["+LINEA.replace("20.25","0")+"]","["+LINEA.replace("20.25","0")+","+LINEA.replace("\"bodegaId\":2","\"bodegaId\":3")+"]");
++        mvc.perform(post("/api/compras").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(body)).andExpect(status().isCreated());
++    }
++    @Test void paresRepetidosYDetalleVacioSeRechazan() throws Exception {
++        for(String body:List.of(BODY.replace("["+LINEA+"]","[]"),BODY.replace("["+LINEA+"]","["+LINEA+","+LINEA+"]"),BODY.replace("["+LINEA+"]","[null]"),BODY.replace("["+LINEA+"]","[{}]")))
++            mvc.perform(post("/api/compras").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(body)).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void idsFraccionariosNoSeCoaccionan() throws Exception {
++        for(String body:List.of(BODY.replace("\"proveedorId\":5","\"proveedorId\":5.5"),BODY.replace("\"bodegaId\":2","\"bodegaId\":2.5"),BODY.replace("\"repuestoId\":9","\"repuestoId\":9.5")))
++            mvc.perform(post("/api/compras").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(body)).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void solicitudesYTextosInvalidosSeRechazan() throws Exception {
++        for(String body:List.of(BODY.replace(UUID,"invalido"),BODY.replace("CP-9","x".repeat(31)),BODY.replace("CP-9","CP 漢字"),BODY.replace("Garantía ñ 漢字","x".repeat(1001))))
++            mvc.perform(post("/api/compras").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(body)).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void recepcionYAnulacionUsanRevisionYActorAutenticado() throws Exception {
++        mvc.perform(post("/api/compras/7/recepcion").with(actor("BODEGA")).with(csrf()).contentType("application/json").content("{\"revision\":\""+REV+"\",\"usuarioActorId\":999}")).andExpect(status().isOk());
++        mvc.perform(post("/api/compras/7/anulacion").with(actor("ADMIN")).with(csrf()).contentType("application/json").content("{\"revision\":\""+REV+"\",\"motivo\":\" Cancelación ñ 漢字 \"}")).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spRecibirCompraApi ?, ?, ?",42,7,REV);
++        verify(jdbc).queryForList("EXEC dbo.spAnularCompraApi ?, ?, ?, ?",42,7,REV,"Cancelación ñ 漢字");
++    }
++    @Test void confirmacionIncompletaYMotivosInvalidosSeRechazan() throws Exception {
++        for(String body:List.of("{}","{\"revision\":\"corta\"}"))mvc.perform(post("/api/compras/7/recepcion").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(body)).andExpect(status().isBadRequest());
++        for(String motivo:List.of(" ","x".repeat(1001)))mvc.perform(post("/api/compras/7/anulacion").with(actor("BODEGA")).with(csrf()).contentType("application/json").content("{\"revision\":\""+REV+"\",\"motivo\":\""+motivo+"\"}")).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void expedienteComponeUnaLecturaTransaccionalConImportesExactos() throws Exception {
++        mvc.perform(get("/api/compras/7").with(actor("BODEGA"))).andExpect(status().isOk()).andExpect(jsonPath("$.compra.total").value("21474836469978525163.53"))
++            .andExpect(jsonPath("$.detalle[0].costoPromedio").value("16.125000")).andExpect(content().string(not(containsString("PRIVADO"))));
++        verify(jdbc).queryForList("EXEC dbo.spConsultarCompraApi ?, ?",42,7);verify(jdbc).queryForList("EXEC dbo.spDetalleCompraApi ?, ?",42,7);
++        verify(jdbc).queryForList("EXEC dbo.spEventosCompraApi ?, ?",42,7);verify(transactions).commit(any());
++    }
++    @Test void listadosYCatalogosUsanParametros() throws Exception {
++        mvc.perform(get("/api/compras").with(actor("ADMIN")).param("buscar","%_' OR 1=1").param("estado","PENDIENTE").param("proveedorId","5").param("desde","2026-10-01").param("hasta","2026-10-21")).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spListarComprasApi ?, ?, ?, ?, ?, ?",42,"%_' OR 1=1","PENDIENTE",5,LocalDate.of(2026,10,1),LocalDate.of(2026,10,21));
++        mvc.perform(get("/api/compras/catalogos/destinos").with(actor("BODEGA")).param("proveedorId","5")).andExpect(status().isOk());
++        mvc.perform(get("/api/repuestos/9/costos").with(actor("BODEGA"))).andExpect(status().isOk()).andExpect(jsonPath("$[0].costoPromedio").value("16.125000"));
++        verify(jdbc).queryForList("EXEC dbo.spDestinosCompraApi ?, ?",42,5);verify(jdbc).queryForList("EXEC dbo.spCostosRepuestoApi ?, ?",42,9);
++    }
++    @Test void filtrosEIdsInvalidosNoLleganALaBase() throws Exception {
++        for(String p:List.of("/compras?estado=INVALIDO","/compras?proveedorId=0","/compras?desde=2026-10-21&hasta=2026-10-01","/compras/0","/compras/catalogos/destinos?proveedorId=1.5","/repuestos/0/costos"))
++            mvc.perform(get("/api"+p).with(actor("BODEGA"))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @CsvSource({"52100,400","52101,400","52102,404","52103,409","52004,403","2627,409","1205,409","51030,409","2812,503"})
++    void erroresSqlTienenRespuestaControlada(int codigo,int esperado) throws Exception {
++        when(jdbc.queryForList(anyString(),any(Object[].class))).thenThrow(new UncategorizedSQLException("compras","EXEC",new SQLException("INTERNO_SQL","S0001",codigo)));
++        var result=mvc.perform(get("/api/compras").with(actor("BODEGA"))).andExpect(status().is(esperado));
++        if(codigo!=52100&&codigo!=52101&&codigo!=52103)result.andExpect(content().string(not(containsString("INTERNO_SQL"))));
++    }
++}
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index ad2ee3feff2fe408a56b2b5a325430419ee43e1b..2712effdd2b4ecaa7fffa1d4b532b45483e36e28 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -11,12 +11,15 @@ import { OrdenesListPage } from "./features/ordenes/OrdenesListPage";
+ import { OrdenNuevaPage } from "./features/ordenes/OrdenNuevaPage";
+ import { OrdenExpedientePage } from "./features/ordenes/OrdenExpedientePage";
+ import { InventarioPage } from "./features/inventario/InventarioPage";
+-import { ComprasPage } from "./features/compras/ComprasPage";
++
+ import { ReportesPage } from "./features/reportes/ReportesPage";
+ import { AdministracionPage } from "./features/administracion/AdministracionPage";
+ import { IntegracionPage } from "./features/integracion/IntegracionPage";
+ import { LoginPage } from "./features/auth/LoginPage";
+ 
++const ComprasPage = lazy(() => import("./features/compras/ComprasPage").then(m => ({ default: m.ComprasPage })));
++const CompraDetallePage = lazy(() => import("./features/compras/CompraDetallePage").then(m => ({ default: m.CompraDetallePage })));
++
+ const FacturacionPage = lazy(() => import("./features/facturacion/FacturacionPage").then(m => ({ default: m.FacturacionPage })));
+ 
+ const RepuestosPage = lazy(() => import("./features/repuestos/RepuestosPage").then(m => ({ default: m.RepuestosPage })));
+@@ -45,7 +48,8 @@ export default function App() {
+         <Route path="/inventario" element={<InventarioPage />} />
+         <Route path="/repuestos" element={<Suspense fallback={<LoadingState titulo="Cargando repuestos…" />}><RepuestosPage /></Suspense>} />
+         <Route path="/bodegas" element={<Suspense fallback={<LoadingState titulo="Cargando bodegas…" />}><BodegasPage /></Suspense>} />
+-        <Route path="/compras" element={<ComprasPage />} />
++        <Route path="/compras" element={<Suspense fallback={<LoadingState titulo="Cargando compras…" />}><ComprasPage /></Suspense>} />
++        <Route path="/compras/:id" element={<Suspense fallback={<LoadingState titulo="Cargando compra…" />}><CompraDetallePage /></Suspense>} />
+         <Route path="/proveedores" element={<Suspense fallback={<LoadingState titulo="Cargando proveedores…" />}><ProveedoresPage /></Suspense>} />
+ 
+         <Route path="/facturacion" element={<Suspense fallback={<LoadingState titulo="Cargando caja…" />}><FacturacionPage /></Suspense>} />
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index 5902e610c212f060841d21850a6bbee7bfd57007..c28def4b47c5a8b6552df27d1176c08d0773d818 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -428,7 +428,7 @@ export const OPERACIONES: OperacionApi[] = [
+     respuesta: "Repuesto[]",
+     roles: "BODEGA, ADMIN",
+     estado: "disponible",
+-    nota: "Editar costo/precio no altera consumos ni facturas anteriores (AuditoriaPrecioRepuesto).",
++    nota: "El precio de venta es editable; el costo promedio se consulta por bodega y se calcula con las recepciones.",
+     procedimiento: "spListarRepuestosGestion",
+   },
+   {
+@@ -516,52 +516,60 @@ export const OPERACIONES: OperacionApi[] = [
+     id: "compras.listar",
+     modulo: "Compras",
+     operacion: "Listar compras por proveedor/fecha/estado",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/compras)",
++    metodo: "GET",
++    ruta: "/api/compras",
+     entrada: "proveedorId, estado, fechas",
+     respuesta: "Compra[] con detalle",
+     roles: "BODEGA, ADMIN",
+-    estado: "ausente",
++    estado: "disponible",
++    procedimiento: "spListarComprasApi",
+   },
+   {
+     id: "compras.registrar",
+     modulo: "Compras",
+     operacion: "Registrar compra",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/compras)",
+-    entrada: "NumeroCompra, ProveedorID, Detalle[]",
++    metodo: "POST",
++    ruta: "/api/compras",
++    entrada: "solicitudId, numeroCompra, proveedorId, observaciones?, detalle[]",
+     respuesta: "CompraID",
+-    roles: "BODEGA",
+-    estado: "ausente",
+-    procedimiento: "spRegistrarCompra",
++    roles: "BODEGA, ADMIN",
++    estado: "disponible",
++    procedimiento: "spRegistrarCompraApi",
+     nota: "Crea encabezado y lineas; NO aumenta stock.",
+   },
+   {
+     id: "compras.recibir",
+     modulo: "Compras",
+     operacion: "Recibir compra (una sola vez, completa)",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/compras/{id}/recibir)",
+-    entrada: "-",
++    metodo: "POST",
++    ruta: "/api/compras/{id}/recepcion",
++    entrada: "revision",
+     respuesta: "ok",
+-    roles: "BODEGA",
+-    estado: "ausente",
+-    procedimiento: "spRecibirCompra",
++    roles: "BODEGA, ADMIN",
++    estado: "disponible",
++    procedimiento: "spRecibirCompraApi",
+     nota: "Genera todas las entradas y cambia el estado en una transaccion. Una compra recibida no se recibe de nuevo.",
+   },
+   {
+     id: "compras.anular",
+     modulo: "Compras",
+     operacion: "Anular compra pendiente",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/compras/{id}/anular)",
+-    entrada: "Motivo",
++    metodo: "POST",
++    ruta: "/api/compras/{id}/anulacion",
++    entrada: "revision, motivo",
+     respuesta: "ok",
+-    roles: "BODEGA",
+-    estado: "ausente",
+-    procedimiento: "spAnularCompra",
++    roles: "BODEGA, ADMIN",
++    estado: "disponible",
++    procedimiento: "spAnularCompraApi",
+   },
+ 
++  { id: "compras.expediente", modulo: "Compras", operacion: "Consultar detalle, recepción y responsables", metodo: "GET",
++    ruta: "/api/compras/{id}", entrada: "id", respuesta: "DocumentoCompra", roles: "ADMIN, BODEGA", estado: "disponible", procedimiento: "spConsultarCompraApi" },
++  { id: "compras.destinos", modulo: "Compras", operacion: "Consultar destinos ofrecidos y activos", metodo: "GET",
++    ruta: "/api/compras/catalogos/destinos", entrada: "proveedorId", respuesta: "DestinoCompra[]", roles: "ADMIN, BODEGA", estado: "disponible", procedimiento: "spDestinosCompraApi" },
++  { id: "repuestos.costos", modulo: "Repuestos", operacion: "Consultar costo promedio por bodega", metodo: "GET",
++    ruta: "/api/repuestos/{id}/costos", entrada: "id", respuesta: "CostoBodega[]", roles: "ADMIN, BODEGA", estado: "disponible", procedimiento: "spCostosRepuestoApi" },
++
+   // ---- Facturacion / pagos / entrega ----
+   {
+     id: "facturas.listar",
+diff --git a/frontend/src/features/abastecimiento/CatalogoForm.tsx b/frontend/src/features/abastecimiento/CatalogoForm.tsx
+index 300132b0686eb021b2c8bec1b560752c8273ca73..1480b547c0047776ed53dd98ce0285155e96a499 100644
+--- a/frontend/src/features/abastecimiento/CatalogoForm.tsx
++++ b/frontend/src/features/abastecimiento/CatalogoForm.tsx
+@@ -16,7 +16,7 @@ export function CatalogoForm({ tipo, registro, onGuardado, onCancelar, onRecarga
+   const [nombre, setNombre] = useState(registro?.nombre ?? ""), [activo, setActivo] = useState(registro?.activo ?? true);
+   const [categoria, setCategoria] = useState(registro && "categoriaId" in registro ? String(registro.categoriaId) : "");
+   const [descripcion, setDescripcion] = useState(registro && "descripcion" in registro ? registro.descripcion ?? "" : "");
+-  const [costo, setCosto] = useState(registro && "costoReferencia" in registro ? String(registro.costoReferencia) : "0.00");
++  const [costo] = useState(registro && "costoReferencia" in registro ? String(registro.costoReferencia) : "0.00");
+   const [precio, setPrecio] = useState(registro && "precioVenta" in registro ? String(registro.precioVenta) : "0.00");
+   const [nit, setNit] = useState(registro && "nit" in registro ? registro.nit : "");
+   const [email, setEmail] = useState(registro && "email" in registro ? registro.email ?? "" : "");
+@@ -30,7 +30,7 @@ export function CatalogoForm({ tipo, registro, onGuardado, onCancelar, onRecarga
+     e.preventDefault(); if (bloqueo.current) return;
+     if (tipo !== "proveedores" && !/^[0-9A-Za-z._/\-]+$/.test(codigo.trim())) { setError("El código admite letras, números, puntos, guiones, guiones bajos y barras, sin espacios."); return; }
+     if (tipo === "proveedores" && !/^[0-9A-Za-z-]+$/.test(nit.trim())) { setError("El NIT admite letras, números y guiones."); return; }
+-    if (tipo === "repuestos" && (![costo, precio].every(v => /^\d{1,10}(?:\.\d{1,2})?$/.test(v.trim())) || !categoria)) { setError("Elegí categoría e ingresá costo y precio desde cero, con hasta dos decimales."); return; }
++    if (tipo === "repuestos" && (![costo, precio].every(v => /^\d{1,10}(?:\.\d{1,2})?$/.test(v.trim())) || !categoria)) { setError("Elegí categoría e ingresá un precio desde cero, con hasta dos decimales."); return; }
+     bloqueo.current = true; setGuardando(true); onOcupado(true); setError(""); setConflicto(false);
+     const revision = registro?.revision ?? null;
+     try {
+@@ -59,9 +59,8 @@ export function CatalogoForm({ tipo, registro, onGuardado, onCancelar, onRecarga
+     </div>
+     {tipo === "repuestos" ? <>
+       <Field label="Descripción" htmlFor="cat-descripcion"><TextArea id="cat-descripcion" maxLength={500} rows={3} disabled={guardando} value={descripcion} onChange={e => setDescripcion(e.target.value)} /></Field>
+-      <div className="tc-grid tc-grid--2"><Field label="Costo de referencia (Q)" htmlFor="cat-costo" requerido><TextInput id="cat-costo" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={costo} onChange={e => setCosto(e.target.value)} /></Field>
+-        <Field label="Precio de venta (Q)" htmlFor="cat-precio" requerido><TextInput id="cat-precio" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={precio} onChange={e => setPrecio(e.target.value)} /></Field></div>
+-      <p className="tc-field__hint">Los cambios de costo y precio quedan en el historial. Los consumos y facturas anteriores conservan sus importes.</p>
++      <div className="tc-grid tc-grid--2"><Field label="Precio de venta (Q)" htmlFor="cat-precio" requerido><TextInput id="cat-precio" type="number" min="0" max="9999999999.99" step="0.01" required disabled={guardando} value={precio} onChange={e => setPrecio(e.target.value)} /></Field></div>
++      <p className="tc-field__hint">El costo promedio se calcula por bodega desde las compras recibidas. Consultalo en Costos por bodega; los consumos y facturas anteriores conservan sus importes.</p>
+     </> : <>
+       {tipo === "proveedores" ? <div className="tc-grid tc-grid--2"><Field label="Correo" htmlFor="cat-email"><TextInput id="cat-email" type="email" maxLength={254} disabled={guardando} value={email} onChange={e => setEmail(e.target.value)} /></Field>
+         <Field label="Teléfono" htmlFor="cat-telefono"><TextInput id="cat-telefono" maxLength={25} disabled={guardando} value={telefono} onChange={e => setTelefono(e.target.value)} /></Field></div> : null}
+diff --git a/frontend/src/features/abastecimiento/GestionCatalogo.tsx b/frontend/src/features/abastecimiento/GestionCatalogo.tsx
+index 622c5a29cc7346be8b27b37c14d56ac97a711433..ae81deb7fc2e97ed289eb7afeac1f504b6e9c231 100644
+--- a/frontend/src/features/abastecimiento/GestionCatalogo.tsx
++++ b/frontend/src/features/abastecimiento/GestionCatalogo.tsx
+@@ -15,8 +15,9 @@ import { EstadoCatalogo, TablaCatalogo } from "./compartidos";
+ import { CatalogoForm } from "./CatalogoForm";
+ import { CategoriasPanel } from "./CategoriasPanel";
+ import { RelacionesPanel } from "./RelacionesPanel";
++import { comprasApi, quetzales, type CostoBodega } from "../../services/compras";
+ 
+-type Modal = { tipo: "editor" | "relaciones" | "precios"; registro: RegistroCatalogo | null } | { tipo: "categorias" };
++type Modal = { tipo: "editor" | "relaciones" | "precios" | "costos"; registro: RegistroCatalogo | null } | { tipo: "categorias" };
+ const NOMBRES = { repuestos: { titulo: "Repuestos", singular: "repuesto", descripcion: "Catálogo, precios actuales y categorías de los repuestos del taller." },
+   proveedores: { titulo: "Proveedores", singular: "proveedor", descripcion: "Datos de contacto y repuestos que ofrece cada proveedor." },
+   bodegas: { titulo: "Bodegas", singular: "bodega", descripcion: "Ubicaciones de almacenamiento, repuestos asociados y mínimos de reposición." } };
+@@ -35,13 +36,13 @@ export function GestionCatalogo({ tipo }: { tipo: TipoCatalogo }) {
+   const columnas: Columna<RegistroCatalogo>[] = [
+     { clave: "codigo", encabezado: tipo === "proveedores" ? "NIT" : "Código", render: r => <strong>{"nit" in r ? r.nit : r.codigo}</strong> },
+     { clave: "nombre", encabezado: "Nombre", render: r => <div style={{ overflowWrap: "anywhere" }}>{r.nombre}{"categoria" in r ? <div className="tc-field__hint">{r.categoria}</div> : null}</div> },
+-    ...(tipo === "repuestos" ? [{ clave: "costo", encabezado: "Costo de referencia", numerica: true, render: (r: RegistroCatalogo) => "costoReferencia" in r ? moneda(r.costoReferencia) : "—" },
+-      { clave: "precio", encabezado: "Precio de venta", numerica: true, render: (r: RegistroCatalogo) => "precioVenta" in r ? moneda(r.precioVenta) : "—" }] :
++    ...(tipo === "repuestos" ? [{ clave: "precio", encabezado: "Precio de venta", numerica: true, render: (r: RegistroCatalogo) => "precioVenta" in r ? moneda(r.precioVenta) : "—" }] :
+       [{ clave: "contacto", encabezado: tipo === "proveedores" ? "Contacto" : "Dirección", render: (r: RegistroCatalogo) => "email" in r ? <>{r.email || "—"}<div>{r.telefono || "—"}</div></> : "direccion" in r ? r.direccion || "—" : "—" }]),
+     { clave: "estado", encabezado: "Estado", render: r => <EstadoCatalogo activo={r.activo} /> },
+     { clave: "acciones", encabezado: "Acciones", render: r => <div className="tc-row" style={{ flexWrap: "wrap" }}>
+       <Button tamano="sm" onClick={() => abrir({ tipo: "editor", registro: r })}>Editar</Button>
+-      <Button tamano="sm" onClick={() => abrir({ tipo: tipo === "repuestos" ? "precios" : "relaciones", registro: r })}>{tipo === "repuestos" ? "Historial de precios" : tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"}</Button></div> },
++      <Button tamano="sm" onClick={() => abrir({ tipo: tipo === "repuestos" ? "precios" : "relaciones", registro: r })}>{tipo === "repuestos" ? "Historial de precios" : tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"}</Button>
++      {tipo === "repuestos" ? <Button tamano="sm" onClick={() => abrir({ tipo: "costos", registro: r })}>Costos por bodega</Button> : null}</div> },
+   ];
+   return <>
+     <PageHeader eyebrow="Inventario y compras" titulo={textos.titulo} descripcion={textos.descripcion} acciones={<>
+@@ -61,15 +62,26 @@ export function GestionCatalogo({ tipo }: { tipo: TipoCatalogo }) {
+       {listado.isLoading ? <LoadingState titulo={`Cargando ${tipo}…`} /> : listado.isError ? <Alert tono="danger" accion={<Button onClick={() => listado.refetch()}>Reintentar</Button>}>{mensajeDeError(listado.error)}</Alert> :
+         <TablaCatalogo key={JSON.stringify(filtros)} filas={listado.data ?? []} columnas={columnas} clave={idCatalogo} vacio="No hay registros para estos filtros." />}
+     </div>
+-    {modal ? <Dialog abierto ancho={modal.tipo === "editor" ? 720 : 1050} titulo={modal.tipo === "categorias" ? "Categorías de repuestos" : modal.tipo === "editor" ? `${modal.registro ? "Editar" : "Registrar"} ${textos.singular}` : modal.tipo === "precios" ? `Historial de precios · ${modal.registro?.nombre}` : `${tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"} · ${modal.registro?.nombre}`}
++    {modal ? <Dialog abierto ancho={modal.tipo === "editor" ? 720 : 1050} titulo={modal.tipo === "categorias" ? "Categorías de repuestos" : modal.tipo === "editor" ? `${modal.registro ? "Editar" : "Registrar"} ${textos.singular}` : modal.tipo === "precios" ? `Historial de precios · ${modal.registro?.nombre}` : modal.tipo === "costos" ? `Costos por bodega · ${modal.registro?.nombre}` : `${tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"} · ${modal.registro?.nombre}`}
+       onCerrar={() => { if (!ocupado) setModal(null); }}>
+       {modal.tipo === "editor" ? <CatalogoForm key={version} tipo={tipo} registro={modal.registro} onOcupado={setOcupado}
+         onCancelar={() => { if (!ocupado) setModal(null); }} onGuardado={r => { setOk(`${r.nombre} guardado.`); setModal(null); }}
+         onRecargar={r => { setVersion(v => v + 1); setModal({ tipo: "editor", registro: r }); }} /> : modal.tipo === "categorias" ? <CategoriasPanel onOcupado={setOcupado} /> : modal.tipo === "precios" && modal.registro ?
+-          <PreciosPanel id={idCatalogo(modal.registro)} /> : modal.tipo === "relaciones" && modal.registro && !("repuestoId" in modal.registro) ? <RelacionesPanel padre={modal.registro} onOcupado={setOcupado} /> : null}
++          <PreciosPanel id={idCatalogo(modal.registro)} /> : modal.tipo === "costos" && modal.registro ? <CostosPanel id={idCatalogo(modal.registro)} /> : modal.tipo === "relaciones" && modal.registro && !("repuestoId" in modal.registro) ? <RelacionesPanel padre={modal.registro} onOcupado={setOcupado} /> : null}
+     </Dialog> : null}
+   </>;
+ }
++function CostosPanel({ id }: { id: number }) {
++  const datos = useQuery({ queryKey: ["abastecimiento", "costos", id], queryFn: ({ signal }) => comprasApi.costos(id, signal) });
++  const columnas: Columna<CostoBodega>[] = [
++    { clave: "bodega", encabezado: "Bodega", render: b => <><strong>{b.codigo}</strong><div>{b.bodega}</div></> },
++    { clave: "existencia", encabezado: "Existencia", numerica: true, render: b => b.existencia },
++    { clave: "costo", encabezado: "Costo promedio", numerica: true, render: b => quetzales(b.costoPromedio, 6) },
++    { clave: "estado", encabezado: "Estado", render: b => <EstadoCatalogo activo={b.activo} /> },
++  ];
++  return <div className="tc-stack" style={{ marginTop: 16 }}><Alert tono="info">Promedio calculado desde las compras recibidas en cada bodega. Los nuevos consumos conservan ese costo, redondeado a centavos. Al agotar las unidades, el promedio queda en cero.</Alert>
++    {datos.isLoading ? <LoadingState /> : datos.isError ? <Alert tono="danger" accion={<Button onClick={() => datos.refetch()}>Reintentar</Button>}>{mensajeDeError(datos.error)}</Alert> : <TablaCatalogo filas={datos.data ?? []} columnas={columnas} clave={b => b.bodegaId} vacio="El repuesto todavía no está asociado a una bodega." />}</div>;
++}
+ function PreciosPanel({ id }: { id: number }) {
+   const datos = useQuery({ queryKey: ["abastecimiento", "precios", id], queryFn: ({ signal }) => api.precios(id, signal) });
+   const columnas: Columna<PrecioRepuesto>[] = [
+diff --git a/frontend/src/features/abastecimiento/RelacionesPanel.tsx b/frontend/src/features/abastecimiento/RelacionesPanel.tsx
+index ecfde252468da89747e6b26c0a551d18352da73c..8529d71ca550dc9a30b988067027915565fb4daf 100644
+--- a/frontend/src/features/abastecimiento/RelacionesPanel.tsx
++++ b/frontend/src/features/abastecimiento/RelacionesPanel.tsx
+@@ -7,6 +7,7 @@ import { LoadingState } from "../../components/ui/StateView";
+ import { type Columna } from "../../components/ui/DataTable";
+ import { abastecimientoApi as api, type Bodega, type Proveedor, type OfertaProveedor, type RepuestoBodega } from "../../services/abastecimiento";
+ import { esApiError, mensajeDeError } from "../../services/errors";
++import { quetzales } from "../../services/compras";
+ import { numero } from "../../utils/format";
+ import { EstadoCatalogo, TablaCatalogo, useActualizarAbastecimiento } from "./compartidos";
+ 
+@@ -48,6 +49,7 @@ export function RelacionesPanel({ padre, onOcupado }: { padre: Bodega | Proveedo
+     { clave: "repuesto", encabezado: "Repuesto", render: r => <><strong>{r.codigo}</strong><div style={{ overflowWrap: "anywhere" }}>{r.nombre}</div></> },
+     ...(proveedor ? [{ clave: "referencia", encabezado: "Código del proveedor", render: (r: Relacion) => "codigoProveedor" in r ? r.codigoProveedor || "—" : "—" }] : [
+       { clave: "minimo", encabezado: "Mínimo", numerica: true, render: (r: Relacion) => "stockMinimo" in r ? numero(r.stockMinimo) : "—" },
++      { clave: "promedio", encabezado: "Costo promedio", numerica: true, render: (r: Relacion) => "costoPromedio" in r ? quetzales(r.costoPromedio, 6) : "—" },
+       { clave: "existencia", encabezado: "Existencia", numerica: true, render: (r: Relacion) => "existencia" in r ? numero(r.existencia) : "—" },
+     ]),
+     { clave: "activo", encabezado: "Estado", render: r => <EstadoCatalogo activo={r.activo} /> },
+diff --git a/frontend/src/features/compras/CompraDetallePage.tsx b/frontend/src/features/compras/CompraDetallePage.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef5fe2d9781ee71ea3c68a0178bde8174e4e8109
+--- /dev/null
++++ b/frontend/src/features/compras/CompraDetallePage.tsx
+@@ -0,0 +1,74 @@
++import { useRef, useState, type FormEvent } from "react";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import { Link, useParams } from "react-router-dom";
++import { PageHeader, Card } from "../../components/ui/Card";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { Dialog } from "../../components/ui/Dialog";
++import { Field, TextArea } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { DataTable, type Columna } from "../../components/ui/DataTable";
++import { comprasApi, quetzales, type DetalleCompra, type EventoCompra } from "../../services/compras";
++import { mensajeDeError } from "../../services/errors";
++import { fechaHora, numero } from "../../utils/format";
++import { EstadoCompra } from "./ComprasPage";
++
++export function CompraDetallePage() {
++  const id = Number(useParams().id), qc = useQueryClient(), bloqueo = useRef(false);
++  const [accion, setAccion] = useState<"recepcion" | "anulacion" | null>(null), [motivo, setMotivo] = useState("");
++  const [confirmado, setConfirmado] = useState(false), [ocupado, setOcupado] = useState(false), [error, setError] = useState(""), [ok, setOk] = useState("");
++  const datos = useQuery({ queryKey: ["compras", "detalle", id], queryFn: ({ signal }) => comprasApi.consultar(id, signal), enabled: Number.isInteger(id) && id > 0 });
++  if (!Number.isInteger(id) || id < 1) return <Alert tono="danger">El ID de compra no es válido.</Alert>;
++  if (datos.isLoading) return <LoadingState titulo="Cargando expediente de compra…" />;
++  if (datos.isError || !datos.data) return <Alert tono="danger" accion={<Button onClick={() => datos.refetch()}>Reintentar</Button>}>{mensajeDeError(datos.error)}</Alert>;
++  const { compra: c, detalle, eventos } = datos.data;
++  const columnas: Columna<DetalleCompra>[] = [
++    { clave: "repuesto", encabezado: "Repuesto", render: d => <><strong>{d.codigo}</strong><div>{d.repuesto}</div></> },
++    { clave: "bodega", encabezado: "Bodega", render: d => d.bodega },
++    { clave: "cantidad", encabezado: "Cantidad", numerica: true, render: d => numero(d.cantidad) },
++    { clave: "costo", encabezado: "Costo unitario", numerica: true, render: d => quetzales(d.costoUnitario) },
++    { clave: "importe", encabezado: "Importe", numerica: true, render: d => quetzales(d.importe) },
++    { clave: "stock", encabezado: c.estado === "RECIBIDA" ? "Existencia al recibir" : "Existencia actual", numerica: true, render: d => numero(c.estado === "RECIBIDA" ? d.existenciaResultante : d.existencia) },
++    { clave: "promedio", encabezado: c.estado === "RECIBIDA" ? "Promedio al recibir" : "Promedio actual", numerica: true, render: d => quetzales(c.estado === "RECIBIDA" ? d.costoPosterior : d.costoPromedio, 6) },
++  ];
++  const columnasEventos: Columna<EventoCompra>[] = [
++    { clave: "tipo", encabezado: "Evento", render: e => e.tipo === "REGISTRO" ? "Registro" : e.tipo === "RECEPCION" ? "Recepción" : "Anulación" },
++    { clave: "responsable", encabezado: "Responsable", render: e => e.responsable },
++    { clave: "fecha", encabezado: "Fecha", render: e => fechaHora(e.fecha) },
++    { clave: "observacion", encabezado: "Observación", render: e => <span style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{e.observacion || "—"}</span> },
++  ];
++  async function ejecutar(e: FormEvent) {
++    e.preventDefault(); if (bloqueo.current || !datos.data || !accion || (accion === "recepcion" && !confirmado)) return;
++    bloqueo.current = true; setOcupado(true); setError("");
++    try {
++      const actual = datos.data.compra;
++      if (accion === "recepcion") await comprasApi.recibir(id, actual.revision); else await comprasApi.anular(id, actual.revision, motivo.trim());
++      setOk(accion === "recepcion" ? "Compra recibida. Existencias y costos promedio actualizados." : "Compra anulada. El motivo y responsable quedaron registrados.");
++      setAccion(null);
++      await Promise.all([qc.invalidateQueries({ queryKey: ["compras"] }), qc.invalidateQueries({ queryKey: ["abastecimiento"] }), qc.invalidateQueries({ queryKey: ["orden"] }), qc.invalidateQueries({ queryKey: ["inventario"] })]);
++    } catch (e) { setError(mensajeDeError(e)); }
++    finally { bloqueo.current = false; setOcupado(false); }
++  }
++  function abrir(tipo: "recepcion" | "anulacion") { setError(""); setConfirmado(false); setMotivo(""); setAccion(tipo); }
++  return <>
++    <PageHeader eyebrow="Inventario y compras" titulo={c.numeroCompra} descripcion={`${c.proveedor} · ${c.nit}`} acciones={<><Link className="tc-btn" to="/compras">Volver a compras</Link><Button disabled={ocupado || datos.isFetching} onClick={() => { setAccion(null); setError(""); void datos.refetch(); }}>Actualizar compra</Button></>} />
++    <div className="tc-stack">{ok ? <Alert tono="ok">{ok}</Alert> : null}{error && !accion ? <Alert tono="danger">{error}</Alert> : null}
++      <Card><dl className="tc-dl"><dt>Estado</dt><dd><EstadoCompra estado={c.estado} /></dd><dt>Total de compra</dt><dd>{quetzales(c.total)}</dd>
++        <dt>Registró</dt><dd>{c.registradaPor} · {fechaHora(c.fecha)}</dd>{c.estado === "RECIBIDA" ? <><dt>Recibió</dt><dd>{c.recibidaPor || detalle.find(d => d.recibidaPor)?.recibidaPor || "Registro anterior"} · {fechaHora(c.fechaRecepcion)}</dd></> : null}
++        {c.estado === "ANULADA" && c.motivoAnulacion ? <><dt>Anuló</dt><dd>{c.anuladaPor} · {fechaHora(c.fechaAnulacion)}</dd><dt>Motivo</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{c.motivoAnulacion}</dd></> : null}
++        <dt>Observaciones de compra</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{c.observaciones || "—"}</dd></dl></Card>
++      <DataTable columnas={columnas} filas={detalle} claveFila={d => d.linea} vacio="La compra no tiene líneas." />
++      {c.estado === "PENDIENTE" ? <><Alert tono="info">Confirmá la recepción únicamente cuando haya llegado la compra completa. El promedio se calcula con las existencias vigentes al confirmar.</Alert><div className="tc-row" style={{ flexWrap: "wrap" }}><Button variante="primario" onClick={() => abrir("recepcion")}>Recibir compra</Button><Button onClick={() => abrir("anulacion")}>Anular compra</Button></div></> : null}
++      {eventos.length ? <Card><h3 className="tc-section-title">Responsables e historial</h3><DataTable columnas={columnasEventos} filas={eventos} claveFila={e => e.tipo} /></Card> : <Alert tono="info">Esta compra es anterior al registro de eventos del módulo. Las entradas conservan su usuario en el kardex.</Alert>}
++    </div>
++    {accion ? <Dialog abierto titulo={accion === "recepcion" ? "Confirmar recepción completa" : "Anular compra pendiente"} ancho={650} onCerrar={() => { if (!ocupado) setAccion(null); }}>
++      <form className="tc-stack" style={{ marginTop: 16 }} onSubmit={e => void ejecutar(e)}>
++        {error ? <Alert tono="danger" accion={<Button type="button" disabled={ocupado} onClick={() => { setAccion(null); setError(""); void datos.refetch(); }}>Actualizar compra</Button>}>{error}</Alert> : null}
++        <p><strong>{c.numeroCompra}</strong> · {c.proveedor} · {c.lineas} líneas · {quetzales(c.total)}</p>
++        {accion === "recepcion" ? <label className="tc-row" style={{ alignItems: "flex-start" }}><input type="checkbox" required disabled={ocupado} checked={confirmado} onChange={e => setConfirmado(e.target.checked)} /><span>Confirmo que recibí todas las unidades detalladas en esta compra.</span></label> :
++          <Field label="Motivo de anulación" htmlFor="compra-motivo" requerido><TextArea id="compra-motivo" data-autofocus required maxLength={1000} rows={4} disabled={ocupado} value={motivo} onChange={e => setMotivo(e.target.value)} /></Field>}
++        <div className="tc-row" style={{ flexWrap: "wrap" }}><Button type="button" disabled={ocupado} onClick={() => setAccion(null)}>Volver</Button><Button type="submit" variante="primario" disabled={ocupado || (accion === "recepcion" ? !confirmado : !motivo.trim())}>{ocupado ? "Confirmando…" : accion === "recepcion" ? "Confirmar recepción" : "Confirmar anulación"}</Button></div>
++      </form>
++    </Dialog> : null}
++  </>;
++}
+diff --git a/frontend/src/features/compras/CompraForm.tsx b/frontend/src/features/compras/CompraForm.tsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..87729d31a3961f3f158ccfe3afbe13694e9eff7b
+--- /dev/null
++++ b/frontend/src/features/compras/CompraForm.tsx
+@@ -0,0 +1,72 @@
++import { useRef, useState, type FormEvent } from "react";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { Field, SelectInput, TextArea, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { abastecimientoApi } from "../../services/abastecimiento";
++import { comprasApi, centavos, decimalCentavos, quetzales, type Compra, type RegistroCompra } from "../../services/compras";
++import { esApiError, mensajeDeError } from "../../services/errors";
++
++type Fila = { clave: string; repuesto: string; bodega: string; cantidad: string; costo: string };
++const nueva = (): Fila => ({ clave: crypto.randomUUID(), repuesto: "", bodega: "", cantidad: "1", costo: "" });
++const costoValido = (v: string) => /^\d{1,10}(?:\.\d{1,2})?$/.test(v);
++const subtotal = (f: Fila) => costoValido(f.costo) && /^\d{1,10}$/.test(f.cantidad) ? centavos(f.costo) * BigInt(f.cantidad) : 0n;
++export function CompraForm({ onOcupado, onGuardado, onCancelar }: { onOcupado: (v: boolean) => void; onGuardado: (c: Compra) => void; onCancelar: () => void }) {
++  const [numero, setNumero] = useState(""), [proveedor, setProveedor] = useState(""), [observaciones, setObservaciones] = useState("");
++  const [filas, setFilas] = useState<Fila[]>(() => [nueva()]), [revision, setRevision] = useState<RegistroCompra | null>(null);
++  const [error, setError] = useState(""), [guardando, setGuardando] = useState(false), [incierto, setIncierto] = useState(false);
++  const bloqueo = useRef(false), qc = useQueryClient();
++  const proveedores = useQuery({ queryKey: ["abastecimiento", "proveedores", "compra"], queryFn: ({ signal }) => abastecimientoApi.proveedores("", true, signal) });
++  const destinos = useQuery({ queryKey: ["compras", "destinos", proveedor], queryFn: ({ signal }) => comprasApi.destinos(Number(proveedor), signal), enabled: !!proveedor });
++  const opciones = [...new Map((destinos.data ?? []).map(d => [d.repuestoId, d])).values()];
++  const total = decimalCentavos(filas.reduce((s, f) => s + subtotal(f), 0n));
++  function cambiar(clave: string, datos: Partial<Fila>) { setFilas(fs => fs.map(f => f.clave === clave ? { ...f, ...datos } : f)); }
++  function revisar(e: FormEvent) {
++    e.preventDefault(); setError("");
++    if (!/^[0-9A-Za-z._/\-]{1,30}$/.test(numero.trim()) || !proveedor || !filas.length) { setError("Revisá el número de compra, proveedor y detalle."); return; }
++    const pares = new Set<string>();
++    for (const f of filas) {
++      if (!destinos.data?.some(d => String(d.repuestoId) === f.repuesto && String(d.bodegaId) === f.bodega) || !/^\d{1,10}$/.test(f.cantidad) || Number(f.cantidad) < 1 || Number(f.cantidad) > 2147483647 || !costoValido(f.costo)) { setError("Completá repuesto, bodega, cantidad entera positiva y costo de hasta dos decimales en cada línea."); return; }
++      const par = `${f.repuesto}:${f.bodega}`; if (pares.has(par)) { setError("No repitás el mismo repuesto y bodega en dos líneas."); return; } pares.add(par);
++    }
++    setRevision({ solicitudId: crypto.randomUUID(), numeroCompra: numero.trim(), proveedorId: Number(proveedor), observaciones: observaciones.trim() || null,
++      detalle: filas.map(f => ({ repuestoId: Number(f.repuesto), bodegaId: Number(f.bodega), cantidad: Number(f.cantidad), costoUnitario: f.costo })) });
++  }
++  async function guardar() {
++    if (!revision || bloqueo.current) return; bloqueo.current = true; setGuardando(true); onOcupado(true); setError("");
++    try {
++      const r = await comprasApi.registrar(revision);
++      await Promise.all([qc.invalidateQueries({ queryKey: ["compras"] }), qc.invalidateQueries({ queryKey: ["abastecimiento"] })]);
++      onGuardado(r);
++    } catch (e) { setError(mensajeDeError(e)); setIncierto(!esApiError(e) || e.status === 0 || e.status >= 500); }
++    finally { bloqueo.current = false; setGuardando(false); onOcupado(false); }
++  }
++  return <div className="tc-stack" style={{ marginTop: 16 }}>
++    {error ? <Alert tono="danger">{error}</Alert> : null}
++    {revision ? <>
++      <Alert tono="info">Revisá la compra antes de registrarla. Quedará pendiente hasta confirmar que llegaron todas las unidades.</Alert>
++      <dl className="tc-dl"><dt>Número</dt><dd>{revision.numeroCompra}</dd><dt>Proveedor</dt><dd>{proveedores.data?.find(p => p.proveedorId === revision.proveedorId)?.nombre}</dd><dt>Total de compra</dt><dd>{quetzales(total)}</dd><dt>Observaciones</dt><dd style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{revision.observaciones || "—"}</dd></dl>
++      {filas.map((f, i) => { const d = destinos.data?.find(d => String(d.repuestoId) === f.repuesto && String(d.bodegaId) === f.bodega); return <div key={f.clave} className="tc-card" style={{ padding: 16 }}><strong>{i + 1}. {d?.codigo} · {d?.repuesto}</strong><div>{d?.bodega} · {f.cantidad} unidades × {quetzales(f.costo)} = {quetzales(decimalCentavos(subtotal(f)))}</div></div>; })}
++      {incierto ? <Alert tono="warn">El registro no pudo confirmarse. Reintentá esta misma compra o cerrá y consultá el listado para comprobar si quedó registrada.</Alert> : null}
++      <div className="tc-row" style={{ flexWrap: "wrap" }}><Button variante="primario" disabled={guardando} onClick={() => void guardar()}>{guardando ? "Registrando…" : incierto ? "Reintentar registro" : "Registrar compra pendiente"}</Button>
++        <Button disabled={guardando || incierto} onClick={() => { setRevision(null); setError(""); }}>Editar compra</Button><Button disabled={guardando} onClick={onCancelar}>Cerrar</Button></div>
++    </> : <form className="tc-stack" onSubmit={revisar}>
++      <div className="tc-grid tc-grid--2"><Field label="Número de compra" htmlFor="compra-numero" requerido hint="Referencia única, por ejemplo COM-0021."><TextInput id="compra-numero" data-autofocus required maxLength={30} value={numero} onChange={e => setNumero(e.target.value)} /></Field>
++        <Field label="Proveedor" htmlFor="compra-proveedor" requerido hint="Cambiar el proveedor limpia las líneas de esta compra."><SelectInput id="compra-proveedor" required disabled={proveedores.isLoading || proveedores.isError} value={proveedor} onChange={e => { setProveedor(e.target.value); setFilas([nueva()]); }}><option value="">Elegir proveedor activo</option>{proveedores.data?.map(p => <option key={p.proveedorId} value={p.proveedorId}>{p.nombre} · {p.nit}</option>)}</SelectInput></Field></div>
++      {proveedores.isError ? <Alert tono="danger" accion={<Button type="button" onClick={() => proveedores.refetch()}>Reintentar proveedores</Button>}>{mensajeDeError(proveedores.error)}</Alert> : null}
++      {destinos.isLoading && proveedor ? <LoadingState titulo="Cargando repuestos y bodegas…" /> : destinos.isError ? <Alert tono="danger" accion={<Button type="button" onClick={() => destinos.refetch()}>Reintentar destinos</Button>}>{mensajeDeError(destinos.error)}</Alert> : proveedor && destinos.data?.length === 0 ? <Alert tono="warn">No hay destinos disponibles. En Proveedores, agregá los repuestos al catálogo ofrecido; en Bodegas, asocialos a su destino. Proveedor, repuesto y bodega deben estar activos.</Alert> : null}
++      {filas.map((f, i) => <div key={f.clave} className="tc-card tc-stack" style={{ padding: 16 }}>
++        <div className="tc-row"><strong style={{ flex: 1 }}>Línea {i + 1}</strong><Button type="button" tamano="sm" disabled={filas.length === 1} onClick={() => setFilas(fs => fs.filter(v => v.clave !== f.clave))}>Quitar línea</Button></div>
++        <div className="tc-grid tc-grid--2"><Field label={`Repuesto ${i + 1}`} htmlFor={`rep-${f.clave}`} requerido><SelectInput id={`rep-${f.clave}`} required disabled={!proveedor || destinos.isLoading || destinos.isError} value={f.repuesto} onChange={e => cambiar(f.clave, { repuesto: e.target.value, bodega: "" })}><option value="">Elegir repuesto ofrecido</option>{opciones.map(d => <option key={d.repuestoId} value={d.repuestoId}>{d.codigo} · {d.repuesto}</option>)}</SelectInput></Field>
++          <Field label={`Bodega ${i + 1}`} htmlFor={`bod-${f.clave}`} requerido><SelectInput id={`bod-${f.clave}`} required disabled={!f.repuesto} value={f.bodega} onChange={e => cambiar(f.clave, { bodega: e.target.value })}><option value="">Elegir bodega asociada</option>{destinos.data?.filter(d => String(d.repuestoId) === f.repuesto).map(d => <option key={d.bodegaId} value={d.bodegaId}>{d.bodega} · Existencia {d.existencia}</option>)}</SelectInput></Field></div>
++        <div className="tc-grid tc-grid--2"><Field label={`Cantidad ${i + 1}`} htmlFor={`cant-${f.clave}`} requerido><TextInput id={`cant-${f.clave}`} type="number" required min="1" max="2147483647" step="1" value={f.cantidad} onChange={e => cambiar(f.clave, { cantidad: e.target.value })} /></Field>
++          <Field label={`Costo unitario ${i + 1} (Q)`} htmlFor={`costo-${f.clave}`} requerido hint="Costo pagado al proveedor por cada unidad; puede ser cero."><TextInput id={`costo-${f.clave}`} type="number" required min="0" max="9999999999.99" step="0.01" value={f.costo} onChange={e => cambiar(f.clave, { costo: e.target.value })} /></Field></div>
++        <div>Importe: <strong>{quetzales(decimalCentavos(subtotal(f)))}</strong></div>
++      </div>)}
++      <Button type="button" disabled={filas.length >= 200 || !destinos.data?.length} onClick={() => setFilas(fs => [...fs, nueva()])}>Agregar línea</Button>
++      <Field label="Observaciones de compra" htmlFor="compra-observaciones"><TextArea id="compra-observaciones" rows={3} maxLength={1000} value={observaciones} onChange={e => setObservaciones(e.target.value)} /></Field>
++      <div className="tc-row" style={{ flexWrap: "wrap" }}><strong style={{ flex: 1 }}>Total: {quetzales(total)}</strong><Button type="button" onClick={onCancelar}>Volver</Button><Button type="submit" variante="primario" disabled={!proveedor || destinos.isFetching || destinos.isError || !destinos.data?.length}>Revisar compra</Button></div>
++    </form>}
++  </div>;
++}
+diff --git a/frontend/src/features/compras/ComprasPage.tsx b/frontend/src/features/compras/ComprasPage.tsx
+index 3b38b6529be00931e59b8d8935aeb620cd0a17d3..81c1778b33f2395046e25066dfda3e2a61df874f 100644
+--- a/frontend/src/features/compras/ComprasPage.tsx
++++ b/frontend/src/features/compras/ComprasPage.tsx
+@@ -1,11 +1,53 @@
+-import { PendingModule } from "../../components/ui/PendingModule";
++import { useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Link, useNavigate } from "react-router-dom";
++import { Plus, RefreshCw } from "lucide-react";
++import { Card, PageHeader } from "../../components/ui/Card";
++import { Alert } from "../../components/ui/Alert";
++import { Badge } from "../../components/ui/Badge";
++import { Button } from "../../components/ui/Button";
++import { Dialog } from "../../components/ui/Dialog";
++import { Field, SelectInput, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { TablaCatalogo } from "../abastecimiento/compartidos";
++import { type Columna } from "../../components/ui/DataTable";
++import { comprasApi, quetzales, type Compra, type FiltrosCompra } from "../../services/compras";
++import { abastecimientoApi } from "../../services/abastecimiento";
++import { mensajeDeError } from "../../services/errors";
++import { fechaHora } from "../../utils/format";
++import { CompraForm } from "./CompraForm";
+ 
++export function EstadoCompra({ estado }: { estado: string }) { return <Badge tono={estado === "RECIBIDA" ? "ok" : estado === "ANULADA" ? "danger" : "warn"}>{estado === "RECIBIDA" ? "Recibida" : estado === "ANULADA" ? "Anulada" : "Pendiente"}</Badge>; }
++const vacios: FiltrosCompra = { buscar: "", estado: "", proveedorId: "", desde: "", hasta: "" };
++const columnas: Columna<Compra>[] = [
++  { clave: "numero", encabezado: "Compra", render: c => <><strong>{c.numeroCompra}</strong><div className="tc-field__hint">{fechaHora(c.fecha)}</div></> },
++  { clave: "proveedor", encabezado: "Proveedor", render: c => <>{c.proveedor}<div className="tc-field__hint">{c.nit}</div></> },
++  { clave: "estado", encabezado: "Estado", render: c => <EstadoCompra estado={c.estado} /> },
++  { clave: "total", encabezado: "Total", numerica: true, render: c => quetzales(c.total) },
++  { clave: "registro", encabezado: "Registró", render: c => c.registradaPor },
++  { clave: "accion", encabezado: "Acción", render: c => <Link className="tc-btn tc-btn--sm" to={`/compras/${c.compraId}`}>Ver compra</Link> },
++];
+ export function ComprasPage() {
+-  return (
+-    <PendingModule
+-      modulo="Compras"
+-      titulo="Compras y recepcion"
+-      descripcion="Registrar y recibir abastecimiento de proveedores. Una compra pendiente no aumenta existencias; la recepcion se confirma de una vez."
+-    />
+-  );
++  const [entrada, setEntrada] = useState(vacios), [filtros, setFiltros] = useState(vacios), [error, setError] = useState("");
++  const [nuevo, setNuevo] = useState(false), [ocupado, setOcupado] = useState(false), navigate = useNavigate();
++  const datos = useQuery({ queryKey: ["compras", "listado", filtros], queryFn: ({ signal }) => comprasApi.listar(filtros, signal) });
++  const proveedores = useQuery({ queryKey: ["abastecimiento", "proveedores", "filtro"], queryFn: ({ signal }) => abastecimientoApi.proveedores("", undefined, signal) });
++  return <>
++    <PageHeader eyebrow="Inventario y compras" titulo="Compras y recepción" descripcion="Registrá compras pendientes y confirmá la llegada completa de los repuestos."
++      acciones={<><Button variante="primario" icono={<Plus size={16} />} onClick={() => setNuevo(true)}>Nueva compra</Button><Button icono={<RefreshCw size={16} />} disabled={datos.isFetching} onClick={() => datos.refetch()}>Actualizar</Button></>} />
++    <div className="tc-stack"><Alert tono="info">Las compras pendientes conservan sus costos y cantidades. Al recibirlas, aumentan las existencias y se calcula el costo promedio de cada bodega.</Alert>
++      {error ? <Alert tono="danger">{error}</Alert> : null}
++      <Card><form className="tc-stack" onSubmit={e => { e.preventDefault(); if (entrada.desde && entrada.hasta && entrada.desde > entrada.hasta) { setError("La fecha inicial no puede ser posterior a la final."); return; } setError(""); setFiltros({ ...entrada, buscar: entrada.buscar.trim() }); }}>
++        <div className="tc-grid tc-grid--2"><Field label="Buscar compra" htmlFor="compras-buscar"><TextInput id="compras-buscar" maxLength={150} placeholder="Número, proveedor o NIT" value={entrada.buscar} onChange={e => setEntrada(v => ({ ...v, buscar: e.target.value }))} /></Field>
++          <Field label="Estado de compra" htmlFor="compras-estado"><SelectInput id="compras-estado" value={entrada.estado} onChange={e => setEntrada(v => ({ ...v, estado: e.target.value }))}><option value="">Todos</option><option value="PENDIENTE">Pendientes</option><option value="RECIBIDA">Recibidas</option><option value="ANULADA">Anuladas</option></SelectInput></Field>
++          <Field label="Proveedor del listado" htmlFor="compras-proveedor"><SelectInput id="compras-proveedor" disabled={proveedores.isError || proveedores.isLoading} value={entrada.proveedorId} onChange={e => setEntrada(v => ({ ...v, proveedorId: e.target.value }))}><option value="">Todos</option>{proveedores.data?.map(p => <option key={p.proveedorId} value={p.proveedorId}>{p.nombre}</option>)}</SelectInput></Field>
++          <div className="tc-grid tc-grid--2"><Field label="Desde" htmlFor="compras-desde"><TextInput id="compras-desde" type="date" value={entrada.desde} onChange={e => setEntrada(v => ({ ...v, desde: e.target.value }))} /></Field><Field label="Hasta" htmlFor="compras-hasta"><TextInput id="compras-hasta" type="date" value={entrada.hasta} onChange={e => setEntrada(v => ({ ...v, hasta: e.target.value }))} /></Field></div></div>
++        <div className="tc-row"><Button type="submit" variante="primario">Buscar</Button><Button type="button" onClick={() => { setEntrada(vacios); setFiltros(vacios); setError(""); }}>Limpiar</Button></div>
++      </form></Card>
++      {proveedores.isError ? <Alert tono="danger" accion={<Button onClick={() => proveedores.refetch()}>Reintentar proveedores</Button>}>{mensajeDeError(proveedores.error)}</Alert> : null}
++      {datos.isLoading ? <LoadingState titulo="Cargando compras…" /> : datos.isError ? <Alert tono="danger" accion={<Button onClick={() => datos.refetch()}>Reintentar</Button>}>{mensajeDeError(datos.error)}</Alert> :
++        <TablaCatalogo key={JSON.stringify(filtros)} filas={datos.data ?? []} columnas={columnas} clave={c => c.compraId} vacio="No hay compras para estos filtros." />}
++    </div>
++    {nuevo ? <Dialog abierto titulo="Registrar compra" ancho={900} onCerrar={() => { if (!ocupado) setNuevo(false); }}><CompraForm onOcupado={setOcupado} onCancelar={() => setNuevo(false)} onGuardado={c => navigate(`/compras/${c.compraId}`)} /></Dialog> : null}
++  </>;
+ }
+diff --git a/frontend/src/features/integracion/IntegracionPage.tsx b/frontend/src/features/integracion/IntegracionPage.tsx
+index a7e628eaf74705cdee16dcb8517bcd811ef1415d..2324d16f599616e8472a082e681d8a6a48c86422 100644
+--- a/frontend/src/features/integracion/IntegracionPage.tsx
++++ b/frontend/src/features/integracion/IntegracionPage.tsx
+@@ -63,7 +63,7 @@ export function IntegracionPage() {
+ 
+       <div className="tc-stack">
+         <Alert tono="info" titulo="Contrato verificado">
+-          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF, entrega y abastecimiento tienen rutas bajo <code>{API_BASE_URL}</code>.
++          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF, entrega, abastecimiento, compras y recepción tienen rutas bajo <code>{API_BASE_URL}</code>.
+           Las operaciones requieren sesión, rol y protección CSRF al escribir. El servicio técnico valida además
+           el responsable asignado. Los errores mantienen la forma <code>{"{ estado, mensaje, errores? }"}</code>.
+         </Alert>
+diff --git a/frontend/src/services/abastecimiento.ts b/frontend/src/services/abastecimiento.ts
+index 7f7f3d68a9e741b62ff344245d75e9965e7dd311..170ae8a99ca11c4fa41f0a72fc774f10b797ba69 100644
+--- a/frontend/src/services/abastecimiento.ts
++++ b/frontend/src/services/abastecimiento.ts
+@@ -4,7 +4,7 @@ export interface Repuesto { repuestoId: number; categoriaId: number; categoria:
+ export interface Proveedor { proveedorId: number; nit: string; nombre: string; email: string | null; telefono: string | null; direccion: string | null; activo: boolean; revision: string }
+ export interface Bodega { bodegaId: number; codigo: string; nombre: string; direccion: string | null; activo: boolean; revision: string }
+ export interface OfertaProveedor { proveedorId: number; repuestoId: number; codigo: string; nombre: string; categoriaId: number; categoria: string; activo: boolean; precioVenta: number; codigoProveedor: string | null; revision: string }
+-export interface RepuestoBodega { bodegaId: number; repuestoId: number; codigo: string; nombre: string; activo: boolean; stockMinimo: number; existencia: number }
++export interface RepuestoBodega { bodegaId: number; repuestoId: number; codigo: string; nombre: string; activo: boolean; stockMinimo: number; existencia: number; costoPromedio: string | null }
+ export interface PrecioRepuesto { auditoriaId: number; fecha: string; costoAnterior: number; costoNuevo: number; precioAnterior: number; precioNuevo: number; registradoPor: string | null }
+ export type RepuestoDatos = { categoriaId: number; codigo: string; nombre: string; descripcion: string | null; costoReferencia: string; precioVenta: string; activo: boolean; revision: string | null };
+ export type ProveedorDatos = Omit<Proveedor, "proveedorId" | "revision"> & { revision: string | null };
+diff --git a/frontend/src/services/compras.ts b/frontend/src/services/compras.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7885e5569f6ad2bb87b431324c999f55c3400d0b
+--- /dev/null
++++ b/frontend/src/services/compras.ts
+@@ -0,0 +1,34 @@
++import { http } from "./http";
++export interface Compra {
++  compraId: number; numeroCompra: string; proveedorId: number; nit: string; proveedor: string; fecha: string; estado: "PENDIENTE" | "RECIBIDA" | "ANULADA";
++  fechaRecepcion: string | null; observaciones: string | null; registradaPor: string; recibidaPor: string | null; anuladaPor: string | null;
++  fechaAnulacion: string | null; motivoAnulacion: string | null; lineas: number; total: string; revision: string;
++}
++export interface DetalleCompra {
++  linea: number; bodegaId: number; bodega: string; repuestoId: number; codigo: string; repuesto: string; cantidad: number; costoUnitario: string; importe: string;
++  existencia: number; costoPromedio: string; movimientoId: number | null; existenciaResultante: number | null; costoAnterior: string | null; costoPosterior: string | null; recibidaPor: string | null;
++}
++export interface EventoCompra { tipo: string; responsable: string; fecha: string; observacion: string | null }
++export interface DocumentoCompra { compra: Compra; detalle: DetalleCompra[]; eventos: EventoCompra[] }
++export interface DestinoCompra { repuestoId: number; codigo: string; repuesto: string; bodegaId: number; bodega: string; codigoProveedor: string | null; existencia: number; stockMinimo: number; costoPromedio: string }
++export interface CostoBodega { bodegaId: number; codigo: string; bodega: string; activo: boolean; existencia: number; stockMinimo: number; costoPromedio: string }
++export interface LineaCompra { bodegaId: number; repuestoId: number; cantidad: number; costoUnitario: string }
++export interface RegistroCompra { solicitudId: string; numeroCompra: string; proveedorId: number; observaciones: string | null; detalle: LineaCompra[] }
++export interface FiltrosCompra { buscar: string; estado: string; proveedorId: string; desde: string; hasta: string }
++export const comprasApi = {
++  listar: (f: FiltrosCompra, signal?: AbortSignal) => { const p = new URLSearchParams(); Object.entries(f).forEach(([k, v]) => { if (v) p.set(k, v); }); return http.get<Compra[]>(`/compras${p.size ? `?${p}` : ""}`, signal); },
++  consultar: (id: number, signal?: AbortSignal) => http.get<DocumentoCompra>(`/compras/${id}`, signal),
++  destinos: (proveedor: number, signal?: AbortSignal) => http.get<DestinoCompra[]>(`/compras/catalogos/destinos?proveedorId=${proveedor}`, signal),
++  costos: (repuesto: number, signal?: AbortSignal) => http.get<CostoBodega[]>(`/repuestos/${repuesto}/costos`, signal),
++  registrar: (datos: RegistroCompra) => http.post<Compra>("/compras", datos),
++  recibir: (id: number, revision: string) => http.post<Compra>(`/compras/${id}/recepcion`, { revision }),
++  anular: (id: number, revision: string, motivo: string) => http.post<Compra>(`/compras/${id}/anulacion`, { revision, motivo }),
++};
++// Se calculan centavos enteros para conservar importes incluso en compras grandes.
++export function centavos(valor: string): bigint { const [entero, fraccion = ""] = valor.split("."); return BigInt(entero || "0") * 100n + BigInt((fraccion + "00").slice(0, 2)); }
++export function decimalCentavos(valor: bigint): string { return `${valor / 100n}.${(valor % 100n).toString().padStart(2, "0")}`; }
++export function quetzales(valor: string | null | undefined, decimales = 2): string {
++  if (valor === null || valor === undefined) return "—";
++  const [entero, fraccion = ""] = valor.split(".");
++  return `Q ${BigInt(entero || "0").toLocaleString("es-GT")}.${(fraccion + "0".repeat(decimales)).slice(0, decimales)}`;
++}

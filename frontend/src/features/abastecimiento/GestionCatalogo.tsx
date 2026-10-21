@@ -15,8 +15,9 @@ import { EstadoCatalogo, TablaCatalogo } from "./compartidos";
 import { CatalogoForm } from "./CatalogoForm";
 import { CategoriasPanel } from "./CategoriasPanel";
 import { RelacionesPanel } from "./RelacionesPanel";
+import { comprasApi, quetzales, type CostoBodega } from "../../services/compras";
 
-type Modal = { tipo: "editor" | "relaciones" | "precios"; registro: RegistroCatalogo | null } | { tipo: "categorias" };
+type Modal = { tipo: "editor" | "relaciones" | "precios" | "costos"; registro: RegistroCatalogo | null } | { tipo: "categorias" };
 const NOMBRES = { repuestos: { titulo: "Repuestos", singular: "repuesto", descripcion: "Catálogo, precios actuales y categorías de los repuestos del taller." },
   proveedores: { titulo: "Proveedores", singular: "proveedor", descripcion: "Datos de contacto y repuestos que ofrece cada proveedor." },
   bodegas: { titulo: "Bodegas", singular: "bodega", descripcion: "Ubicaciones de almacenamiento, repuestos asociados y mínimos de reposición." } };
@@ -35,13 +36,13 @@ export function GestionCatalogo({ tipo }: { tipo: TipoCatalogo }) {
   const columnas: Columna<RegistroCatalogo>[] = [
     { clave: "codigo", encabezado: tipo === "proveedores" ? "NIT" : "Código", render: r => <strong>{"nit" in r ? r.nit : r.codigo}</strong> },
     { clave: "nombre", encabezado: "Nombre", render: r => <div style={{ overflowWrap: "anywhere" }}>{r.nombre}{"categoria" in r ? <div className="tc-field__hint">{r.categoria}</div> : null}</div> },
-    ...(tipo === "repuestos" ? [{ clave: "costo", encabezado: "Costo de referencia", numerica: true, render: (r: RegistroCatalogo) => "costoReferencia" in r ? moneda(r.costoReferencia) : "—" },
-      { clave: "precio", encabezado: "Precio de venta", numerica: true, render: (r: RegistroCatalogo) => "precioVenta" in r ? moneda(r.precioVenta) : "—" }] :
+    ...(tipo === "repuestos" ? [{ clave: "precio", encabezado: "Precio de venta", numerica: true, render: (r: RegistroCatalogo) => "precioVenta" in r ? moneda(r.precioVenta) : "—" }] :
       [{ clave: "contacto", encabezado: tipo === "proveedores" ? "Contacto" : "Dirección", render: (r: RegistroCatalogo) => "email" in r ? <>{r.email || "—"}<div>{r.telefono || "—"}</div></> : "direccion" in r ? r.direccion || "—" : "—" }]),
     { clave: "estado", encabezado: "Estado", render: r => <EstadoCatalogo activo={r.activo} /> },
     { clave: "acciones", encabezado: "Acciones", render: r => <div className="tc-row" style={{ flexWrap: "wrap" }}>
       <Button tamano="sm" onClick={() => abrir({ tipo: "editor", registro: r })}>Editar</Button>
-      <Button tamano="sm" onClick={() => abrir({ tipo: tipo === "repuestos" ? "precios" : "relaciones", registro: r })}>{tipo === "repuestos" ? "Historial de precios" : tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"}</Button></div> },
+      <Button tamano="sm" onClick={() => abrir({ tipo: tipo === "repuestos" ? "precios" : "relaciones", registro: r })}>{tipo === "repuestos" ? "Historial de precios" : tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"}</Button>
+      {tipo === "repuestos" ? <Button tamano="sm" onClick={() => abrir({ tipo: "costos", registro: r })}>Costos por bodega</Button> : null}</div> },
   ];
   return <>
     <PageHeader eyebrow="Inventario y compras" titulo={textos.titulo} descripcion={textos.descripcion} acciones={<>
@@ -61,14 +62,25 @@ export function GestionCatalogo({ tipo }: { tipo: TipoCatalogo }) {
       {listado.isLoading ? <LoadingState titulo={`Cargando ${tipo}…`} /> : listado.isError ? <Alert tono="danger" accion={<Button onClick={() => listado.refetch()}>Reintentar</Button>}>{mensajeDeError(listado.error)}</Alert> :
         <TablaCatalogo key={JSON.stringify(filtros)} filas={listado.data ?? []} columnas={columnas} clave={idCatalogo} vacio="No hay registros para estos filtros." />}
     </div>
-    {modal ? <Dialog abierto ancho={modal.tipo === "editor" ? 720 : 1050} titulo={modal.tipo === "categorias" ? "Categorías de repuestos" : modal.tipo === "editor" ? `${modal.registro ? "Editar" : "Registrar"} ${textos.singular}` : modal.tipo === "precios" ? `Historial de precios · ${modal.registro?.nombre}` : `${tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"} · ${modal.registro?.nombre}`}
+    {modal ? <Dialog abierto ancho={modal.tipo === "editor" ? 720 : 1050} titulo={modal.tipo === "categorias" ? "Categorías de repuestos" : modal.tipo === "editor" ? `${modal.registro ? "Editar" : "Registrar"} ${textos.singular}` : modal.tipo === "precios" ? `Historial de precios · ${modal.registro?.nombre}` : modal.tipo === "costos" ? `Costos por bodega · ${modal.registro?.nombre}` : `${tipo === "proveedores" ? "Catálogo ofrecido" : "Repuestos y mínimos"} · ${modal.registro?.nombre}`}
       onCerrar={() => { if (!ocupado) setModal(null); }}>
       {modal.tipo === "editor" ? <CatalogoForm key={version} tipo={tipo} registro={modal.registro} onOcupado={setOcupado}
         onCancelar={() => { if (!ocupado) setModal(null); }} onGuardado={r => { setOk(`${r.nombre} guardado.`); setModal(null); }}
         onRecargar={r => { setVersion(v => v + 1); setModal({ tipo: "editor", registro: r }); }} /> : modal.tipo === "categorias" ? <CategoriasPanel onOcupado={setOcupado} /> : modal.tipo === "precios" && modal.registro ?
-          <PreciosPanel id={idCatalogo(modal.registro)} /> : modal.tipo === "relaciones" && modal.registro && !("repuestoId" in modal.registro) ? <RelacionesPanel padre={modal.registro} onOcupado={setOcupado} /> : null}
+          <PreciosPanel id={idCatalogo(modal.registro)} /> : modal.tipo === "costos" && modal.registro ? <CostosPanel id={idCatalogo(modal.registro)} /> : modal.tipo === "relaciones" && modal.registro && !("repuestoId" in modal.registro) ? <RelacionesPanel padre={modal.registro} onOcupado={setOcupado} /> : null}
     </Dialog> : null}
   </>;
+}
+function CostosPanel({ id }: { id: number }) {
+  const datos = useQuery({ queryKey: ["abastecimiento", "costos", id], queryFn: ({ signal }) => comprasApi.costos(id, signal) });
+  const columnas: Columna<CostoBodega>[] = [
+    { clave: "bodega", encabezado: "Bodega", render: b => <><strong>{b.codigo}</strong><div>{b.bodega}</div></> },
+    { clave: "existencia", encabezado: "Existencia", numerica: true, render: b => b.existencia },
+    { clave: "costo", encabezado: "Costo promedio", numerica: true, render: b => quetzales(b.costoPromedio, 6) },
+    { clave: "estado", encabezado: "Estado", render: b => <EstadoCatalogo activo={b.activo} /> },
+  ];
+  return <div className="tc-stack" style={{ marginTop: 16 }}><Alert tono="info">Promedio calculado desde las compras recibidas en cada bodega. Los nuevos consumos conservan ese costo, redondeado a centavos. Al agotar las unidades, el promedio queda en cero.</Alert>
+    {datos.isLoading ? <LoadingState /> : datos.isError ? <Alert tono="danger" accion={<Button onClick={() => datos.refetch()}>Reintentar</Button>}>{mensajeDeError(datos.error)}</Alert> : <TablaCatalogo filas={datos.data ?? []} columnas={columnas} clave={b => b.bodegaId} vacio="El repuesto todavía no está asociado a una bodega." />}</div>;
 }
 function PreciosPanel({ id }: { id: number }) {
   const datos = useQuery({ queryKey: ["abastecimiento", "precios", id], queryFn: ({ signal }) => api.precios(id, signal) });

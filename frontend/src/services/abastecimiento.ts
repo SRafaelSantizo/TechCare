@@ -4,7 +4,7 @@ export interface Repuesto { repuestoId: number; categoriaId: number; categoria: 
 export interface Proveedor { proveedorId: number; nit: string; nombre: string; email: string | null; telefono: string | null; direccion: string | null; activo: boolean; revision: string }
 export interface Bodega { bodegaId: number; codigo: string; nombre: string; direccion: string | null; activo: boolean; revision: string }
 export interface OfertaProveedor { proveedorId: number; repuestoId: number; codigo: string; nombre: string; categoriaId: number; categoria: string; activo: boolean; precioVenta: number; codigoProveedor: string | null; revision: string }
-export interface RepuestoBodega { bodegaId: number; repuestoId: number; codigo: string; nombre: string; activo: boolean; stockMinimo: number; existencia: number }
+export interface RepuestoBodega { bodegaId: number; repuestoId: number; codigo: string; nombre: string; activo: boolean; stockMinimo: number; existencia: number; costoPromedio: string | null }
 export interface PrecioRepuesto { auditoriaId: number; fecha: string; costoAnterior: number; costoNuevo: number; precioAnterior: number; precioNuevo: number; registradoPor: string | null }
 export type RepuestoDatos = { categoriaId: number; codigo: string; nombre: string; descripcion: string | null; costoReferencia: string; precioVenta: string; activo: boolean; revision: string | null };
 export type ProveedorDatos = Omit<Proveedor, "proveedorId" | "revision"> & { revision: string | null };

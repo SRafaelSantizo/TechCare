@@ -160,3 +160,13 @@ https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp
 Referencias de la corrección SQL:
 https://learn.microsoft.com/sql/t-sql/language-elements/like-transact-sql
 https://learn.microsoft.com/sql/t-sql/queries/select-into-clause-transact-sql
+
+## Actualización con el bloque 30
+
+Una vez instalado `30_Compras_Procedimientos.sql`, el costo de inventario se
+calcula por bodega desde las entradas recibidas. El catálogo permite editar
+el precio de venta y consultar **Costos por bodega**; el costo de referencia
+legado permanece para compatibilidad y no admite modificaciones desde la API.
+Los casos 16, 54 y 55 del 27 actualizados cambian el precio de venta manteniendo
+el costo legado. La auditoría y la restauración del contexto siguen verificadas.
+Compras y recepción ya están disponibles; consultar `INTEGRACION_COMPRAS.md`.

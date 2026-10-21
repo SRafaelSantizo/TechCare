@@ -139,6 +139,10 @@ BEGIN
             THROW 52000,N'Los precios admiten valores desde cero y hasta dos decimales.',1;
         IF @CategoriaID IS NULL OR NOT EXISTS (SELECT 1 FROM dbo.CategoriaRepuesto WITH (HOLDLOCK) WHERE CategoriaID=@CategoriaID)
             THROW 52001,N'La categoría del repuesto no existe.',1;
+        -- Desde el bloque 30 el costo de inventario se calcula por bodega.
+        IF ((@RepuestoID IS NULL AND @CostoReferencia<>0)
+             OR (@RepuestoID IS NOT NULL AND EXISTS(SELECT 1 FROM dbo.Repuesto WHERE RepuestoID=@RepuestoID AND CostoReferencia<>@CostoReferencia)))
+            THROW 52000,N'El costo se calcula desde las compras recibidas por bodega. No se edita desde el catálogo.',1;
         IF @RepuestoID IS NULL
         BEGIN
             INSERT dbo.Repuesto(CategoriaID,Codigo,Nombre,Descripcion,CostoReferencia,PrecioVenta,Activo)

@@ -4,14 +4,14 @@ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional
 normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
 Clientes, equipos, órdenes, servicio técnico, facturación, pagos, entrega y los catálogos de
 abastecimiento tienen API e interfaz conectadas. El acceso usa las cuentas y roles de la BD,
-con login, sesión y cierre de sesión. Compras, inventario general, reportes y manuales con
+con login, sesión y cierre de sesión. Compras y recepción también están conectadas; inventario general, reportes y manuales con
 capturas aún deben completarse.
 
 Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
 La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
 las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
 Una instalación nueva con un maestro anterior debe incluir también las
-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega) y 26 (Abastecimiento).
+actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento) y 30 (Compras y costos por bodega).
 
 Administración permite consultar y registrar cuentas, empleados y roles desde
 una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
@@ -78,9 +78,10 @@ TasaImpuesto es una tasa de prueba configurable (0.1200); no constituye configur
   movimientos fechados antes de movimientos ya registrados en la misma pareja.
 - Las compras se reciben completas, una sola vez. Las pendientes no aumentan stock.
   Cada línea puede tener su propia bodega. No se implementan recepciones parciales.
-- El costo del consumo es el **costo de referencia congelado** en ese momento.
-  No implementa valoración por promedio ponderado o PEPS. PrecioUnitario conserva
-  la venta histórica; los valores de compras, consumos y facturas no se reescriben.
+- Desde el 30, el costo de cada consumo nuevo es el **promedio móvil de su bodega**,
+  congelado a centavos. Las entradas recalculan el promedio con seis decimales;
+  el catálogo ya no permite editar el costo. Compras, consumos y facturas históricos
+  conservan sus importes. No se incorpora PEPS ni revalorización de consumos pasados.
 - Factura conserva identificación fiscal, tasa histórica, fecha y estado. Sus líneas
   inmutables conservan conceptos, cantidades y precios. **Subtotal, Impuesto, Total,
   Pagado, Saldo y EstadoPago** se obtienen de `vFacturaSaldo`; no se editan a mano.
@@ -191,6 +192,7 @@ Documentos para el equipo:
 
 - `INTEGRACION_FACTURACION_ENTREGA.md`: caja, abonos, entrega y factura PDF detallada; scripts 23 y 24.
 - `INTEGRACION_ABASTECIMIENTO.md`: repuestos, categorías, proveedores, bodegas y asociaciones; scripts 26 y 27.
+- `INTEGRACION_COMPRAS.md`: compras pendientes, recepción, anulación y promedio por bodega; scripts 30 y 31.
 
 - `GUIA_TRIGGERS.md`: definición, inserted/deleted, ejemplo reversible y los 16 objetos.
 - `GUIA_GITHUB.md`: publicación privada con GitHub Desktop y trabajo por ramas.

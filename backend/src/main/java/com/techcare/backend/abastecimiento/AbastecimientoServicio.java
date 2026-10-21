@@ -34,6 +34,8 @@ public class AbastecimientoServicio {
     }
     public Repuesto guardarRepuesto(int actor,Integer id,AbastecimientoController.RepuestoDatos d) {
         revision(id,d.revision());
+        if(id==null&&d.costoReferencia().signum()!=0)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"El costo se calcula desde las compras recibidas por bodega. Registrá el repuesto con costo inicial cero.");
         return una(jdbc.queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",actor,id,d.categoriaId().intValueExact(),
                 d.codigo(),d.nombre(),d.descripcion(),d.costoReferencia(),d.precioVenta(),d.activo(),d.revision()),AbastecimientoServicio::repuesto);
     }
@@ -90,7 +92,7 @@ public class AbastecimientoServicio {
     private static Proveedor proveedor(Map<String,Object> r) { return new Proveedor(entero(r,"ProveedorID"),texto(r,"NIT"),texto(r,"Nombre"),texto(r,"Email"),texto(r,"Telefono"),texto(r,"Direccion"),activo(r),texto(r,"Revision")); }
     private static Bodega bodega(Map<String,Object> r) { return new Bodega(entero(r,"BodegaID"),texto(r,"Codigo"),texto(r,"Nombre"),texto(r,"Direccion"),activo(r),texto(r,"Revision")); }
     private static Oferta oferta(Map<String,Object> r) { return new Oferta(entero(r,"ProveedorID"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Nombre"),entero(r,"CategoriaID"),texto(r,"Categoria"),activo(r),decimal(r,"PrecioVenta"),texto(r,"CodigoProveedor"),texto(r,"Revision")); }
-    private static RepuestoBodega repuestoBodega(Map<String,Object> r) { return new RepuestoBodega(entero(r,"BodegaID"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Nombre"),activo(r),entero(r,"StockMinimo"),largo(r,"Existencia")); }
+    private static RepuestoBodega repuestoBodega(Map<String,Object> r) { return new RepuestoBodega(entero(r,"BodegaID"),entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Nombre"),activo(r),entero(r,"StockMinimo"),largo(r,"Existencia"),texto(r,"CostoPromedio")); }
     private static String texto(Map<String,Object> r,String k) { return r.get(k)==null?null:r.get(k).toString(); }
     private static Integer entero(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.intValue():null; }
     private static Long largo(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.longValue():null; }
@@ -105,6 +107,6 @@ public class AbastecimientoServicio {
     public record Proveedor(Integer proveedorId,String nit,String nombre,String email,String telefono,String direccion,boolean activo,String revision) {}
     public record Bodega(Integer bodegaId,String codigo,String nombre,String direccion,boolean activo,String revision) {}
     public record Oferta(Integer proveedorId,Integer repuestoId,String codigo,String nombre,Integer categoriaId,String categoria,boolean activo,BigDecimal precioVenta,String codigoProveedor,String revision) {}
-    public record RepuestoBodega(Integer bodegaId,Integer repuestoId,String codigo,String nombre,boolean activo,Integer stockMinimo,Long existencia) {}
+    public record RepuestoBodega(Integer bodegaId,Integer repuestoId,String codigo,String nombre,boolean activo,Integer stockMinimo,Long existencia,String costoPromedio) {}
     public record Precio(Long auditoriaId,OffsetDateTime fecha,BigDecimal costoAnterior,BigDecimal costoNuevo,BigDecimal precioAnterior,BigDecimal precioNuevo,String registradoPor) {}
 }

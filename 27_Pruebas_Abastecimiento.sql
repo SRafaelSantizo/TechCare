@@ -241,8 +241,8 @@ BEGIN
         IF @Caso=15 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,NULL,@Categoria,N'REP-漢字',N'Prueba',NULL,1,1,1;
         IF @Caso=16
         BEGIN
-            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,13.50,30,1,@RevR;
-            IF NOT EXISTS(SELECT 1 FROM dbo.AuditoriaPrecioRepuesto WHERE RepuestoID=@Repuesto AND CostoAnterior=12.25 AND CostoNuevo=13.50
+            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,12.25,30,1,@RevR;
+            IF NOT EXISTS(SELECT 1 FROM dbo.AuditoriaPrecioRepuesto WHERE RepuestoID=@Repuesto AND CostoAnterior=12.25 AND CostoNuevo=12.25
                           AND PrecioAnterior=25.50 AND PrecioNuevo=30 AND UsuarioAplicacionID=@Bodeguero)
                 THROW 52091,N'La auditoría no conservó valores y usuario.',1;
         END;
@@ -375,7 +375,7 @@ BEGIN
             INSERT #ResultadoOrden EXEC dbo.spUsarRepuestoOrden @Tec1,@Orden,@Bodega,@Repuesto,1,25.50;
             INSERT #ResultadoOrden EXEC dbo.spFinalizarReparacionOrden @Tec1,@Orden;
             SET @Codigo='FACT-'+@Sufijo;EXEC dbo.spGenerarFactura @Orden,@Codigo,@Admin,@Factura OUTPUT;
-            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,13.50,30,1,@RevR;
+            INSERT #Repuestos EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@CodigoR,N'Fuente de prueba ñ',NULL,12.25,30,1,@RevR;
             IF NOT EXISTS(SELECT 1 FROM dbo.ReparacionRepuesto rr JOIN dbo.Reparacion r ON r.ReparacionID=rr.ReparacionID JOIN dbo.Diagnostico d ON d.DiagnosticoID=r.DiagnosticoID
                           WHERE d.OrdenID=@Orden AND rr.CostoUnitario=12.25 AND rr.PrecioUnitario=25.50)
                OR NOT EXISTS(SELECT 1 FROM dbo.FacturaDetalle WHERE FacturaID=@Factura AND TipoConcepto='REP' AND PrecioUnitario=25.50)
@@ -383,7 +383,7 @@ BEGIN
                OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos+1
                 THROW 52091,N'El cambio reescribió valores históricos.',1;
         END;
-        IF @Caso=55 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@ExtraCodigo,N'Duplicado',NULL,13.50,30,1,@RevR;
+        IF @Caso=55 EXEC dbo.spGuardarRepuestoGestion @Bodeguero,@Repuesto,@Categoria,@ExtraCodigo,N'Duplicado',NULL,12.25,30,1,@RevR;
         IF @Caso=56
         BEGIN
             SET @Codigo='R-'+REPLICATE('A',19)+'-'+@Sufijo;

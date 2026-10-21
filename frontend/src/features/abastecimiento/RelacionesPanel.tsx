@@ -7,6 +7,7 @@ import { LoadingState } from "../../components/ui/StateView";
 import { type Columna } from "../../components/ui/DataTable";
 import { abastecimientoApi as api, type Bodega, type Proveedor, type OfertaProveedor, type RepuestoBodega } from "../../services/abastecimiento";
 import { esApiError, mensajeDeError } from "../../services/errors";
+import { quetzales } from "../../services/compras";
 import { numero } from "../../utils/format";
 import { EstadoCatalogo, TablaCatalogo, useActualizarAbastecimiento } from "./compartidos";
 
@@ -48,6 +49,7 @@ export function RelacionesPanel({ padre, onOcupado }: { padre: Bodega | Proveedo
     { clave: "repuesto", encabezado: "Repuesto", render: r => <><strong>{r.codigo}</strong><div style={{ overflowWrap: "anywhere" }}>{r.nombre}</div></> },
     ...(proveedor ? [{ clave: "referencia", encabezado: "Código del proveedor", render: (r: Relacion) => "codigoProveedor" in r ? r.codigoProveedor || "—" : "—" }] : [
       { clave: "minimo", encabezado: "Mínimo", numerica: true, render: (r: Relacion) => "stockMinimo" in r ? numero(r.stockMinimo) : "—" },
+      { clave: "promedio", encabezado: "Costo promedio", numerica: true, render: (r: Relacion) => "costoPromedio" in r ? quetzales(r.costoPromedio, 6) : "—" },
       { clave: "existencia", encabezado: "Existencia", numerica: true, render: (r: Relacion) => "existencia" in r ? numero(r.existencia) : "—" },
     ]),
     { clave: "activo", encabezado: "Estado", render: r => <EstadoCatalogo activo={r.activo} /> },

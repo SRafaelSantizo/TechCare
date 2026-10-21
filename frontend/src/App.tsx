@@ -11,11 +11,14 @@ import { OrdenesListPage } from "./features/ordenes/OrdenesListPage";
 import { OrdenNuevaPage } from "./features/ordenes/OrdenNuevaPage";
 import { OrdenExpedientePage } from "./features/ordenes/OrdenExpedientePage";
 import { InventarioPage } from "./features/inventario/InventarioPage";
-import { ComprasPage } from "./features/compras/ComprasPage";
+
 import { ReportesPage } from "./features/reportes/ReportesPage";
 import { AdministracionPage } from "./features/administracion/AdministracionPage";
 import { IntegracionPage } from "./features/integracion/IntegracionPage";
 import { LoginPage } from "./features/auth/LoginPage";
+
+const ComprasPage = lazy(() => import("./features/compras/ComprasPage").then(m => ({ default: m.ComprasPage })));
+const CompraDetallePage = lazy(() => import("./features/compras/CompraDetallePage").then(m => ({ default: m.CompraDetallePage })));
 
 const FacturacionPage = lazy(() => import("./features/facturacion/FacturacionPage").then(m => ({ default: m.FacturacionPage })));
 
@@ -45,7 +48,8 @@ export default function App() {
         <Route path="/inventario" element={<InventarioPage />} />
         <Route path="/repuestos" element={<Suspense fallback={<LoadingState titulo="Cargando repuestos…" />}><RepuestosPage /></Suspense>} />
         <Route path="/bodegas" element={<Suspense fallback={<LoadingState titulo="Cargando bodegas…" />}><BodegasPage /></Suspense>} />
-        <Route path="/compras" element={<ComprasPage />} />
+        <Route path="/compras" element={<Suspense fallback={<LoadingState titulo="Cargando compras…" />}><ComprasPage /></Suspense>} />
+        <Route path="/compras/:id" element={<Suspense fallback={<LoadingState titulo="Cargando compra…" />}><CompraDetallePage /></Suspense>} />
         <Route path="/proveedores" element={<Suspense fallback={<LoadingState titulo="Cargando proveedores…" />}><ProveedoresPage /></Suspense>} />
 
         <Route path="/facturacion" element={<Suspense fallback={<LoadingState titulo="Cargando caja…" />}><FacturacionPage /></Suspense>} />

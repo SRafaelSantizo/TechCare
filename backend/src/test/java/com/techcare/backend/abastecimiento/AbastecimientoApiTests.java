@@ -77,11 +77,11 @@ class AbastecimientoApiTests {
     }
     @ParameterizedTest @ValueSource(strings={"ADMIN","BODEGA"})
     void crearRepuestoUsaActorAutenticadoYConservaUnicodeYCentavos(String rol) throws Exception {
-        mvc.perform(post("/api/repuestos").with(actor(rol)).with(csrf()).contentType("application/json").content(REP))
+        mvc.perform(post("/api/repuestos").with(actor(rol)).with(csrf()).contentType("application/json").content(REP.replace("12.25","0")))
                 .andExpect(status().isCreated()).andExpect(header().string("Location","/api/repuestos/9"))
                 .andExpect(jsonPath("$.nombre").value("Fuente ñ 漢字")).andExpect(jsonPath("$.precioVenta").value(25.5))
                 .andExpect(content().string(not(containsString("PRIVADO"))));
-        verify(jdbc).queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",42,null,3,"REP-9","Fuente ñ 漢字","Descripción ñ",new BigDecimal("12.25"),new BigDecimal("25.50"),true,null);
+        verify(jdbc).queryForList("EXEC dbo.spGuardarRepuestoGestion ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",42,null,3,"REP-9","Fuente ñ 漢字","Descripción ñ",new BigDecimal("0"),new BigDecimal("25.50"),true,null);
     }
     @Test void actualizacionEnviaLaRevisionLeida() throws Exception {
         mvc.perform(put("/api/repuestos/9").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(revisado(REP))).andExpect(status().isOk());
@@ -119,6 +119,10 @@ class AbastecimientoApiTests {
     }
     @Test void costoYPrecioCeroSonValidos() throws Exception {
         mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(REP.replace("12.25","0").replace("25.50","0"))).andExpect(status().isCreated());
+    }
+    @Test void costoManualPositivoNoSeAceptaAlCrearUnRepuesto() throws Exception {
+        mvc.perform(post("/api/repuestos").with(actor("BODEGA")).with(csrf()).contentType("application/json").content(REP)).andExpect(status().isBadRequest());
+        verifyNoInteractions(jdbc);
     }
     @ParameterizedTest @ValueSource(strings={"-1","1.5","2147483648","null"})
     void minimoFraccionarioOInvalidoNoSeTrunca(String valor) throws Exception {
