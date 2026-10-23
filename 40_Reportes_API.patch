@@ -1,0 +1,1907 @@
+diff --git a/38_Reportes_Procedimientos.sql b/38_Reportes_Procedimientos.sql
+new file mode 100644
+index 0000000..9bf714a
+--- /dev/null
++++ b/38_Reportes_Procedimientos.sql
+@@ -0,0 +1,555 @@
++-- Reportes R01-R12 para API. Instalar después de 33 y 36. Sólo crea objetos de consulta.
++USE [TechCare];
++GO
++SET NOCOUNT ON;
++IF OBJECT_ID(N'dbo.vKardexApi',N'V') IS NULL
++    THROW 52390,N'Ejecutá primero 33_Inventario_Procedimientos.sql y 36_Corregir_Redondeo_Costos.sql.',1;
++GO
++CREATE OR ALTER FUNCTION dbo.fnPuedeConsultarReporteApi(@Actor int,@Codigo nvarchar(3)) RETURNS bit AS
++BEGIN
++ RETURN CASE WHEN dbo.fnTieneRol(@Actor,'ADMIN')=1 THEN 1
++ WHEN dbo.fnTieneRol(@Actor,'RECEPCION')=1 AND @Codigo IN (N'R01',N'R02',N'R03') THEN 1
++ WHEN dbo.fnTieneRol(@Actor,'TECNICO')=1 AND @Codigo IN (N'R01',N'R03',N'R04',N'R05') THEN 1
++ WHEN dbo.fnTieneRol(@Actor,'BODEGA')=1 AND @Codigo IN (N'R05',N'R06',N'R07',N'R08',N'R09') THEN 1
++ WHEN dbo.fnTieneRol(@Actor,'CAJA')=1 AND @Codigo IN (N'R10',N'R11') THEN 1
++ ELSE 0 END;
++END;
++GO
++CREATE OR ALTER FUNCTION dbo.fnTecnicoLimitadoReporteApi(@Actor int,@Codigo nvarchar(3)) RETURNS bit AS
++BEGIN
++ RETURN CASE WHEN dbo.fnTieneRol(@Actor,'ADMIN')=1 THEN 0
++ WHEN @Codigo IN(N'R01',N'R03') AND dbo.fnTieneRol(@Actor,'RECEPCION')=1 THEN 0
++ WHEN @Codigo=N'R05' AND dbo.fnTieneRol(@Actor,'BODEGA')=1 THEN 0
++ WHEN @Codigo IN(N'R01',N'R03',N'R04',N'R05') THEN 1 ELSE 0 END;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spCatalogoReportesApi @UsuarioActorID int AS
++BEGIN
++ SET NOCOUNT ON;
++ IF dbo.fnTieneRol(@UsuarioActorID,'ADMIN')=0 AND dbo.fnTieneRol(@UsuarioActorID,'RECEPCION')=0
++ AND dbo.fnTieneRol(@UsuarioActorID,'TECNICO')=0 AND dbo.fnTieneRol(@UsuarioActorID,'BODEGA')=0 AND dbo.fnTieneRol(@UsuarioActorID,'CAJA')=0
++    THROW 52304,N'Se requiere una cuenta y empleado activos con acceso a reportes.',1;
++ SELECT Codigo FROM (VALUES (N'R01'),(N'R02'),(N'R03'),(N'R04'),(N'R05'),(N'R06'),(N'R07'),(N'R08'),(N'R09'),(N'R10'),(N'R11'),(N'R12'))r(Codigo)
++ WHERE dbo.fnPuedeConsultarReporteApi(@UsuarioActorID,Codigo)=1 ORDER BY Codigo;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spValidarReporteApi
++ @UsuarioActorID int,@Codigo nvarchar(max),@Desde date=NULL,@Hasta date=NULL,@ClienteID int=NULL,@TecnicoID int=NULL,
++ @BodegaID int=NULL,@ProveedorID int=NULL,@OrdenID int=NULL,@CategoriaID int=NULL,@RepuestoID int=NULL,
++ @Estado nvarchar(max)=NULL,@Serie nvarchar(max)=NULL,@Pagina int=1,@Tamano int=25
++AS
++BEGIN
++ SET NOCOUNT ON;
++ IF @Codigo IS NULL OR DATALENGTH(@Codigo)<>6 OR @Codigo NOT IN(N'R01',N'R02',N'R03',N'R04',N'R05',N'R06',N'R07',N'R08',N'R09',N'R10',N'R11',N'R12')
++    THROW 52302,N'El reporte no existe.',1;
++ IF dbo.fnPuedeConsultarReporteApi(@UsuarioActorID,@Codigo)=0 THROW 52304,N'Tu usuario no tiene permiso para este reporte.',1;
++ IF @ClienteID<=0 OR @TecnicoID<=0 OR @BodegaID<=0 OR @ProveedorID<=0 OR @OrdenID<=0 OR @CategoriaID<=0 OR @RepuestoID<=0
++ OR @Desde>@Hasta OR DATALENGTH(@Serie)>160 OR DATALENGTH(@Estado)>60
++ OR @Pagina IS NULL OR @Pagina<=0 OR @Tamano IS NULL OR @Tamano NOT BETWEEN 1 AND 100
++    THROW 52300,N'Revisá los filtros, fechas e identificadores y el tamaño de página (1 a 100).',1;
++ IF @Desde IS NOT NULL AND @Codigo NOT IN (N'R01',N'R04',N'R08',N'R09',N'R11') THROW 52300,N'Este reporte no admite el filtro desde.',1;
++ IF @Hasta IS NOT NULL AND @Codigo NOT IN (N'R01',N'R04',N'R08',N'R09',N'R11') THROW 52300,N'Este reporte no admite el filtro hasta.',1;
++ IF @ClienteID IS NOT NULL AND @Codigo NOT IN (N'R02',N'R10',N'R11',N'R12') THROW 52300,N'Este reporte no admite el filtro clienteId.',1;
++ IF @TecnicoID IS NOT NULL AND @Codigo NOT IN (N'R01',N'R04',N'R05') THROW 52300,N'Este reporte no admite el filtro tecnicoId.',1;
++ IF @BodegaID IS NOT NULL AND @Codigo NOT IN (N'R05',N'R06',N'R07',N'R08',N'R09') THROW 52300,N'Este reporte no admite el filtro bodegaId.',1;
++ IF @ProveedorID IS NOT NULL AND @Codigo NOT IN (N'R08') THROW 52300,N'Este reporte no admite el filtro proveedorId.',1;
++ IF @OrdenID IS NOT NULL AND @Codigo NOT IN (N'R05',N'R12') THROW 52300,N'Este reporte no admite el filtro ordenId.',1;
++ IF @CategoriaID IS NOT NULL AND @Codigo NOT IN (N'R06',N'R07') THROW 52300,N'Este reporte no admite el filtro categoriaId.',1;
++ IF @RepuestoID IS NOT NULL AND @Codigo NOT IN (N'R06',N'R07',N'R09') THROW 52300,N'Este reporte no admite el filtro repuestoId.',1;
++ IF @Estado IS NOT NULL AND @Codigo NOT IN (N'R01',N'R08') THROW 52300,N'Este reporte no admite el filtro estado.',1;
++ IF @Serie IS NOT NULL AND @Codigo NOT IN (N'R03') THROW 52300,N'Este reporte no admite el filtro serie.',1;
++ IF @Estado IS NOT NULL AND ((@Codigo=N'R01' AND NOT EXISTS(SELECT 1 FROM dbo.EstadoOrden WHERE Codigo=@Estado))
++ OR (@Codigo=N'R08' AND @Estado NOT IN(N'PENDIENTE',N'RECIBIDA',N'ANULADA')))
++    THROW 52300,N'El estado no es válido para este reporte.',1;
++ IF dbo.fnTecnicoLimitadoReporteApi(@UsuarioActorID,@Codigo)=1 AND @TecnicoID IS NOT NULL AND @TecnicoID<>@UsuarioActorID
++    THROW 52304,N'El técnico consulta únicamente su propio trabajo.',1;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spConsultarReporteApi
++ @UsuarioActorID int,@Codigo nvarchar(max),@Desde date=NULL,@Hasta date=NULL,@ClienteID int=NULL,@TecnicoID int=NULL,
++ @BodegaID int=NULL,@ProveedorID int=NULL,@OrdenID int=NULL,@CategoriaID int=NULL,@RepuestoID int=NULL,
++ @Estado nvarchar(max)=NULL,@Serie nvarchar(max)=NULL,@SoloResumen bit=0,@Pagina int=1,@Tamano int=25
++AS
++BEGIN
++ SET NOCOUNT ON;
++ EXEC dbo.spValidarReporteApi @UsuarioActorID,@Codigo,@Desde,@Hasta,@ClienteID,@TecnicoID,@BodegaID,@ProveedorID,@OrdenID,@CategoriaID,@RepuestoID,@Estado,@Serie,@Pagina,@Tamano;
++ IF @SoloResumen IS NULL THROW 52300,N'Indicá el modo de consulta.',1;
++ DECLARE @Limitado int=CASE WHEN dbo.fnTecnicoLimitadoReporteApi(@UsuarioActorID,@Codigo)=1 THEN @UsuarioActorID ELSE NULL END;
++ IF @Codigo=N'R01'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT o.OrdenID,o.NumeroOrden,o.FechaIngreso,o.Estado,o.Prioridad,o.Cliente,o.NumeroSerie,o.Tecnico,o.ReparacionID,p.Nivel
++ FROM dbo.vOrdenAcceso o JOIN dbo.Prioridad p ON p.Codigo=o.PrioridadCodigo
++ WHERE o.EsFinal=0 AND (@Estado IS NULL OR o.EstadoCodigo=@Estado)
++ AND (@TecnicoID IS NULL OR o.UsuarioTecnicoID=@TecnicoID) AND (@Limitado IS NULL OR o.UsuarioTecnicoID=@Limitado)
++ AND (@Desde IS NULL OR o.FechaIngreso>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,o.FechaIngreso)<=@Hasta)
++   )
++   SELECT COUNT_BIG(*) AS Total FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT o.OrdenID,o.NumeroOrden,o.FechaIngreso,o.Estado,o.Prioridad,o.Cliente,o.NumeroSerie,o.Tecnico,o.ReparacionID,p.Nivel
++ FROM dbo.vOrdenAcceso o JOIN dbo.Prioridad p ON p.Codigo=o.PrioridadCodigo
++ WHERE o.EsFinal=0 AND (@Estado IS NULL OR o.EstadoCodigo=@Estado)
++ AND (@TecnicoID IS NULL OR o.UsuarioTecnicoID=@TecnicoID) AND (@Limitado IS NULL OR o.UsuarioTecnicoID=@Limitado)
++ AND (@Desde IS NULL OR o.FechaIngreso>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,o.FechaIngreso)<=@Hasta)
++   )
++   SELECT OrdenID,NumeroOrden,FechaIngreso,Estado,Prioridad,Cliente,NumeroSerie,Tecnico,ReparacionID FROM Datos ORDER BY Nivel DESC,FechaIngreso,OrdenID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R02'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT c.ClienteID,c.NIT,c.Nombre AS Cliente,e.NumeroSerie,o.OrdenID,o.NumeroOrden,o.FechaIngreso,o.EstadoCodigo,
++ d.Descripcion AS Diagnostico,r.DescripcionTrabajo,f.NumeroFactura,f.Total,f.Saldo,en.Fecha AS FechaEntrega,e.EquipoID
++ FROM dbo.Cliente c LEFT JOIN dbo.Equipo e ON e.ClienteID=c.ClienteID
++ LEFT JOIN dbo.OrdenServicio o ON o.EquipoID=e.EquipoID LEFT JOIN dbo.Diagnostico d ON d.OrdenID=o.OrdenID
++ LEFT JOIN dbo.Reparacion r ON r.DiagnosticoID=d.DiagnosticoID LEFT JOIN dbo.vFacturaSaldo f ON f.OrdenID=o.OrdenID
++ LEFT JOIN dbo.Entrega en ON en.OrdenID=o.OrdenID WHERE (@ClienteID IS NULL OR c.ClienteID=@ClienteID)
++   )
++   SELECT COUNT_BIG(*) AS Total FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT c.ClienteID,c.NIT,c.Nombre AS Cliente,e.NumeroSerie,o.OrdenID,o.NumeroOrden,o.FechaIngreso,o.EstadoCodigo,
++ d.Descripcion AS Diagnostico,r.DescripcionTrabajo,f.NumeroFactura,f.Total,f.Saldo,en.Fecha AS FechaEntrega,e.EquipoID
++ FROM dbo.Cliente c LEFT JOIN dbo.Equipo e ON e.ClienteID=c.ClienteID
++ LEFT JOIN dbo.OrdenServicio o ON o.EquipoID=e.EquipoID LEFT JOIN dbo.Diagnostico d ON d.OrdenID=o.OrdenID
++ LEFT JOIN dbo.Reparacion r ON r.DiagnosticoID=d.DiagnosticoID LEFT JOIN dbo.vFacturaSaldo f ON f.OrdenID=o.OrdenID
++ LEFT JOIN dbo.Entrega en ON en.OrdenID=o.OrdenID WHERE (@ClienteID IS NULL OR c.ClienteID=@ClienteID)
++   )
++   SELECT ClienteID,NIT,Cliente,NumeroSerie,OrdenID,NumeroOrden,FechaIngreso,EstadoCodigo,Diagnostico,DescripcionTrabajo,NumeroFactura,Total,Saldo,FechaEntrega FROM Datos ORDER BY ClienteID,EquipoID,FechaIngreso DESC,OrdenID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R03'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT e.EquipoID,e.NumeroSerie,c.Nombre AS Cliente,te.Nombre AS Tipo,ma.Nombre AS Marca,mo.Nombre AS Modelo,
++ o.OrdenID,o.NumeroOrden,o.EstadoCodigo,o.FechaDiagnostico,o.DescripcionDiagnostico AS Diagnostico,
++ o.FechaInicioReparacion AS FechaInicio,o.FechaFinReparacion AS FechaFin,o.DescripcionTrabajo,o.Tecnico
++ FROM dbo.Equipo e JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID
++ JOIN dbo.ModeloEquipo mo ON mo.ModeloEquipoID=e.ModeloEquipoID JOIN dbo.Marca ma ON ma.MarcaID=mo.MarcaID
++ JOIN dbo.TipoEquipo te ON te.TipoEquipoID=mo.TipoEquipoID LEFT JOIN dbo.vOrdenAcceso o ON o.EquipoID=e.EquipoID
++ WHERE (@Serie IS NULL OR e.NumeroSerie=@Serie) AND (@Limitado IS NULL OR o.UsuarioTecnicoID=@Limitado)
++   )
++   SELECT COUNT_BIG(*) AS Total FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT e.EquipoID,e.NumeroSerie,c.Nombre AS Cliente,te.Nombre AS Tipo,ma.Nombre AS Marca,mo.Nombre AS Modelo,
++ o.OrdenID,o.NumeroOrden,o.EstadoCodigo,o.FechaDiagnostico,o.DescripcionDiagnostico AS Diagnostico,
++ o.FechaInicioReparacion AS FechaInicio,o.FechaFinReparacion AS FechaFin,o.DescripcionTrabajo,o.Tecnico
++ FROM dbo.Equipo e JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID
++ JOIN dbo.ModeloEquipo mo ON mo.ModeloEquipoID=e.ModeloEquipoID JOIN dbo.Marca ma ON ma.MarcaID=mo.MarcaID
++ JOIN dbo.TipoEquipo te ON te.TipoEquipoID=mo.TipoEquipoID LEFT JOIN dbo.vOrdenAcceso o ON o.EquipoID=e.EquipoID
++ WHERE (@Serie IS NULL OR e.NumeroSerie=@Serie) AND (@Limitado IS NULL OR o.UsuarioTecnicoID=@Limitado)
++   )
++   SELECT EquipoID,NumeroSerie,Cliente,Tipo,Marca,Modelo,OrdenID,NumeroOrden,EstadoCodigo,FechaDiagnostico,Diagnostico,FechaInicio,FechaFin,DescripcionTrabajo,Tecnico FROM Datos ORDER BY NumeroSerie,EquipoID,OrdenID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R04'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT CONVERT(varchar(12),'DIAGNOSTICO') AS Proceso,d.DiagnosticoID AS RegistroID,d.Fecha,o.OrdenID,o.NumeroOrden,o.NumeroSerie,o.Cliente,
++ d.UsuarioTecnicoID AS UsuarioID,CONCAT(em.Nombres,N' ',em.Apellidos) AS Tecnico,d.Descripcion AS Trabajo,d.CostoManoObraEstimado AS ManoObra
++ FROM dbo.Diagnostico d JOIN dbo.vOrdenAcceso o ON o.OrdenID=d.OrdenID JOIN dbo.Usuario u ON u.UsuarioID=d.UsuarioTecnicoID
++ JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID WHERE (@TecnicoID IS NULL OR d.UsuarioTecnicoID=@TecnicoID)
++ AND (@Limitado IS NULL OR (o.UsuarioTecnicoID=@Limitado AND d.UsuarioTecnicoID=@Limitado)) AND (@Desde IS NULL OR d.Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,d.Fecha)<=@Hasta)
++ UNION ALL
++ SELECT 'REPARACION',r.ReparacionID,r.FechaInicio,o.OrdenID,o.NumeroOrden,o.NumeroSerie,o.Cliente,r.UsuarioTecnicoID,
++ CONCAT(em.Nombres,N' ',em.Apellidos),r.DescripcionTrabajo,r.CostoManoObra
++ FROM dbo.Reparacion r JOIN dbo.Diagnostico d ON d.DiagnosticoID=r.DiagnosticoID JOIN dbo.vOrdenAcceso o ON o.OrdenID=d.OrdenID
++ JOIN dbo.Usuario u ON u.UsuarioID=r.UsuarioTecnicoID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ WHERE (@TecnicoID IS NULL OR r.UsuarioTecnicoID=@TecnicoID) AND (@Limitado IS NULL OR (o.UsuarioTecnicoID=@Limitado AND r.UsuarioTecnicoID=@Limitado))
++ AND (@Desde IS NULL OR r.FechaInicio>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,r.FechaInicio)<=@Hasta)
++   )
++   SELECT COUNT_BIG(*) AS Total FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT CONVERT(varchar(12),'DIAGNOSTICO') AS Proceso,d.DiagnosticoID AS RegistroID,d.Fecha,o.OrdenID,o.NumeroOrden,o.NumeroSerie,o.Cliente,
++ d.UsuarioTecnicoID AS UsuarioID,CONCAT(em.Nombres,N' ',em.Apellidos) AS Tecnico,d.Descripcion AS Trabajo,d.CostoManoObraEstimado AS ManoObra
++ FROM dbo.Diagnostico d JOIN dbo.vOrdenAcceso o ON o.OrdenID=d.OrdenID JOIN dbo.Usuario u ON u.UsuarioID=d.UsuarioTecnicoID
++ JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID WHERE (@TecnicoID IS NULL OR d.UsuarioTecnicoID=@TecnicoID)
++ AND (@Limitado IS NULL OR (o.UsuarioTecnicoID=@Limitado AND d.UsuarioTecnicoID=@Limitado)) AND (@Desde IS NULL OR d.Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,d.Fecha)<=@Hasta)
++ UNION ALL
++ SELECT 'REPARACION',r.ReparacionID,r.FechaInicio,o.OrdenID,o.NumeroOrden,o.NumeroSerie,o.Cliente,r.UsuarioTecnicoID,
++ CONCAT(em.Nombres,N' ',em.Apellidos),r.DescripcionTrabajo,r.CostoManoObra
++ FROM dbo.Reparacion r JOIN dbo.Diagnostico d ON d.DiagnosticoID=r.DiagnosticoID JOIN dbo.vOrdenAcceso o ON o.OrdenID=d.OrdenID
++ JOIN dbo.Usuario u ON u.UsuarioID=r.UsuarioTecnicoID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ WHERE (@TecnicoID IS NULL OR r.UsuarioTecnicoID=@TecnicoID) AND (@Limitado IS NULL OR (o.UsuarioTecnicoID=@Limitado AND r.UsuarioTecnicoID=@Limitado))
++ AND (@Desde IS NULL OR r.FechaInicio>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,r.FechaInicio)<=@Hasta)
++   )
++   SELECT Proceso,RegistroID,Fecha,OrdenID,NumeroOrden,NumeroSerie,Cliente,UsuarioID,Tecnico,Trabajo,ManoObra FROM Datos ORDER BY Tecnico,Fecha,Proceso,RegistroID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R05'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT o.OrdenID,o.NumeroOrden,CONCAT(em.Nombres,N' ',em.Apellidos) AS Tecnico,b.Nombre AS Bodega,p.Codigo,p.Nombre AS Repuesto,
++ rr.Cantidad,rr.CostoUnitario,rr.PrecioUnitario,CONVERT(decimal(28,2),CONVERT(decimal(10,0),rr.Cantidad)*rr.CostoUnitario) AS CostoHistorico,
++ CONVERT(decimal(28,2),CONVERT(decimal(10,0),rr.Cantidad)*rr.PrecioUnitario) AS VentaHistorica,m.MovimientoID,m.Fecha
++ FROM dbo.ReparacionRepuesto rr JOIN dbo.vOrdenAcceso o ON o.ReparacionID=rr.ReparacionID
++ JOIN dbo.Usuario u ON u.UsuarioID=o.UsuarioTecnicoID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ JOIN dbo.Bodega b ON b.BodegaID=rr.BodegaID JOIN dbo.Repuesto p ON p.RepuestoID=rr.RepuestoID
++ JOIN dbo.MovimientoInventario m ON m.ReparacionID=rr.ReparacionID AND m.LineaReparacion=rr.Linea
++ WHERE (@OrdenID IS NULL OR o.OrdenID=@OrdenID) AND (@TecnicoID IS NULL OR o.UsuarioTecnicoID=@TecnicoID)
++ AND (@BodegaID IS NULL OR b.BodegaID=@BodegaID) AND (@Limitado IS NULL OR o.UsuarioTecnicoID=@Limitado)
++   )
++   SELECT COUNT_BIG(*) AS Total,COALESCE(SUM(CostoHistorico),0) AS CostoHistoricoTotal,COALESCE(SUM(VentaHistorica),0) AS VentaHistoricaTotal FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT o.OrdenID,o.NumeroOrden,CONCAT(em.Nombres,N' ',em.Apellidos) AS Tecnico,b.Nombre AS Bodega,p.Codigo,p.Nombre AS Repuesto,
++ rr.Cantidad,rr.CostoUnitario,rr.PrecioUnitario,CONVERT(decimal(28,2),CONVERT(decimal(10,0),rr.Cantidad)*rr.CostoUnitario) AS CostoHistorico,
++ CONVERT(decimal(28,2),CONVERT(decimal(10,0),rr.Cantidad)*rr.PrecioUnitario) AS VentaHistorica,m.MovimientoID,m.Fecha
++ FROM dbo.ReparacionRepuesto rr JOIN dbo.vOrdenAcceso o ON o.ReparacionID=rr.ReparacionID
++ JOIN dbo.Usuario u ON u.UsuarioID=o.UsuarioTecnicoID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ JOIN dbo.Bodega b ON b.BodegaID=rr.BodegaID JOIN dbo.Repuesto p ON p.RepuestoID=rr.RepuestoID
++ JOIN dbo.MovimientoInventario m ON m.ReparacionID=rr.ReparacionID AND m.LineaReparacion=rr.Linea
++ WHERE (@OrdenID IS NULL OR o.OrdenID=@OrdenID) AND (@TecnicoID IS NULL OR o.UsuarioTecnicoID=@TecnicoID)
++ AND (@BodegaID IS NULL OR b.BodegaID=@BodegaID) AND (@Limitado IS NULL OR o.UsuarioTecnicoID=@Limitado)
++   )
++   SELECT OrdenID,NumeroOrden,Tecnico,Bodega,Codigo,Repuesto,Cantidad,CostoUnitario,PrecioUnitario,CostoHistorico,VentaHistorica,MovimientoID,Fecha FROM Datos ORDER BY OrdenID,MovimientoID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R06'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT i.BodegaID,i.Bodega,i.Categoria,i.Codigo,i.Repuesto,i.Existencia,i.StockMinimo,i.Faltante,i.EstadoStock,
++ i.CostoPromedio,i.ValorExistencia,i.BodegaActiva,i.RepuestoActivo,i.RepuestoID
++ FROM dbo.vInventarioApi i WHERE (@BodegaID IS NULL OR i.BodegaID=@BodegaID)
++ AND (@CategoriaID IS NULL OR i.CategoriaID=@CategoriaID) AND (@RepuestoID IS NULL OR i.RepuestoID=@RepuestoID)
++   )
++   SELECT COUNT_BIG(*) AS Total,COALESCE(SUM(ValorExistencia),0) AS ValorTotal FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT i.BodegaID,i.Bodega,i.Categoria,i.Codigo,i.Repuesto,i.Existencia,i.StockMinimo,i.Faltante,i.EstadoStock,
++ i.CostoPromedio,i.ValorExistencia,i.BodegaActiva,i.RepuestoActivo,i.RepuestoID
++ FROM dbo.vInventarioApi i WHERE (@BodegaID IS NULL OR i.BodegaID=@BodegaID)
++ AND (@CategoriaID IS NULL OR i.CategoriaID=@CategoriaID) AND (@RepuestoID IS NULL OR i.RepuestoID=@RepuestoID)
++   )
++   SELECT BodegaID,Bodega,Categoria,Codigo,Repuesto,Existencia,StockMinimo,Faltante,EstadoStock,CostoPromedio,ValorExistencia,BodegaActiva,RepuestoActivo FROM Datos ORDER BY Bodega,Categoria,Repuesto,BodegaID,RepuestoID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R07'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT i.BodegaID,i.Bodega,i.Categoria,i.Codigo,i.Repuesto,i.Existencia,i.StockMinimo,i.Faltante,i.EstadoStock,
++ i.CostoPromedio,i.ValorExistencia,i.BodegaActiva,i.RepuestoActivo,i.RepuestoID
++ FROM dbo.vInventarioApi i WHERE (@BodegaID IS NULL OR i.BodegaID=@BodegaID)
++ AND (@CategoriaID IS NULL OR i.CategoriaID=@CategoriaID) AND (@RepuestoID IS NULL OR i.RepuestoID=@RepuestoID) AND i.Existencia<=i.StockMinimo
++   )
++   SELECT COUNT_BIG(*) AS Total FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT i.BodegaID,i.Bodega,i.Categoria,i.Codigo,i.Repuesto,i.Existencia,i.StockMinimo,i.Faltante,i.EstadoStock,
++ i.CostoPromedio,i.ValorExistencia,i.BodegaActiva,i.RepuestoActivo,i.RepuestoID
++ FROM dbo.vInventarioApi i WHERE (@BodegaID IS NULL OR i.BodegaID=@BodegaID)
++ AND (@CategoriaID IS NULL OR i.CategoriaID=@CategoriaID) AND (@RepuestoID IS NULL OR i.RepuestoID=@RepuestoID) AND i.Existencia<=i.StockMinimo
++   )
++   SELECT BodegaID,Bodega,Categoria,Codigo,Repuesto,Existencia,StockMinimo,Faltante,EstadoStock,CostoPromedio,ValorExistencia,BodegaActiva,RepuestoActivo FROM Datos ORDER BY Bodega,Existencia,Repuesto,BodegaID,RepuestoID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R08'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT c.CompraID,pr.Nombre AS Proveedor,c.NumeroCompra,c.Fecha,c.Estado,dc.Linea,p.Codigo,p.Nombre AS Repuesto,b.Nombre AS Destino,
++ dc.Cantidad,dc.CostoUnitario,CONVERT(decimal(28,2),CONVERT(decimal(10,0),dc.Cantidad)*dc.CostoUnitario) AS CostoLinea,
++ COALESCE(ev.Responsable,CONCAT(em.Nombres,N' ',em.Apellidos)) AS RegistradoPor
++ FROM dbo.Compra c JOIN dbo.Proveedor pr ON pr.ProveedorID=c.ProveedorID JOIN dbo.DetalleCompra dc ON dc.CompraID=c.CompraID
++ JOIN dbo.Repuesto p ON p.RepuestoID=dc.RepuestoID JOIN dbo.Bodega b ON b.BodegaID=dc.BodegaID
++ JOIN dbo.Usuario u ON u.UsuarioID=c.UsuarioRegistroID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ LEFT JOIN dbo.EventoCompraApi ev ON ev.CompraID=c.CompraID AND ev.Tipo='REGISTRO'
++ WHERE (@ProveedorID IS NULL OR c.ProveedorID=@ProveedorID) AND (@BodegaID IS NULL OR dc.BodegaID=@BodegaID)
++ AND (@Estado IS NULL OR c.Estado=@Estado) AND (@Desde IS NULL OR c.Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,c.Fecha)<=@Hasta)
++   )
++   SELECT COUNT_BIG(*) AS Total,COUNT_BIG(DISTINCT CompraID) AS Compras,COALESCE(SUM(CostoLinea),0) AS CostoTotal FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT c.CompraID,pr.Nombre AS Proveedor,c.NumeroCompra,c.Fecha,c.Estado,dc.Linea,p.Codigo,p.Nombre AS Repuesto,b.Nombre AS Destino,
++ dc.Cantidad,dc.CostoUnitario,CONVERT(decimal(28,2),CONVERT(decimal(10,0),dc.Cantidad)*dc.CostoUnitario) AS CostoLinea,
++ COALESCE(ev.Responsable,CONCAT(em.Nombres,N' ',em.Apellidos)) AS RegistradoPor
++ FROM dbo.Compra c JOIN dbo.Proveedor pr ON pr.ProveedorID=c.ProveedorID JOIN dbo.DetalleCompra dc ON dc.CompraID=c.CompraID
++ JOIN dbo.Repuesto p ON p.RepuestoID=dc.RepuestoID JOIN dbo.Bodega b ON b.BodegaID=dc.BodegaID
++ JOIN dbo.Usuario u ON u.UsuarioID=c.UsuarioRegistroID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ LEFT JOIN dbo.EventoCompraApi ev ON ev.CompraID=c.CompraID AND ev.Tipo='REGISTRO'
++ WHERE (@ProveedorID IS NULL OR c.ProveedorID=@ProveedorID) AND (@BodegaID IS NULL OR dc.BodegaID=@BodegaID)
++ AND (@Estado IS NULL OR c.Estado=@Estado) AND (@Desde IS NULL OR c.Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,c.Fecha)<=@Hasta)
++   )
++   SELECT CompraID,Proveedor,NumeroCompra,Fecha,Estado,Linea,Codigo,Repuesto,Destino,Cantidad,CostoUnitario,CostoLinea,RegistradoPor FROM Datos ORDER BY Proveedor,Fecha,CompraID,Linea
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R09'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT k.MovimientoID,k.Fecha,k.Tipo,i.Bodega,i.Codigo,i.Repuesto,k.Cantidad,
++ CASE WHEN k.Tipo='E' THEN CONVERT(bigint,k.Cantidad) ELSE -CONVERT(bigint,k.Cantidad) END AS CantidadFirmada,
++ k.ExistenciaResultante,COALESCE(k.NumeroCompra,k.NumeroOrden) AS DocumentoOrigen,k.Proveedor,k.Responsable,k.CostoUnitario,k.CostoPosterior
++ FROM dbo.vKardexApi k JOIN dbo.vInventarioApi i ON i.BodegaID=k.BodegaID AND i.RepuestoID=k.RepuestoID
++ WHERE (@BodegaID IS NULL OR k.BodegaID=@BodegaID) AND (@RepuestoID IS NULL OR k.RepuestoID=@RepuestoID)
++ AND (@Desde IS NULL OR k.Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,k.Fecha)<=@Hasta)
++   )
++   SELECT COUNT_BIG(*) AS Total FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT k.MovimientoID,k.Fecha,k.Tipo,i.Bodega,i.Codigo,i.Repuesto,k.Cantidad,
++ CASE WHEN k.Tipo='E' THEN CONVERT(bigint,k.Cantidad) ELSE -CONVERT(bigint,k.Cantidad) END AS CantidadFirmada,
++ k.ExistenciaResultante,COALESCE(k.NumeroCompra,k.NumeroOrden) AS DocumentoOrigen,k.Proveedor,k.Responsable,k.CostoUnitario,k.CostoPosterior
++ FROM dbo.vKardexApi k JOIN dbo.vInventarioApi i ON i.BodegaID=k.BodegaID AND i.RepuestoID=k.RepuestoID
++ WHERE (@BodegaID IS NULL OR k.BodegaID=@BodegaID) AND (@RepuestoID IS NULL OR k.RepuestoID=@RepuestoID)
++ AND (@Desde IS NULL OR k.Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,k.Fecha)<=@Hasta)
++   )
++   SELECT MovimientoID,Fecha,Tipo,Bodega,Codigo,Repuesto,Cantidad,CantidadFirmada,ExistenciaResultante,DocumentoOrigen,Proveedor,Responsable,CostoUnitario,CostoPosterior FROM Datos ORDER BY MovimientoID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R10'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT f.FacturaID,f.NumeroFactura,c.Nombre AS Cliente,o.NumeroOrden,f.Subtotal,f.Impuesto,f.Total,f.Pagado,f.Saldo,
++ pg.PagoID,pg.Fecha AS FechaPago,pg.Monto,mp.Nombre AS Metodo,CASE WHEN u.UsuarioID IS NULL THEN NULL ELSE CONCAT(em.Nombres,N' ',em.Apellidos) END AS Cajero
++ FROM dbo.vFacturaSaldo f JOIN dbo.OrdenServicio o ON o.OrdenID=f.OrdenID JOIN dbo.Equipo e ON e.EquipoID=o.EquipoID
++ JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID LEFT JOIN dbo.Pago pg ON pg.FacturaID=f.FacturaID
++ LEFT JOIN dbo.MetodoPago mp ON mp.MetodoPagoID=pg.MetodoPagoID LEFT JOIN dbo.Usuario u ON u.UsuarioID=pg.UsuarioRegistroID
++ LEFT JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ WHERE f.Estado='EMITIDA' AND f.Saldo>0 AND (@ClienteID IS NULL OR c.ClienteID=@ClienteID)
++   )
++   SELECT (SELECT COUNT_BIG(*) FROM Datos) AS Total,COUNT_BIG(*) AS Facturas,
++ COALESCE(SUM(TotalFactura),0) AS TotalFacturado,COALESCE(SUM(Pagado),0) AS PagadoTotal,COALESCE(SUM(Saldo),0) AS SaldoTotal
++ FROM(SELECT FacturaID,MAX(Total) AS TotalFactura,MAX(Pagado) AS Pagado,MAX(Saldo) AS Saldo FROM Datos GROUP BY FacturaID)f;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT f.FacturaID,f.NumeroFactura,c.Nombre AS Cliente,o.NumeroOrden,f.Subtotal,f.Impuesto,f.Total,f.Pagado,f.Saldo,
++ pg.PagoID,pg.Fecha AS FechaPago,pg.Monto,mp.Nombre AS Metodo,CASE WHEN u.UsuarioID IS NULL THEN NULL ELSE CONCAT(em.Nombres,N' ',em.Apellidos) END AS Cajero
++ FROM dbo.vFacturaSaldo f JOIN dbo.OrdenServicio o ON o.OrdenID=f.OrdenID JOIN dbo.Equipo e ON e.EquipoID=o.EquipoID
++ JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID LEFT JOIN dbo.Pago pg ON pg.FacturaID=f.FacturaID
++ LEFT JOIN dbo.MetodoPago mp ON mp.MetodoPagoID=pg.MetodoPagoID LEFT JOIN dbo.Usuario u ON u.UsuarioID=pg.UsuarioRegistroID
++ LEFT JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++ WHERE f.Estado='EMITIDA' AND f.Saldo>0 AND (@ClienteID IS NULL OR c.ClienteID=@ClienteID)
++   )
++   SELECT FacturaID,NumeroFactura,Cliente,NumeroOrden,Subtotal,Impuesto,Total,Pagado,Saldo,PagoID,FechaPago,Monto,Metodo,Cajero FROM Datos ORDER BY FacturaID,FechaPago,PagoID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R11'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT DATEFROMPARTS(YEAR(f.Fecha),MONTH(f.Fecha),1) AS Mes,COUNT_BIG(*) AS CantidadFacturas,
++ SUM(f.ManoObra) AS ManoObra,SUM(f.Repuestos) AS Repuestos,SUM(f.Impuesto) AS Impuesto,SUM(f.Total) AS TotalFacturado
++ FROM dbo.vFacturaSaldo f JOIN dbo.OrdenServicio o ON o.OrdenID=f.OrdenID JOIN dbo.Equipo e ON e.EquipoID=o.EquipoID
++ JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID WHERE f.Estado='EMITIDA' AND (@ClienteID IS NULL OR c.ClienteID=@ClienteID)
++ AND (@Desde IS NULL OR f.Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,f.Fecha)<=@Hasta) GROUP BY YEAR(f.Fecha),MONTH(f.Fecha)
++   )
++   SELECT COUNT_BIG(*) AS Total,COALESCE(SUM(CantidadFacturas),0) AS Facturas,COALESCE(SUM(TotalFacturado),0) AS TotalFacturado FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT DATEFROMPARTS(YEAR(f.Fecha),MONTH(f.Fecha),1) AS Mes,COUNT_BIG(*) AS CantidadFacturas,
++ SUM(f.ManoObra) AS ManoObra,SUM(f.Repuestos) AS Repuestos,SUM(f.Impuesto) AS Impuesto,SUM(f.Total) AS TotalFacturado
++ FROM dbo.vFacturaSaldo f JOIN dbo.OrdenServicio o ON o.OrdenID=f.OrdenID JOIN dbo.Equipo e ON e.EquipoID=o.EquipoID
++ JOIN dbo.Cliente c ON c.ClienteID=e.ClienteID WHERE f.Estado='EMITIDA' AND (@ClienteID IS NULL OR c.ClienteID=@ClienteID)
++ AND (@Desde IS NULL OR f.Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,f.Fecha)<=@Hasta) GROUP BY YEAR(f.Fecha),MONTH(f.Fecha)
++   )
++   SELECT Mes,CantidadFacturas,ManoObra,Repuestos,Impuesto,TotalFacturado FROM Datos ORDER BY Mes
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++ IF @Codigo=N'R12'
++ BEGIN
++  IF @SoloResumen=1
++  BEGIN
++   ;WITH Datos AS (
++SELECT o.OrdenID,o.NumeroOrden,o.FechaIngreso,o.EstadoCodigo,o.ProblemaReportado,o.NIT,o.Cliente,o.NumeroSerie,o.Recepcionista AS Recepcion,
++ CASE WHEN ud.UsuarioID IS NULL THEN NULL ELSE CONCAT(ed.Nombres,N' ',ed.Apellidos) END AS TecnicoDiagnostico,
++ d.Fecha AS FechaDiagnostico,d.Descripcion AS Diagnostico,r.DescripcionTrabajo,r.FechaInicio,r.FechaFin,
++ CASE WHEN ut.UsuarioID IS NULL THEN NULL ELSE CONCAT(et.Nombres,N' ',et.Apellidos) END AS TecnicoReparacion,
++ f.NumeroFactura,f.Estado AS EstadoFactura,ff.NombreFacturacion,f.Subtotal,f.Impuesto,f.Total,f.Pagado,f.Saldo,en.NombreRecibe,en.Fecha AS FechaEntrega,
++ (SELECT CONVERT(varchar(20),h.HistorialID) AS HistorialID,h.EstadoAnterior,h.EstadoNuevo,CONVERT(varchar(19),h.Fecha,126)+'Z' AS Fecha,CONCAT(em.Nombres,N' ',em.Apellidos) AS Responsable,h.Observacion
++  FROM dbo.HistorialEstadoOrden h JOIN dbo.Usuario u ON u.UsuarioID=h.UsuarioID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++  WHERE h.OrdenID=o.OrdenID ORDER BY h.HistorialID FOR JSON PATH,INCLUDE_NULL_VALUES) AS HistorialEstados,
++ (SELECT rr.Linea,p.Codigo,p.Nombre AS Repuesto,b.Nombre AS Bodega,rr.Cantidad,CONVERT(varchar(40),rr.CostoUnitario) AS CostoUnitario,
++  CONVERT(varchar(40),rr.PrecioUnitario) AS PrecioUnitario,CONVERT(varchar(20),m.MovimientoID) AS MovimientoID,m.Tipo,CONVERT(varchar(19),m.Fecha,126)+'Z' AS Fecha,
++  CONVERT(varchar(20),m.ExistenciaResultante) AS ExistenciaResultante
++  FROM dbo.ReparacionRepuesto rr JOIN dbo.Repuesto p ON p.RepuestoID=rr.RepuestoID JOIN dbo.Bodega b ON b.BodegaID=rr.BodegaID
++  LEFT JOIN dbo.MovimientoInventario m ON m.ReparacionID=rr.ReparacionID AND m.LineaReparacion=rr.Linea
++  WHERE rr.ReparacionID=r.ReparacionID ORDER BY rr.Linea FOR JSON PATH,INCLUDE_NULL_VALUES) AS RepuestosYMovimientos,
++ (SELECT CONVERT(varchar(20),pg.PagoID) AS PagoID,CONVERT(varchar(19),pg.Fecha,126)+'Z' AS Fecha,CONVERT(varchar(40),pg.Monto) AS Monto,mp.Nombre AS Metodo,pg.Referencia
++  FROM dbo.Pago pg JOIN dbo.MetodoPago mp ON mp.MetodoPagoID=pg.MetodoPagoID WHERE pg.FacturaID=f.FacturaID
++  ORDER BY pg.PagoID FOR JSON PATH,INCLUDE_NULL_VALUES) AS Pagos
++ FROM dbo.vOrdenAcceso o LEFT JOIN dbo.Diagnostico d ON d.OrdenID=o.OrdenID
++ LEFT JOIN dbo.Usuario ud ON ud.UsuarioID=d.UsuarioTecnicoID LEFT JOIN dbo.Empleado ed ON ed.EmpleadoID=ud.EmpleadoID
++ LEFT JOIN dbo.Reparacion r ON r.DiagnosticoID=d.DiagnosticoID LEFT JOIN dbo.Usuario ut ON ut.UsuarioID=r.UsuarioTecnicoID
++ LEFT JOIN dbo.Empleado et ON et.EmpleadoID=ut.EmpleadoID LEFT JOIN dbo.vFacturaSaldo f ON f.OrdenID=o.OrdenID
++ LEFT JOIN dbo.Factura ff ON ff.FacturaID=f.FacturaID LEFT JOIN dbo.Entrega en ON en.OrdenID=o.OrdenID
++ WHERE (@OrdenID IS NULL OR o.OrdenID=@OrdenID) AND (@ClienteID IS NULL OR o.ClienteID=@ClienteID)
++   )
++   SELECT COUNT_BIG(*) AS Total FROM Datos;
++  END
++  ELSE
++  BEGIN
++   ;WITH Datos AS (
++SELECT o.OrdenID,o.NumeroOrden,o.FechaIngreso,o.EstadoCodigo,o.ProblemaReportado,o.NIT,o.Cliente,o.NumeroSerie,o.Recepcionista AS Recepcion,
++ CASE WHEN ud.UsuarioID IS NULL THEN NULL ELSE CONCAT(ed.Nombres,N' ',ed.Apellidos) END AS TecnicoDiagnostico,
++ d.Fecha AS FechaDiagnostico,d.Descripcion AS Diagnostico,r.DescripcionTrabajo,r.FechaInicio,r.FechaFin,
++ CASE WHEN ut.UsuarioID IS NULL THEN NULL ELSE CONCAT(et.Nombres,N' ',et.Apellidos) END AS TecnicoReparacion,
++ f.NumeroFactura,f.Estado AS EstadoFactura,ff.NombreFacturacion,f.Subtotal,f.Impuesto,f.Total,f.Pagado,f.Saldo,en.NombreRecibe,en.Fecha AS FechaEntrega,
++ (SELECT CONVERT(varchar(20),h.HistorialID) AS HistorialID,h.EstadoAnterior,h.EstadoNuevo,CONVERT(varchar(19),h.Fecha,126)+'Z' AS Fecha,CONCAT(em.Nombres,N' ',em.Apellidos) AS Responsable,h.Observacion
++  FROM dbo.HistorialEstadoOrden h JOIN dbo.Usuario u ON u.UsuarioID=h.UsuarioID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
++  WHERE h.OrdenID=o.OrdenID ORDER BY h.HistorialID FOR JSON PATH,INCLUDE_NULL_VALUES) AS HistorialEstados,
++ (SELECT rr.Linea,p.Codigo,p.Nombre AS Repuesto,b.Nombre AS Bodega,rr.Cantidad,CONVERT(varchar(40),rr.CostoUnitario) AS CostoUnitario,
++  CONVERT(varchar(40),rr.PrecioUnitario) AS PrecioUnitario,CONVERT(varchar(20),m.MovimientoID) AS MovimientoID,m.Tipo,CONVERT(varchar(19),m.Fecha,126)+'Z' AS Fecha,
++  CONVERT(varchar(20),m.ExistenciaResultante) AS ExistenciaResultante
++  FROM dbo.ReparacionRepuesto rr JOIN dbo.Repuesto p ON p.RepuestoID=rr.RepuestoID JOIN dbo.Bodega b ON b.BodegaID=rr.BodegaID
++  LEFT JOIN dbo.MovimientoInventario m ON m.ReparacionID=rr.ReparacionID AND m.LineaReparacion=rr.Linea
++  WHERE rr.ReparacionID=r.ReparacionID ORDER BY rr.Linea FOR JSON PATH,INCLUDE_NULL_VALUES) AS RepuestosYMovimientos,
++ (SELECT CONVERT(varchar(20),pg.PagoID) AS PagoID,CONVERT(varchar(19),pg.Fecha,126)+'Z' AS Fecha,CONVERT(varchar(40),pg.Monto) AS Monto,mp.Nombre AS Metodo,pg.Referencia
++  FROM dbo.Pago pg JOIN dbo.MetodoPago mp ON mp.MetodoPagoID=pg.MetodoPagoID WHERE pg.FacturaID=f.FacturaID
++  ORDER BY pg.PagoID FOR JSON PATH,INCLUDE_NULL_VALUES) AS Pagos
++ FROM dbo.vOrdenAcceso o LEFT JOIN dbo.Diagnostico d ON d.OrdenID=o.OrdenID
++ LEFT JOIN dbo.Usuario ud ON ud.UsuarioID=d.UsuarioTecnicoID LEFT JOIN dbo.Empleado ed ON ed.EmpleadoID=ud.EmpleadoID
++ LEFT JOIN dbo.Reparacion r ON r.DiagnosticoID=d.DiagnosticoID LEFT JOIN dbo.Usuario ut ON ut.UsuarioID=r.UsuarioTecnicoID
++ LEFT JOIN dbo.Empleado et ON et.EmpleadoID=ut.EmpleadoID LEFT JOIN dbo.vFacturaSaldo f ON f.OrdenID=o.OrdenID
++ LEFT JOIN dbo.Factura ff ON ff.FacturaID=f.FacturaID LEFT JOIN dbo.Entrega en ON en.OrdenID=o.OrdenID
++ WHERE (@OrdenID IS NULL OR o.OrdenID=@OrdenID) AND (@ClienteID IS NULL OR o.ClienteID=@ClienteID)
++   )
++   SELECT OrdenID,NumeroOrden,FechaIngreso,EstadoCodigo,ProblemaReportado,NIT,Cliente,NumeroSerie,Recepcion,TecnicoDiagnostico,FechaDiagnostico,Diagnostico,DescripcionTrabajo,FechaInicio,FechaFin,TecnicoReparacion,NumeroFactura,EstadoFactura,NombreFacturacion,Subtotal,Impuesto,Total,Pagado,Saldo,NombreRecibe,FechaEntrega,HistorialEstados,RepuestosYMovimientos,Pagos FROM Datos ORDER BY OrdenID
++   OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++  END;
++  RETURN;
++ END;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spOpcionesReporteApi
++ @UsuarioActorID int,@Codigo nvarchar(max),@Tipo nvarchar(max),@Buscar nvarchar(max)=NULL
++AS
++BEGIN
++ SET NOCOUNT ON;
++ EXEC dbo.spValidarReporteApi @UsuarioActorID,@Codigo;
++ IF DATALENGTH(@Buscar)>300 OR @Tipo IS NULL THROW 52300,N'La búsqueda admite hasta 150 caracteres.',1;
++ DECLARE @Limitado int=CASE WHEN dbo.fnTecnicoLimitadoReporteApi(@UsuarioActorID,@Codigo)=1 THEN @UsuarioActorID ELSE NULL END;
++ IF @Tipo=N'clienteId' AND @Codigo IN(N'R02',N'R10',N'R11',N'R12')
++ BEGIN
++  SELECT TOP(100) CONVERT(nvarchar(20),ClienteID) AS Valor,CONCAT(Nombre,N' · ',NIT,CASE WHEN Activo=0 THEN N' (inactivo)' ELSE N'' END) AS Etiqueta
++  FROM dbo.Cliente WHERE @Buscar IS NULL OR CHARINDEX(@Buscar,CONCAT(Nombre,N' ',NIT))>0
++  ORDER BY Nombre,ClienteID;RETURN;
++ END;
++ IF @Tipo=N'tecnicoId' AND @Codigo IN(N'R01',N'R04',N'R05')
++ BEGIN
++  SELECT TOP(100) CONVERT(nvarchar(20),u.UsuarioID) AS Valor,
++   CONCAT(e.Nombres,N' ',e.Apellidos,CASE WHEN u.Activo=0 OR e.Activo=0 THEN N' (inactivo)' ELSE N'' END) AS Etiqueta
++  FROM dbo.Usuario u JOIN dbo.Empleado e ON e.EmpleadoID=u.EmpleadoID
++  WHERE (@Limitado IS NULL OR u.UsuarioID=@Limitado) AND (@Buscar IS NULL OR CHARINDEX(@Buscar,CONCAT(e.Nombres,N' ',e.Apellidos))>0)
++   AND(EXISTS(SELECT 1 FROM dbo.UsuarioRol ur WHERE ur.UsuarioID=u.UsuarioID AND ur.RolCodigo='TECNICO')
++       OR EXISTS(SELECT 1 FROM dbo.Diagnostico d WHERE d.UsuarioTecnicoID=u.UsuarioID)
++       OR EXISTS(SELECT 1 FROM dbo.Reparacion r WHERE r.UsuarioTecnicoID=u.UsuarioID)
++       OR EXISTS(SELECT 1 FROM dbo.AsignacionOrden a WHERE a.UsuarioTecnicoID=u.UsuarioID))
++  ORDER BY e.Nombres,e.Apellidos,u.UsuarioID;RETURN;
++ END;
++ IF @Tipo=N'bodegaId' AND @Codigo IN(N'R05',N'R06',N'R07',N'R08',N'R09')
++ BEGIN
++  SELECT TOP(100) CONVERT(nvarchar(20),b.BodegaID) AS Valor,CONCAT(b.Nombre,N' · ',b.Codigo,CASE WHEN b.Activo=0 THEN N' (inactiva)' ELSE N'' END) AS Etiqueta
++  FROM dbo.Bodega b WHERE (@Buscar IS NULL OR CHARINDEX(@Buscar,CONCAT(b.Nombre,N' ',b.Codigo))>0)
++   AND(@Limitado IS NULL OR EXISTS(SELECT 1 FROM dbo.ReparacionRepuesto rr JOIN dbo.vOrdenAcceso o ON o.ReparacionID=rr.ReparacionID WHERE rr.BodegaID=b.BodegaID AND o.UsuarioTecnicoID=@Limitado))
++  ORDER BY b.Nombre,b.BodegaID;RETURN;
++ END;
++ IF @Tipo=N'proveedorId' AND @Codigo=N'R08'
++ BEGIN
++  SELECT TOP(100) CONVERT(nvarchar(20),ProveedorID) AS Valor,CONCAT(Nombre,N' · ',NIT,CASE WHEN Activo=0 THEN N' (inactivo)' ELSE N'' END) AS Etiqueta
++  FROM dbo.Proveedor WHERE @Buscar IS NULL OR CHARINDEX(@Buscar,CONCAT(Nombre,N' ',NIT))>0 ORDER BY Nombre,ProveedorID;RETURN;
++ END;
++ IF @Tipo=N'categoriaId' AND @Codigo IN(N'R06',N'R07')
++ BEGIN
++  SELECT TOP(100) CONVERT(nvarchar(20),CategoriaID) AS Valor,Nombre AS Etiqueta FROM dbo.CategoriaRepuesto
++  WHERE @Buscar IS NULL OR CHARINDEX(@Buscar,Nombre)>0 ORDER BY Nombre,CategoriaID;RETURN;
++ END;
++ IF @Tipo=N'repuestoId' AND @Codigo IN(N'R06',N'R07',N'R09')
++ BEGIN
++  SELECT TOP(100) CONVERT(nvarchar(20),RepuestoID) AS Valor,CONCAT(Nombre,N' · ',Codigo,CASE WHEN Activo=0 THEN N' (inactivo)' ELSE N'' END) AS Etiqueta
++  FROM dbo.Repuesto WHERE @Buscar IS NULL OR CHARINDEX(@Buscar,CONCAT(Nombre,N' ',Codigo))>0 ORDER BY Nombre,RepuestoID;RETURN;
++ END;
++ IF @Tipo=N'ordenId' AND @Codigo IN(N'R05',N'R12')
++ BEGIN
++  SELECT TOP(100) CONVERT(nvarchar(20),o.OrdenID) AS Valor,o.NumeroOrden AS Etiqueta
++  FROM dbo.vOrdenAcceso o WHERE (@Buscar IS NULL OR CHARINDEX(@Buscar,o.NumeroOrden)>0)
++   AND(@Limitado IS NULL OR o.UsuarioTecnicoID=@Limitado)
++   AND(@Codigo=N'R12' OR EXISTS(SELECT 1 FROM dbo.ReparacionRepuesto rr WHERE rr.ReparacionID=o.ReparacionID))
++  ORDER BY o.NumeroOrden,o.OrdenID;RETURN;
++ END;
++ IF @Tipo=N'estado' AND @Codigo=N'R01'
++ BEGIN
++  SELECT CONVERT(nvarchar(30),Codigo) AS Valor,Nombre AS Etiqueta FROM dbo.EstadoOrden
++  WHERE EsFinal=0 AND (@Buscar IS NULL OR CHARINDEX(@Buscar,Nombre)>0) ORDER BY Nombre,Codigo;RETURN;
++ END;
++ IF @Tipo=N'estado' AND @Codigo=N'R08'
++ BEGIN
++  SELECT Valor,Etiqueta FROM(VALUES(N'PENDIENTE',N'Pendiente'),(N'RECIBIDA',N'Recibida'),(N'ANULADA',N'Anulada')) e(Valor,Etiqueta)
++  WHERE @Buscar IS NULL OR CHARINDEX(@Buscar,Etiqueta)>0 ORDER BY Etiqueta;RETURN;
++ END;
++ THROW 52300,N'Este reporte no ofrece ese catálogo de filtros.',1;
++END;
++GO
++IF DATABASE_PRINCIPAL_ID(N'techcare_app') IS NOT NULL
++BEGIN
++ GRANT EXECUTE ON dbo.spCatalogoReportesApi TO techcare_app;
++ GRANT EXECUTE ON dbo.spConsultarReporteApi TO techcare_app;
++ GRANT EXECUTE ON dbo.spOpcionesReporteApi TO techcare_app;
++END;
++GO
+diff --git a/39_Pruebas_Reportes.sql b/39_Pruebas_Reportes.sql
+new file mode 100644
+index 0000000..3f3a57a
+--- /dev/null
++++ b/39_Pruebas_Reportes.sql
+@@ -0,0 +1,403 @@
++-- Ejecutar después del 38 en DESARROLLO, sin otras escrituras concurrentes.
++-- Datos propios por caso, ROLLBACK y verificación de cantidades antes/después.
++-- Las identidades pueden dejar huecos. No es prueba entre sesiones concurrentes.
++USE [TechCare];
++GO
++SET NOCOUNT ON; SET XACT_ABORT ON;
++IF @@TRANCOUNT<>0 THROW 52090,N'Ejecutá sin una transacción abierta.',1;
++IF OBJECT_ID(N'dbo.spConsultarReporteApi',N'P') IS NULL
++    THROW 52090,N'Ejecutá primero 38_Reportes_Procedimientos.sql.',1;
++DECLARE @Admin int=(SELECT TOP (1) UsuarioID FROM dbo.Usuario WHERE dbo.fnTieneRol(UsuarioID,'ADMIN')=1 ORDER BY UsuarioID);
++DECLARE @Modelo int=(SELECT TOP (1) ModeloEquipoID FROM dbo.ModeloEquipo ORDER BY ModeloEquipoID);
++DECLARE @Tipo int=(SELECT TOP (1) TipoClienteID FROM dbo.TipoCliente ORDER BY TipoClienteID);
++IF @Admin IS NULL OR @Modelo IS NULL OR @Tipo IS NULL THROW 52090,N'Se requiere ADMIN activo y catálogos base.',1;
++DECLARE @ContextoInicial sql_variant=SESSION_CONTEXT(N'UsuarioID');
++DECLARE @Casos TABLE(ID int PRIMARY KEY,Caso nvarchar(200),ErrorEsperado int);
++INSERT @Casos VALUES
++(1,N'R01 muestra al técnico asignado antes del diagnóstico',0),
++(2,N'R02 conserva cliente sin equipos ni órdenes',0),
++(3,N'R03 conserva equipo sin servicio',0),
++(4,N'R04 devuelve diagnóstico y reparación como procesos distintos',0),
++(5,N'R05 usa costos y precios históricos por consumo',0),
++(6,N'R06 usa promedio por bodega y stock del kardex',0),
++(7,N'R07 incluye asociación vacía con mínimo cero',0),
++(8,N'R08 incluye pendientes sin convertirlas en entradas',0),
++(9,N'R09 presenta tres movimientos con sus saldos históricos',0),
++(10,N'R10 presenta los dos abonos de una sola factura',0),
++(11,N'R11 factura una vez sin multiplicar por abonos o repuestos',0),
++(12,N'R12 conserva listas independientes de estados, repuestos y pagos',0),
++(13,N'Resumen R10 cuenta factura y saldo una vez',0),
++(14,N'R12 conserva orden sin diagnóstico ni factura',0),
++(15,N'R02 conserva equipos sin órdenes junto a los atendidos',0),
++(16,N'Técnico consulta únicamente su historial en R03',0),
++(17,N'Técnico consulta únicamente sus órdenes en R01',0),
++(18,N'Técnico no pide el reporte de otro técnico',52304),
++(19,N'R04 de técnico conserva sólo sus procesos',0),
++(20,N'R05 de técnico conserva sólo sus consumos',0),
++(21,N'Reasignación retira la orden del reporte del técnico anterior',0),
++(22,N'Recepción no consulta saldos de caja',52304),
++(23,N'Bodega no consulta ingresos facturados',52304),
++(24,N'Caja no consulta costos de inventario',52304),
++(25,N'Técnico no consulta trazabilidad administrativa',52304),
++(26,N'Recepción consulta historial de cliente',0),
++(27,N'Bodega consulta compras de su proveedor',0),
++(28,N'Caja consulta facturas pendientes',0),
++(29,N'Cuenta inactiva no obtiene catálogo',52304),
++(30,N'Empleado inactivo no obtiene catálogo',52304),
++(31,N'ADMIN obtiene doce reportes',0),
++(32,N'Técnico obtiene cuatro reportes',0),
++(33,N'Bodega obtiene cinco reportes',0),
++(34,N'Recepción obtiene tres reportes',0),
++(35,N'Caja obtiene dos reportes',0),
++(36,N'Código de reporte inexistente rechazado',52302),
++(37,N'ID negativo rechazado',52300),
++(38,N'Filtro ajeno al reporte rechazado',52300),
++(39,N'Fechas invertidas rechazadas',52300),
++(40,N'Serie larga rechazada sin truncar',52300),
++(41,N'Página cero rechazada',52300),
++(42,N'Tamaño superior a cien rechazado',52300),
++(43,N'Estado de compra inválido rechazado',52300),
++(44,N'Opciones de técnico no revelan otros técnicos',0),
++(45,N'Porcentaje en búsqueda de opciones es literal',0),
++(46,N'Guion bajo en búsqueda de opciones es literal',0),
++(47,N'Búsqueda larga de opciones rechazada',52300),
++(48,N'Factura pagada deja de aparecer como pendiente',0),
++(49,N'Ingreso mensual excluye facturas anuladas',0),
++(50,N'Día UTC de factura está incluido en el rango',0),
++(51,N'Rango sin facturas devuelve cero filas',0),
++(52,N'Paginación no altera el resumen de consumos',0),
++(53,N'Categoría negativa rechazada',52300),
++(54,N'Retirar rol revoca acceso al reporte',52304),
++(55,N'Proveedor inactivo conserva compras y opción histórica',0),
++(56,N'Bodega inactiva conserva inventario',0),
++(57,N'Cambiar cliente y precios no reescribe la factura ni consumo',0),
++(58,N'Consultas no alteran stock, promedio ni contexto',0),
++(59,N'Último día del año 9999 no desborda',0),
++(60,N'JSON conserva importes e IDs como texto y fechas UTC',0);
++DECLARE @Antes TABLE (Nombre sysname PRIMARY KEY,Cantidad bigint);
++INSERT @Antes
++SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Cliente UNION ALL
++SELECT 'Equipo' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Equipo UNION ALL
++SELECT 'Usuario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Usuario UNION ALL
++SELECT 'Empleado' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Bodega UNION ALL
++SELECT 'Inventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ProveedorRepuesto UNION ALL
++SELECT 'Compra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AuditoriaPrecioRepuesto UNION ALL
++SELECT 'Factura' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Factura UNION ALL
++SELECT 'FacturaDetalle' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.FacturaDetalle UNION ALL
++SELECT 'Pago' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Pago UNION ALL
++SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
++SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi UNION ALL
++SELECT 'ValoracionInventario',COUNT_BIG(*) FROM dbo.ValoracionInventario UNION ALL
++SELECT 'SolicitudCompraApi',COUNT_BIG(*) FROM dbo.SolicitudCompraApi UNION ALL
++SELECT 'EventoCompraApi',COUNT_BIG(*) FROM dbo.EventoCompraApi;
++SELECT TOP(0) * INTO #ResultadoOrden FROM dbo.vOrdenAcceso;
++CREATE TABLE #R01([OrdenID] int NULL,[NumeroOrden] nvarchar(max) NULL,[FechaIngreso] datetime2(0) NULL,[Estado] nvarchar(max) NULL,[Prioridad] nvarchar(max) NULL,[Cliente] nvarchar(max) NULL,[NumeroSerie] nvarchar(max) NULL,[Tecnico] nvarchar(max) NULL,[ReparacionID] int NULL);
++CREATE TABLE #R02([ClienteID] int NULL,[NIT] nvarchar(max) NULL,[Cliente] nvarchar(max) NULL,[NumeroSerie] nvarchar(max) NULL,[OrdenID] int NULL,[NumeroOrden] nvarchar(max) NULL,[FechaIngreso] datetime2(0) NULL,[EstadoCodigo] nvarchar(max) NULL,[Diagnostico] nvarchar(max) NULL,[DescripcionTrabajo] nvarchar(max) NULL,[NumeroFactura] nvarchar(max) NULL,[Total] decimal(38,2) NULL,[Saldo] decimal(38,2) NULL,[FechaEntrega] datetime2(0) NULL);
++CREATE TABLE #R03([EquipoID] int NULL,[NumeroSerie] nvarchar(max) NULL,[Cliente] nvarchar(max) NULL,[Tipo] nvarchar(max) NULL,[Marca] nvarchar(max) NULL,[Modelo] nvarchar(max) NULL,[OrdenID] int NULL,[NumeroOrden] nvarchar(max) NULL,[EstadoCodigo] nvarchar(max) NULL,[FechaDiagnostico] datetime2(0) NULL,[Diagnostico] nvarchar(max) NULL,[FechaInicio] datetime2(0) NULL,[FechaFin] datetime2(0) NULL,[DescripcionTrabajo] nvarchar(max) NULL,[Tecnico] nvarchar(max) NULL);
++CREATE TABLE #R04([Proceso] nvarchar(max) NULL,[RegistroID] int NULL,[Fecha] datetime2(0) NULL,[OrdenID] int NULL,[NumeroOrden] nvarchar(max) NULL,[NumeroSerie] nvarchar(max) NULL,[Cliente] nvarchar(max) NULL,[UsuarioID] int NULL,[Tecnico] nvarchar(max) NULL,[Trabajo] nvarchar(max) NULL,[ManoObra] decimal(38,2) NULL);
++CREATE TABLE #R05([OrdenID] int NULL,[NumeroOrden] nvarchar(max) NULL,[Tecnico] nvarchar(max) NULL,[Bodega] nvarchar(max) NULL,[Codigo] nvarchar(max) NULL,[Repuesto] nvarchar(max) NULL,[Cantidad] int NULL,[CostoUnitario] decimal(38,2) NULL,[PrecioUnitario] decimal(38,2) NULL,[CostoHistorico] decimal(38,2) NULL,[VentaHistorica] decimal(38,2) NULL,[MovimientoID] bigint NULL,[Fecha] datetime2(0) NULL);
++CREATE TABLE #R06([BodegaID] int NULL,[Bodega] nvarchar(max) NULL,[Categoria] nvarchar(max) NULL,[Codigo] nvarchar(max) NULL,[Repuesto] nvarchar(max) NULL,[Existencia] bigint NULL,[StockMinimo] int NULL,[Faltante] bigint NULL,[EstadoStock] nvarchar(max) NULL,[CostoPromedio] decimal(18,6) NULL,[ValorExistencia] decimal(38,6) NULL,[BodegaActiva] bit NULL,[RepuestoActivo] bit NULL);
++CREATE TABLE #R07([BodegaID] int NULL,[Bodega] nvarchar(max) NULL,[Categoria] nvarchar(max) NULL,[Codigo] nvarchar(max) NULL,[Repuesto] nvarchar(max) NULL,[Existencia] bigint NULL,[StockMinimo] int NULL,[Faltante] bigint NULL,[EstadoStock] nvarchar(max) NULL,[CostoPromedio] decimal(18,6) NULL,[ValorExistencia] decimal(38,6) NULL,[BodegaActiva] bit NULL,[RepuestoActivo] bit NULL);
++CREATE TABLE #R08([CompraID] int NULL,[Proveedor] nvarchar(max) NULL,[NumeroCompra] nvarchar(max) NULL,[Fecha] datetime2(0) NULL,[Estado] nvarchar(max) NULL,[Linea] smallint NULL,[Codigo] nvarchar(max) NULL,[Repuesto] nvarchar(max) NULL,[Destino] nvarchar(max) NULL,[Cantidad] int NULL,[CostoUnitario] decimal(38,2) NULL,[CostoLinea] decimal(38,2) NULL,[RegistradoPor] nvarchar(max) NULL);
++CREATE TABLE #R09([MovimientoID] bigint NULL,[Fecha] datetime2(0) NULL,[Tipo] nvarchar(max) NULL,[Bodega] nvarchar(max) NULL,[Codigo] nvarchar(max) NULL,[Repuesto] nvarchar(max) NULL,[Cantidad] int NULL,[CantidadFirmada] bigint NULL,[ExistenciaResultante] bigint NULL,[DocumentoOrigen] nvarchar(max) NULL,[Proveedor] nvarchar(max) NULL,[Responsable] nvarchar(max) NULL,[CostoUnitario] decimal(38,2) NULL,[CostoPosterior] decimal(18,6) NULL);
++CREATE TABLE #R10([FacturaID] int NULL,[NumeroFactura] nvarchar(max) NULL,[Cliente] nvarchar(max) NULL,[NumeroOrden] nvarchar(max) NULL,[Subtotal] decimal(38,2) NULL,[Impuesto] decimal(38,2) NULL,[Total] decimal(38,2) NULL,[Pagado] decimal(38,2) NULL,[Saldo] decimal(38,2) NULL,[PagoID] bigint NULL,[FechaPago] datetime2(0) NULL,[Monto] decimal(38,2) NULL,[Metodo] nvarchar(max) NULL,[Cajero] nvarchar(max) NULL);
++CREATE TABLE #R11([Mes] date NULL,[CantidadFacturas] bigint NULL,[ManoObra] decimal(38,2) NULL,[Repuestos] decimal(38,2) NULL,[Impuesto] decimal(38,2) NULL,[TotalFacturado] decimal(38,2) NULL);
++CREATE TABLE #R12([OrdenID] int NULL,[NumeroOrden] nvarchar(max) NULL,[FechaIngreso] datetime2(0) NULL,[EstadoCodigo] nvarchar(max) NULL,[ProblemaReportado] nvarchar(max) NULL,[NIT] nvarchar(max) NULL,[Cliente] nvarchar(max) NULL,[NumeroSerie] nvarchar(max) NULL,[Recepcion] nvarchar(max) NULL,[TecnicoDiagnostico] nvarchar(max) NULL,[FechaDiagnostico] datetime2(0) NULL,[Diagnostico] nvarchar(max) NULL,[DescripcionTrabajo] nvarchar(max) NULL,[FechaInicio] datetime2(0) NULL,[FechaFin] datetime2(0) NULL,[TecnicoReparacion] nvarchar(max) NULL,[NumeroFactura] nvarchar(max) NULL,[EstadoFactura] nvarchar(max) NULL,[NombreFacturacion] nvarchar(max) NULL,[Subtotal] decimal(38,2) NULL,[Impuesto] decimal(38,2) NULL,[Total] decimal(38,2) NULL,[Pagado] decimal(38,2) NULL,[Saldo] decimal(38,2) NULL,[NombreRecibe] nvarchar(max) NULL,[FechaEntrega] datetime2(0) NULL,[HistorialEstados] nvarchar(max) NULL,[RepuestosYMovimientos] nvarchar(max) NULL,[Pagos] nvarchar(max) NULL);
++CREATE TABLE #S05(Total bigint,CostoHistoricoTotal decimal(38,2),VentaHistoricaTotal decimal(38,2));
++CREATE TABLE #S10(Total bigint,Facturas bigint,TotalFacturado decimal(38,2),PagadoTotal decimal(38,2),SaldoTotal decimal(38,2));
++CREATE TABLE #Cat(Codigo nvarchar(3));
++CREATE TABLE #Opciones(Valor nvarchar(30),Etiqueta nvarchar(max));
++DECLARE @Resultados TABLE(ID int,Caso nvarchar(200),Resultado varchar(4),Detalle nvarchar(4000));
++DECLARE @Caso int=1,@Esperado int,@Nombre nvarchar(200),@Resultado varchar(4),@Detalle nvarchar(4000),@Preparado bit;
++DECLARE @Sufijo varchar(8),@Codigo varchar(30),@Usuario varchar(50),@Nit varchar(20),@Serie varchar(80),@Texto nvarchar(max),@Json nvarchar(max);
++DECLARE @Cliente int,@Equipo int,@Empleado int,@Tec1 int,@Tec2 int,@Recepcion int,@Orden int,@Categoria int,@Repuesto int,@Bodega int,@Proveedor int,@Compra int,@Actividad int;
++DECLARE @Bodeguero int,@Caja int,@Extra int,@ExtraCodigo varchar(30),@Bodega2 int,@CompraNueva int;
++DECLARE @ClienteVacio int,@EquipoVacio int,@Orden2 int,@Reparacion int,@Factura int,@Factura2 int,@Metodo tinyint;
++DECLARE @Movimientos bigint,@Stock bigint,@Promedio decimal(18,6),@Lineas dbo.TipoDetalleCompra;
++DECLARE @Hoy date,@Ayer date,@Manana date,@SerieVacia varchar(80),@CodigoReporte nvarchar(3),@Actor int;
++DECLARE @Hash varchar(255)='$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
++SELECT TOP(1) @Metodo=MetodoPagoID FROM dbo.MetodoPago ORDER BY MetodoPagoID;
++IF @Metodo IS NULL THROW 52390,N'Se requiere un medio de pago.',1;
++WHILE @Caso<=60
++BEGIN
++ SELECT @Nombre=Caso,@Esperado=ErrorEsperado FROM @Casos WHERE ID=@Caso;
++ SET @Resultado='PASS';SET @Detalle=NULL;SET @Preparado=0;
++ SET @Hoy=CONVERT(date,SYSUTCDATETIME());SET @Ayer=DATEADD(day,-1,@Hoy);SET @Manana=DATEADD(day,1,@Hoy);
++ SET @Sufijo=LEFT(REPLACE(CONVERT(varchar(36),NEWID()),'-',''),8);
++ DELETE #ResultadoOrden;DELETE #Cat;DELETE #Opciones;DELETE #S05;DELETE #S10;DELETE @Lineas;
++DELETE #R01; DELETE #R02; DELETE #R03; DELETE #R04; DELETE #R05; DELETE #R06; DELETE #R07; DELETE #R08; DELETE #R09; DELETE #R10; DELETE #R11; DELETE #R12;
++ BEGIN TRY
++ BEGIN TRANSACTION;
++        SET @Nit = 'TCAB-C-' + @Sufijo; SET @Serie = 'TCAB-E-' + @Sufijo;
++        INSERT dbo.Cliente(TipoClienteID, NIT, Nombre, Activo) VALUES (@Tipo, @Nit, N'Cliente de prueba técnica', 1);
++        SET @Cliente = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Equipo(ClienteID, ModeloEquipoID, NumeroSerie, Descripcion, Activo)
++            VALUES (@Cliente, @Modelo, @Serie, N'Equipo de prueba técnica', 1);
++        SET @Equipo = CONVERT(int, SCOPE_IDENTITY());
++
++        SET @Codigo = 'TCABT1-' + @Sufijo; SET @Usuario = 'tcst1_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Uno', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec1 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCABT2-' + @Sufijo; SET @Usuario = 'tcst2_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Dos', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec2 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCABR-' + @Sufijo; SET @Usuario = 'tcsr_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Recepción', N'Prueba', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Recepcion = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.UsuarioRol VALUES (@Tec1, 'TECNICO'), (@Tec2, 'TECNICO'), (@Recepcion, 'RECEPCION');
++
++        SET @Codigo = 'TCAB-' + @Sufijo;
++        EXEC dbo.spCrearOrden @Codigo, @Equipo, @Admin, N'No enciende ñ 漢字', @Orden OUTPUT;
++        INSERT #ResultadoOrden EXEC dbo.spAsignarTecnicoOrden @Admin, @Orden, @Tec1;
++        DELETE FROM #ResultadoOrden;
++        SET @Texto = N'Categoría de prueba ' + @Sufijo;
++        INSERT dbo.CategoriaRepuesto(Nombre) VALUES (@Texto);
++        SET @Categoria = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Repuesto(CategoriaID, Codigo, Nombre, CostoReferencia, PrecioVenta, Activo)
++            VALUES (@Categoria, @Codigo, N'Fuente de prueba ñ', 12.25, 25.50, 1);
++        SET @Repuesto = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Bodega(Codigo, Nombre, Activo) VALUES (@Codigo, N'Bodega técnica de prueba', 1);
++        SET @Bodega = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Inventario(BodegaID, RepuestoID, StockMinimo) VALUES (@Bodega, @Repuesto, 2);
++        SET @Nit = 'TCAB-P-' + @Sufijo;
++        INSERT dbo.Proveedor(NIT, Nombre, Activo) VALUES (@Nit, N'Proveedor de prueba técnica', 1);
++        SET @Proveedor = CONVERT(int, SCOPE_IDENTITY());
++        -- El detalle de compra exige que el proveedor ofrezca este repuesto.
++        INSERT dbo.ProveedorRepuesto(ProveedorID, RepuestoID) VALUES (@Proveedor, @Repuesto);
++        INSERT @Lineas VALUES (1, @Bodega, @Repuesto, 10, 12.25);
++        EXEC dbo.spRegistrarCompra @Codigo, @Proveedor, @Admin, @Lineas, @Compra OUTPUT,@Fecha=@Ayer;
++        EXEC dbo.spRecibirCompra @Compra, @Admin,@Fecha=@Ayer;
++        SET @Texto = N'Prueba con carga ' + @Sufijo;
++        INSERT dbo.Actividad(Nombre, Activo) VALUES (@Texto, 1);
++        SET @Actividad = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo='TCABG-'+@Sufijo;SET @Usuario='tcabg_'+@Sufijo;
++        INSERT dbo.Empleado(Codigo,Nombres,Apellidos,Activo) VALUES (@Codigo,N'Bodega',N'Prueba',1);
++        SET @Empleado=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID,NombreUsuario,PasswordHash,Activo) VALUES (@Empleado,@Usuario,@Hash,1);
++        SET @Bodeguero=CONVERT(int,SCOPE_IDENTITY());INSERT dbo.UsuarioRol VALUES (@Bodeguero,'BODEGA');
++        SET @Codigo='TCABC-'+@Sufijo;SET @Usuario='tcabc_'+@Sufijo;
++        INSERT dbo.Empleado(Codigo,Nombres,Apellidos,Activo) VALUES (@Codigo,N'Caja',N'Prueba',1);
++        SET @Empleado=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID,NombreUsuario,PasswordHash,Activo) VALUES (@Empleado,@Usuario,@Hash,1);
++        SET @Caja=CONVERT(int,SCOPE_IDENTITY());INSERT dbo.UsuarioRol VALUES (@Caja,'CAJA');
++        SET @ExtraCodigo='EXTRA-'+@Sufijo;
++        INSERT dbo.Repuesto(CategoriaID,Codigo,Nombre,CostoReferencia,PrecioVenta,Activo) VALUES (@Categoria,@ExtraCodigo,N'Repuesto adicional',0,0,1);
++        SET @Extra=CONVERT(int,SCOPE_IDENTITY());
++        SET @Codigo='B2-'+@Sufijo;
++        INSERT dbo.Bodega(Codigo,Nombre,Activo) VALUES(@Codigo,N'Segunda bodega',1);SET @Bodega2=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Inventario(BodegaID,RepuestoID,StockMinimo) VALUES(@Bodega2,@Repuesto,0);
++ EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@Admin;
++ SET @Nit='VAC-'+@Sufijo;INSERT dbo.Cliente(TipoClienteID,NIT,Nombre,Activo) VALUES(@Tipo,@Nit,N'Cliente sin órdenes ñ',1);SET @ClienteVacio=CONVERT(int,SCOPE_IDENTITY());
++ SET @SerieVacia='VAC-'+@Sufijo;
++ INSERT dbo.Equipo(ClienteID,ModeloEquipoID,NumeroSerie,Descripcion,Activo) VALUES(@Cliente,@Modelo,@SerieVacia,N'Sin servicio',1);SET @EquipoVacio=CONVERT(int,SCOPE_IDENTITY());
++ SET @Codigo='OTRA-'+@Sufijo;EXEC dbo.spCrearOrden @Codigo,@Equipo,@Admin,N'Otra orden',@Orden2 OUTPUT;
++ INSERT #ResultadoOrden EXEC dbo.spAsignarTecnicoOrden @Admin,@Orden2,@Tec2;
++ INSERT #ResultadoOrden EXEC dbo.spRegistrarDiagnosticoOrden @Tec1,@Orden,N'Diagnóstico ñ 漢字',0;
++ INSERT #ResultadoOrden EXEC dbo.spIniciarReparacionOrden @Tec1,@Orden,N'Trabajo ñ 漢字',20,N'Autorización ñ';
++ INSERT #ResultadoOrden EXEC dbo.spUsarRepuestoOrden @Tec1,@Orden,@Bodega,@Repuesto,1,25.50;
++ INSERT #ResultadoOrden EXEC dbo.spUsarRepuestoOrden @Tec1,@Orden,@Bodega,@Repuesto,1,25.50;
++ SELECT @Reparacion=ReparacionID FROM dbo.vOrdenAcceso WHERE OrdenID=@Orden;
++ EXEC dbo.spCerrarReparacion @Reparacion,@Tec1;
++ SET @Codigo='FAC-'+@Sufijo;EXEC dbo.spGenerarFactura @Orden,@Codigo,@Caja,@Factura OUTPUT,0.12;
++ EXEC dbo.spRegistrarPago @Factura,@Metodo,20,@Caja,N'Abono uno ñ';
++ EXEC dbo.spRegistrarPago @Factura,@Metodo,10,@Caja,N'Abono dos ñ';
++ DELETE @Lineas;INSERT @Lineas VALUES(1,@Bodega,@Repuesto,2,20);
++ SET @Codigo='PEND-'+@Sufijo;EXEC dbo.spRegistrarCompra @Codigo,@Proveedor,@Bodeguero,@Lineas,@CompraNueva OUTPUT;
++ SELECT @Movimientos=COUNT_BIG(*) FROM dbo.MovimientoInventario;
++ SET @Stock=dbo.fnExistencia(@Bodega,@Repuesto);SELECT @Promedio=CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto;
++ SET @Preparado=1;
++ IF @Caso=1
++ BEGIN
++  INSERT #R01 EXEC dbo.spConsultarReporteApi @Admin,N'R01',@TecnicoID=@Tec2;
++  IF (SELECT COUNT(*) FROM #R01)<>1 OR NOT EXISTS(SELECT 1 FROM #R01 WHERE OrdenID=@Orden2 AND Tecnico=N'Técnico Dos' AND ReparacionID IS NULL) THROW 52392,N'Falta el técnico asignado antes del diagnóstico.',1;
++ END;
++ IF @Caso=2 BEGIN INSERT #R02 EXEC dbo.spConsultarReporteApi @Admin,N'R02',@ClienteID=@ClienteVacio;IF (SELECT COUNT(*) FROM #R02)<>1 OR EXISTS(SELECT 1 FROM #R02 WHERE OrdenID IS NOT NULL) THROW 52392,N'Se perdió el cliente sin órdenes.',1;END;
++ IF @Caso=3 BEGIN INSERT #R03 EXEC dbo.spConsultarReporteApi @Admin,N'R03',@Serie=@SerieVacia;IF (SELECT COUNT(*) FROM #R03)<>1 OR EXISTS(SELECT 1 FROM #R03 WHERE OrdenID IS NOT NULL) THROW 52392,N'Se perdió el equipo sin servicio.',1;END;
++ IF @Caso=4 BEGIN INSERT #R04 EXEC dbo.spConsultarReporteApi @Admin,N'R04',@TecnicoID=@Tec1;IF (SELECT COUNT(*) FROM #R04)<>2 OR NOT EXISTS(SELECT 1 FROM #R04 WHERE Proceso='DIAGNOSTICO' AND Trabajo=N'Diagnóstico ñ 漢字') OR NOT EXISTS(SELECT 1 FROM #R04 WHERE Proceso='REPARACION' AND ManoObra=20) THROW 52392,N'Procesos técnicos incorrectos.',1;END;
++ IF @Caso=5 BEGIN INSERT #R05 EXEC dbo.spConsultarReporteApi @Admin,N'R05',@OrdenID=@Orden;IF (SELECT COUNT(*) FROM #R05)<>2 OR EXISTS(SELECT 1 FROM #R05 WHERE Cantidad<>1 OR CostoUnitario<>12.25 OR PrecioUnitario<>25.50) THROW 52392,N'El consumo perdió sus valores históricos.',1;END;
++ IF @Caso=6 BEGIN INSERT #R06 EXEC dbo.spConsultarReporteApi @Admin,N'R06',@BodegaID=@Bodega;IF NOT EXISTS(SELECT 1 FROM #R06 WHERE Existencia=8 AND CostoPromedio=12.25 AND ValorExistencia=98) THROW 52392,N'Inventario o valoración incorrecta.',1;END;
++ IF @Caso=7 BEGIN INSERT #R07 EXEC dbo.spConsultarReporteApi @Admin,N'R07',@BodegaID=@Bodega2;IF NOT EXISTS(SELECT 1 FROM #R07 WHERE Existencia=0 AND StockMinimo=0 AND Faltante=0) THROW 52392,N'Falta asociación vacía en alerta.',1;END;
++ IF @Caso=8 BEGIN INSERT #R08 EXEC dbo.spConsultarReporteApi @Admin,N'R08',@ProveedorID=@Proveedor;IF (SELECT COUNT(*) FROM #R08)<>2 OR NOT EXISTS(SELECT 1 FROM #R08 WHERE Estado='PENDIENTE') OR dbo.fnExistencia(@Bodega,@Repuesto)<>8 THROW 52392,N'Compras pendientes o stock incorrectos.',1;END;
++ IF @Caso=9 BEGIN INSERT #R09 EXEC dbo.spConsultarReporteApi @Admin,N'R09',@RepuestoID=@Repuesto;IF (SELECT COUNT(*) FROM #R09)<>3 OR NOT EXISTS(SELECT 1 FROM #R09 WHERE Tipo='S' AND ExistenciaResultante=8 AND CostoUnitario=12.25) THROW 52392,N'Kardex incorrecto.',1;END;
++ IF @Caso IN(10,28)
++ BEGIN
++  INSERT #R10 EXEC dbo.spConsultarReporteApi @Caja,N'R10',@ClienteID=@Cliente;
++  IF (SELECT COUNT(*) FROM #R10)<>2 OR EXISTS(SELECT 1 FROM #R10 WHERE Total<>79.52 OR Saldo<>49.52) THROW 52392,N'Abonos o saldo incorrectos.',1;
++ END;
++ IF @Caso IN(11,50,59)
++ BEGIN
++  SELECT @Hoy=CONVERT(date,Fecha) FROM dbo.Factura WHERE FacturaID=@Factura;
++  IF @Caso=59 INSERT #R11 EXEC dbo.spConsultarReporteApi @Caja,N'R11',@ClienteID=@Cliente,@Hasta='99991231';
++  ELSE INSERT #R11 EXEC dbo.spConsultarReporteApi @Caja,N'R11',@ClienteID=@Cliente,@Desde=@Hoy,@Hasta=@Hoy;
++  IF (SELECT COUNT(*) FROM #R11)<>1 OR NOT EXISTS(SELECT 1 FROM #R11 WHERE CantidadFacturas=1 AND ManoObra=20 AND Repuestos=51 AND Impuesto=8.52 AND TotalFacturado=79.52) THROW 52392,N'El ingreso mensual se duplicó o perdió importes.',1;
++ END;
++ IF @Caso IN(12,60)
++ BEGIN
++  INSERT #R12 EXEC dbo.spConsultarReporteApi @Admin,N'R12',@OrdenID=@Orden;
++  IF (SELECT COUNT(*) FROM #R12)<>1 THROW 52392,N'R12 multiplicó las órdenes.',1;
++  SELECT @Json=RepuestosYMovimientos FROM #R12;
++  IF (SELECT COUNT(*) FROM OPENJSON(@Json))<>2 THROW 52392,N'R12 multiplicó repuestos por pagos.',1;
++  IF @Caso=60 AND NOT EXISTS(SELECT 1 FROM OPENJSON(@Json,'$[0]') WHERE [key]='CostoUnitario' AND [type]=1) THROW 52392,N'El costo JSON no es texto exacto.',1;
++  IF @Caso=60 AND RIGHT(JSON_VALUE(@Json,'$[0].Fecha'),1)<>'Z' THROW 52392,N'La fecha JSON perdió UTC.',1;
++  SELECT @Json=Pagos FROM #R12;
++  IF (SELECT COUNT(*) FROM OPENJSON(@Json))<>2 THROW 52392,N'R12 multiplicó pagos por repuestos.',1;
++  IF @Caso=60 AND NOT EXISTS(SELECT 1 FROM OPENJSON(@Json,'$[0]') WHERE [key]='Monto' AND [type]=1) THROW 52392,N'El monto JSON no es texto exacto.',1;
++ END;
++ IF @Caso=13
++ BEGIN
++  INSERT #S10 EXEC dbo.spConsultarReporteApi @Caja,N'R10',@ClienteID=@Cliente,@SoloResumen=1;
++  IF NOT EXISTS(SELECT 1 FROM #S10 WHERE Total=2 AND Facturas=1 AND TotalFacturado=79.52 AND PagadoTotal=30 AND SaldoTotal=49.52) THROW 52392,N'El resumen financiero duplicó factura o saldo.',1;
++ END;
++ IF @Caso=14 BEGIN INSERT #R12 EXEC dbo.spConsultarReporteApi @Admin,N'R12',@OrdenID=@Orden2;IF NOT EXISTS(SELECT 1 FROM #R12 WHERE Diagnostico IS NULL AND NumeroFactura IS NULL AND Pagos=N'[]' AND RepuestosYMovimientos=N'[]') THROW 52392,N'Se perdió la orden incompleta.',1;END;
++ IF @Caso IN(15,26) BEGIN INSERT #R02 EXEC dbo.spConsultarReporteApi @Recepcion,N'R02',@ClienteID=@Cliente;IF (SELECT COUNT(*) FROM #R02)<>3 OR NOT EXISTS(SELECT 1 FROM #R02 WHERE OrdenID IS NULL AND NumeroSerie=@SerieVacia) THROW 52392,N'El historial de cliente omitió equipos sin órdenes.',1;END;
++ IF @Caso=16 BEGIN INSERT #R03 EXEC dbo.spConsultarReporteApi @Tec1,N'R03',@Serie=@Serie;IF (SELECT COUNT(*) FROM #R03)<>1 OR EXISTS(SELECT 1 FROM #R03 WHERE OrdenID<>@Orden) THROW 52392,N'R03 reveló otra orden al técnico.',1;END;
++ IF @Caso=17 BEGIN INSERT #R01 EXEC dbo.spConsultarReporteApi @Tec1,N'R01';IF (SELECT COUNT(*) FROM #R01)<>1 OR EXISTS(SELECT 1 FROM #R01 WHERE OrdenID<>@Orden) THROW 52392,N'R01 reveló trabajo ajeno.',1;END;
++ IF @Caso=18 EXEC dbo.spConsultarReporteApi @Tec1,N'R04',@TecnicoID=@Tec2;
++ IF @Caso=19 BEGIN INSERT #R04 EXEC dbo.spConsultarReporteApi @Tec1,N'R04';IF (SELECT COUNT(*) FROM #R04)<>2 OR EXISTS(SELECT 1 FROM #R04 WHERE OrdenID<>@Orden) THROW 52392,N'R04 reveló trabajo ajeno.',1;END;
++ IF @Caso=20 BEGIN INSERT #R05 EXEC dbo.spConsultarReporteApi @Tec1,N'R05';IF (SELECT COUNT(*) FROM #R05)<>2 OR EXISTS(SELECT 1 FROM #R05 WHERE OrdenID<>@Orden) THROW 52392,N'R05 reveló consumos ajenos.',1;END;
++ IF @Caso=21 BEGIN INSERT #ResultadoOrden EXEC dbo.spAsignarTecnicoOrden @Admin,@Orden2,@Tec1,@Tec2;INSERT #R01 EXEC dbo.spConsultarReporteApi @Tec2,N'R01';IF EXISTS(SELECT 1 FROM #R01) THROW 52392,N'La reasignación no retiró el acceso.',1;END;
++ IF @Caso=22 EXEC dbo.spConsultarReporteApi @Recepcion,N'R10';
++ IF @Caso=23 EXEC dbo.spConsultarReporteApi @Bodeguero,N'R11';
++ IF @Caso=24 EXEC dbo.spConsultarReporteApi @Caja,N'R06';
++ IF @Caso=25 EXEC dbo.spConsultarReporteApi @Tec1,N'R12';
++ IF @Caso=27 BEGIN INSERT #R08 EXEC dbo.spConsultarReporteApi @Bodeguero,N'R08',@ProveedorID=@Proveedor;IF (SELECT COUNT(*) FROM #R08)<>2 THROW 52392,N'Bodega no obtuvo compras.',1;END;
++ IF @Caso=29 BEGIN UPDATE dbo.Usuario SET Activo=0 WHERE UsuarioID=@Bodeguero;EXEC dbo.spCatalogoReportesApi @Bodeguero;END;
++ IF @Caso=30 BEGIN UPDATE dbo.Empleado SET Activo=0 WHERE EmpleadoID=(SELECT EmpleadoID FROM dbo.Usuario WHERE UsuarioID=@Tec1);EXEC dbo.spCatalogoReportesApi @Tec1;END;
++ IF @Caso BETWEEN 31 AND 35
++ BEGIN
++  SET @Actor=CASE @Caso WHEN 31 THEN @Admin WHEN 32 THEN @Tec1 WHEN 33 THEN @Bodeguero WHEN 34 THEN @Recepcion ELSE @Caja END;
++  INSERT #Cat EXEC dbo.spCatalogoReportesApi @Actor;
++  IF (SELECT COUNT(*) FROM #Cat)<>CASE @Caso WHEN 31 THEN 12 WHEN 32 THEN 4 WHEN 33 THEN 5 WHEN 34 THEN 3 ELSE 2 END THROW 52392,N'Catálogo de reportes no corresponde al rol.',1;
++ END;
++ IF @Caso=36 EXEC dbo.spConsultarReporteApi @Admin,N'R99';
++ IF @Caso=37 EXEC dbo.spConsultarReporteApi @Admin,N'R01',@TecnicoID=-1;
++ IF @Caso=38 EXEC dbo.spConsultarReporteApi @Admin,N'R11',@BodegaID=@Bodega;
++ IF @Caso=39 EXEC dbo.spConsultarReporteApi @Admin,N'R01',@Desde=@Hoy,@Hasta=@Ayer;
++ IF @Caso=40 BEGIN SET @Texto=REPLICATE(N'a',81);EXEC dbo.spConsultarReporteApi @Admin,N'R03',@Serie=@Texto;END;
++ IF @Caso=41 EXEC dbo.spConsultarReporteApi @Admin,N'R01',@Pagina=0;
++ IF @Caso=42 EXEC dbo.spConsultarReporteApi @Admin,N'R01',@Tamano=101;
++ IF @Caso=43 EXEC dbo.spConsultarReporteApi @Admin,N'R08',@Estado=N'INVALIDO';
++ IF @Caso=44 BEGIN INSERT #Opciones EXEC dbo.spOpcionesReporteApi @Tec1,N'R04',N'tecnicoId';IF (SELECT COUNT(*) FROM #Opciones)<>1 OR EXISTS(SELECT 1 FROM #Opciones WHERE Valor<>CONVERT(nvarchar(20),@Tec1)) THROW 52392,N'Las opciones revelaron otro técnico.',1;END;
++ IF @Caso IN(45,46)
++ BEGIN
++  SET @Texto=CONCAT(N'Bus',CASE @Caso WHEN 45 THEN N'%' ELSE N'_' END,@Sufijo);
++  UPDATE dbo.Proveedor SET Nombre=@Texto WHERE ProveedorID=@Proveedor;
++  SET @Nit='P2-'+@Sufijo;INSERT dbo.Proveedor(NIT,Nombre,Activo) VALUES(@Nit,CONCAT(N'BusZ',@Sufijo),1);
++  INSERT #Opciones EXEC dbo.spOpcionesReporteApi @Bodeguero,N'R08',N'proveedorId',@Texto;
++  IF (SELECT COUNT(*) FROM #Opciones)<>1 OR NOT EXISTS(SELECT 1 FROM #Opciones WHERE Valor=CONVERT(nvarchar(20),@Proveedor)) THROW 52392,N'La búsqueda trató caracteres como comodines.',1;
++ END;
++ IF @Caso=47 BEGIN SET @Texto=REPLICATE(N'a',151);EXEC dbo.spOpcionesReporteApi @Admin,N'R08',N'proveedorId',@Texto;END;
++ IF @Caso=48 BEGIN EXEC dbo.spRegistrarPago @Factura,@Metodo,49.52,@Caja;INSERT #R10 EXEC dbo.spConsultarReporteApi @Caja,N'R10',@ClienteID=@Cliente;IF EXISTS(SELECT 1 FROM #R10) THROW 52392,N'Factura pagada sigue pendiente.',1;END;
++ IF @Caso=49
++ BEGIN
++  INSERT #ResultadoOrden EXEC dbo.spRegistrarDiagnosticoOrden @Tec2,@Orden2,N'Otro diagnóstico',0;
++  INSERT #ResultadoOrden EXEC dbo.spIniciarReparacionOrden @Tec2,@Orden2,N'Otro trabajo',10,N'Autorizado';
++  SELECT @Reparacion=ReparacionID FROM dbo.vOrdenAcceso WHERE OrdenID=@Orden2;EXEC dbo.spCerrarReparacion @Reparacion,@Tec2;
++  SET @Codigo='ANU-'+@Sufijo;EXEC dbo.spGenerarFactura @Orden2,@Codigo,@Caja,@Factura2 OUTPUT,0.12;
++  UPDATE dbo.Factura SET Estado='ANULADA' WHERE FacturaID=@Factura2;
++  INSERT #R11 EXEC dbo.spConsultarReporteApi @Caja,N'R11',@ClienteID=@Cliente;
++  IF NOT EXISTS(SELECT 1 FROM #R11 WHERE CantidadFacturas=1 AND TotalFacturado=79.52) THROW 52392,N'El ingreso incluyó factura anulada.',1;
++ END;
++ IF @Caso=51 BEGIN INSERT #R11 EXEC dbo.spConsultarReporteApi @Caja,N'R11',@ClienteID=@Cliente,@Desde=@Manana;IF EXISTS(SELECT 1 FROM #R11) THROW 52392,N'El rango vacío devolvió facturas.',1;END;
++ IF @Caso=52 BEGIN INSERT #R05 EXEC dbo.spConsultarReporteApi @Admin,N'R05',@OrdenID=@Orden,@Pagina=2,@Tamano=1;INSERT #S05 EXEC dbo.spConsultarReporteApi @Admin,N'R05',@OrdenID=@Orden,@SoloResumen=1;IF (SELECT COUNT(*) FROM #R05)<>1 OR NOT EXISTS(SELECT 1 FROM #S05 WHERE Total=2 AND CostoHistoricoTotal=24.50 AND VentaHistoricaTotal=51) THROW 52392,N'La página alteró los totales.',1;END;
++ IF @Caso=53 EXEC dbo.spConsultarReporteApi @Admin,N'R06',@CategoriaID=-1;
++ IF @Caso=54 BEGIN DELETE dbo.UsuarioRol WHERE UsuarioID=@Tec1 AND RolCodigo='TECNICO';EXEC dbo.spConsultarReporteApi @Tec1,N'R01';END;
++ IF @Caso=55
++ BEGIN
++  UPDATE dbo.Proveedor SET Activo=0 WHERE ProveedorID=@Proveedor;
++  INSERT #R08 EXEC dbo.spConsultarReporteApi @Bodeguero,N'R08',@ProveedorID=@Proveedor;
++  IF (SELECT COUNT(*) FROM #R08)<>2 THROW 52392,N'Se perdió historia de proveedor inactivo.',1;
++  SET @Texto=CONCAT(N'TCAB-P-',@Sufijo);
++  INSERT #Opciones EXEC dbo.spOpcionesReporteApi @Bodeguero,N'R08',N'proveedorId',@Texto;
++  IF NOT EXISTS(SELECT 1 FROM #Opciones WHERE Valor=CONVERT(nvarchar(20),@Proveedor) AND Etiqueta LIKE N'%inactivo%') THROW 52392,N'Falta la opción del proveedor inactivo.',1;
++ END;
++ IF @Caso=56 BEGIN UPDATE dbo.Bodega SET Activo=0 WHERE BodegaID=@Bodega;INSERT #R06 EXEC dbo.spConsultarReporteApi @Bodeguero,N'R06',@BodegaID=@Bodega;IF NOT EXISTS(SELECT 1 FROM #R06 WHERE BodegaActiva=0 AND Existencia=8) THROW 52392,N'Se perdió inventario de bodega inactiva.',1;END;
++ IF @Caso=57
++ BEGIN
++  UPDATE dbo.Cliente SET Nombre=N'Cliente posterior' WHERE ClienteID=@Cliente;
++  UPDATE dbo.Repuesto SET PrecioVenta=99 WHERE RepuestoID=@Repuesto;
++  INSERT #R05 EXEC dbo.spConsultarReporteApi @Admin,N'R05',@OrdenID=@Orden;
++  INSERT #R12 EXEC dbo.spConsultarReporteApi @Admin,N'R12',@OrdenID=@Orden;
++  IF EXISTS(SELECT 1 FROM #R05 WHERE PrecioUnitario<>25.50) OR NOT EXISTS(SELECT 1 FROM #R12 WHERE Total=79.52 AND NombreFacturacion=N'Cliente de prueba técnica') THROW 52392,N'Se reescribió historia financiera.',1;
++ END;
++ IF @Caso=58
++ BEGIN
++  INSERT #R06 EXEC dbo.spConsultarReporteApi @Admin,N'R06',@BodegaID=@Bodega;
++  INSERT #R12 EXEC dbo.spConsultarReporteApi @Admin,N'R12',@OrdenID=@Orden;
++  INSERT #S10 EXEC dbo.spConsultarReporteApi @Caja,N'R10',@ClienteID=@Cliente,@SoloResumen=1;
++  IF dbo.fnExistencia(@Bodega,@Repuesto)<>@Stock OR (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>@Promedio
++   OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos OR TRY_CONVERT(int,SESSION_CONTEXT(N'UsuarioID'))<>@Admin THROW 52392,N'La consulta modificó datos o contexto.',1;
++ END;
++ IF @Esperado<>0 BEGIN SET @Resultado='FAIL';SET @Detalle=N'La operación inválida fue aceptada.';END;
++ IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
++ END TRY
++ BEGIN CATCH
++  SET @Detalle=ERROR_MESSAGE();IF @Preparado=0 OR @Esperado=0 OR ERROR_NUMBER()<>@Esperado SET @Resultado='FAIL';
++  IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
++ END CATCH;
++ EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@ContextoInicial;
++    ;WITH Despues AS (
++SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Cliente UNION ALL
++SELECT 'Equipo' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Equipo UNION ALL
++SELECT 'Usuario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Usuario UNION ALL
++SELECT 'Empleado' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Bodega UNION ALL
++SELECT 'Inventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ProveedorRepuesto UNION ALL
++SELECT 'Compra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AuditoriaPrecioRepuesto UNION ALL
++SELECT 'Factura' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Factura UNION ALL
++SELECT 'FacturaDetalle' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.FacturaDetalle UNION ALL
++SELECT 'Pago' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Pago UNION ALL
++SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
++SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi UNION ALL
++SELECT 'ValoracionInventario',COUNT_BIG(*) FROM dbo.ValoracionInventario UNION ALL
++SELECT 'SolicitudCompraApi',COUNT_BIG(*) FROM dbo.SolicitudCompraApi UNION ALL
++SELECT 'EventoCompraApi',COUNT_BIG(*) FROM dbo.EventoCompraApi
++    )
++    SELECT @Resultado=CASE WHEN EXISTS(SELECT 1 FROM Despues d JOIN @Antes a ON a.Nombre=d.Nombre WHERE a.Cantidad<>d.Cantidad) THEN 'FAIL' ELSE @Resultado END;
++    IF @Resultado='FAIL' AND @Detalle IS NULL SET @Detalle=N'La prueba dejó cantidades persistentes diferentes.';
++    INSERT @Resultados VALUES(@Caso,@Nombre,@Resultado,@Detalle);SET @Caso+=1;
++END;
++DROP TABLE #ResultadoOrden;DROP TABLE #Cat;DROP TABLE #Opciones;DROP TABLE #S05;DROP TABLE #S10;
++DROP TABLE #R01; DROP TABLE #R02; DROP TABLE #R03; DROP TABLE #R04; DROP TABLE #R05; DROP TABLE #R06; DROP TABLE #R07; DROP TABLE #R08; DROP TABLE #R09; DROP TABLE #R10; DROP TABLE #R11; DROP TABLE #R12;
++SELECT ID,Caso,Resultado,Detalle FROM @Resultados ORDER BY ID;
++IF EXISTS(SELECT 1 FROM @Resultados WHERE Resultado='FAIL') THROW 52392,N'Una o más pruebas de reportes fallaron. Revisá los resultados.',1;
++GO
+diff --git a/INTEGRACION_REPORTES.md b/INTEGRACION_REPORTES.md
+new file mode 100644
+index 0000000..5ea64b6
+--- /dev/null
++++ b/INTEGRACION_REPORTES.md
+@@ -0,0 +1,162 @@
++# Reportes del taller
++
++Conecta los doce reportes con SQL Server, la API y la interfaz. Parte del commit
++`0dae159` (inventario y kardex con redondeo de costos corregido).
++
++## Instalación sobre la base existente
++
++1. Aplicar `40_Reportes_API.patch` desde la raíz del repositorio, en la terminal de IntelliJ:
++
++   ```powershell
++   git apply --check 40_Reportes_API.patch
++   git apply 40_Reportes_API.patch
++   ```
++
++2. Detener el backend mientras se actualizan los objetos SQL.
++3. En SSMS, ejecutar completo `38_Reportes_Procedimientos.sql` sobre TechCare.
++   Requiere las actualizaciones anteriores, incluido el 33 y la corrección 36.
++   Crea o actualiza dos funciones y cuatro procedimientos de consulta y validación;
++   permite repetir su instalación.
++4. Ejecutar `39_Pruebas_Reportes.sql` en desarrollo, sin otras escrituras concurrentes.
++   Presenta **60 casos**. Cada caso crea sus propios datos, revierte la transacción,
++   restaura el contexto de auditoría y compara las cantidades persistentes al terminar.
++   Requiere ADMIN activo, los catálogos base y un medio de pago. Las identidades
++   pueden dejar huecos. Un error al preparar los datos también se informa como FAIL.
++5. Iniciar nuevamente backend y frontend. Abrir **Servicios → Reportes**.
++   ADMIN dispone de los doce; los demás roles ven su catálogo permitido.
++
++No volver a ejecutar 01 ni 02. El 38 no agrega tablas, columnas ni datos y no cambia
++los procesos de recepción, consumo, facturación o pago. Conserva la configuración
++local de conexión y la DLL de autenticación.
++
++## Reportes y permisos
++
++ADMIN puede consultar todos los reportes. Los permisos adicionales son:
++
++| Código | Reporte | Otros roles | Filtros |
++| --- | --- | --- | --- |
++| R01 | Órdenes activas por estado, prioridad y técnico | RECEPCION, TECNICO | Estado, técnico, desde, hasta |
++| R02 | Historial de órdenes por cliente | RECEPCION | Cliente |
++| R03 | Historial técnico por número de serie | RECEPCION, TECNICO | Serie exacta |
++| R04 | Diagnósticos y reparaciones por técnico | TECNICO | Técnico, desde, hasta |
++| R05 | Repuestos utilizados en reparaciones | BODEGA, TECNICO | Orden, técnico, bodega |
++| R06 | Inventario actual por bodega | BODEGA | Bodega, categoría, repuesto |
++| R07 | Existencias en mínimo o por debajo | BODEGA | Bodega, categoría, repuesto |
++| R08 | Compras por proveedor | BODEGA | Proveedor, bodega, estado, desde, hasta |
++| R09 | Movimientos de inventario y origen | BODEGA | Bodega, repuesto, desde, hasta |
++| R10 | Facturas pendientes y sus abonos | CAJA | Cliente |
++| R11 | Ingresos facturados por mes | CAJA | Cliente, desde, hasta |
++| R12 | Trazabilidad completa de órdenes | Sólo ADMIN | Orden, cliente |
++
++Un técnico sin otro rol habilitante consulta sólo las órdenes que le corresponden.
++En R04 también se exige que sea autor del proceso. No puede pedir otro técnico ni
++obtener opciones de órdenes o bodegas ajenas. La reasignación de una orden retira el
++acceso del técnico anterior. Los permisos de varias funciones se combinan: una cuenta
++TECNICO y RECEPCION tiene el alcance de recepción en R01/R03; TECNICO y BODEGA tiene
++el alcance de bodega en R05. R04 conserva el alcance propio salvo ADMIN.
++
++El catálogo autorizado es: ADMIN 12, TECNICO 4, BODEGA 5, RECEPCION 3 y CAJA 2 reportes.
++SQL valida de nuevo cuenta, empleado activo y roles actuales en cada consulta,
++incluida la búsqueda de opciones; no depende sólo de los permisos cargados al ingresar.
++
++## Uso y significado de los resultados
++
++- Elegir un reporte no ejecuta su consulta. Seleccionar filtros y pulsar
++  **Generar reporte**. Dejar un filtro vacío incluye todos los registros permitidos.
++- Los filtros con catálogo presentan hasta 100 coincidencias ordenadas. Escribir
++  en su búsqueda permite localizar otras opciones; `%` y `_` se buscan literalmente.
++  Los catálogos inactivos se conservan para consultar su historia.
++- Las fechas son días UTC incluidos, desde `0001-01-01` hasta `9999-12-31`.
++  Las horas de las filas se muestran en la zona horaria del navegador.
++  Los meses de R11 se muestran como mes/año sin conversión a la zona local.
++- La paginación se realiza en SQL: 25 filas por defecto, hasta 100 por solicitud.
++  Las tarjetas resumen todo el filtro; cambiar de página conserva los totales.
++  Si una página quedó fuera de rango, la respuesta usa la última disponible.
++- Las URL conservan reporte, filtros aplicados y página al recargar y usar atrás
++  o adelante. Cambiar filtros deja un aviso hasta generar de nuevo. **Limpiar**
++  vuelve al formulario sin consultar; **Actualizar resultados** repite los filtros aplicados.
++- **Ver detalle** presenta todos los campos del registro, incluidos textos largos
++  que no se muestran en la tabla. Los resultados vacíos y errores permiten volver a intentar.
++
++Reglas de lectura de cada área:
++
++- R01 incluye el técnico asignado aunque todavía no exista diagnóstico y excluye
++  órdenes finales. LISTO sigue siendo una orden activa hasta su entrega.
++- R02 conserva clientes sin equipos y equipos sin órdenes. R03 conserva equipos sin
++  servicio para ADMIN/RECEPCION; un técnico sólo ve órdenes de su alcance.
++- R04 presenta una fila de diagnóstico y otra de reparación. El costo estimado y
++  la mano de obra de reparación corresponden a etapas distintas; no se suman como ingreso.
++- R05 conserva cantidad, costo y precio históricos de cada consumo. R06 usa el
++  promedio móvil actual por bodega con seis decimales. R07 incluye existencia igual
++  al mínimo, también cero con mínimo cero, y calcula el faltante sin valores negativos.
++- R08 presenta líneas de compras pendientes, recibidas y anuladas. Su costo total
++  corresponde a las líneas seleccionadas por los filtros; una pendiente no es una entrada.
++- R09 presenta el origen y saldo histórico de cada movimiento. Para los saldos
++  inicial/final de un período se mantiene la pantalla de Kardex.
++- R10 tiene una fila por abono, o una fila con pago vacío si la factura no tiene pagos.
++  El encabezado se repite en las filas, pero las tarjetas cuentan cada factura y saldo
++  una sola vez. Las facturas anuladas o sin saldo pendiente no aparecen.
++- R11 agrupa facturas emitidas por su mes de emisión. Es facturación devengada,
++  distinta del efectivo cobrado; excluye anuladas y no multiplica por pagos o repuestos.
++- R12 conserva una fila por orden, incluso incompleta. El detalle muestra tres listas
++  independientes: cambios de estado, repuestos/movimientos y pagos. Dos consumos y
++  dos pagos permanecen como dos registros en cada lista, sin producto cartesiano.
++
++Los nombres de clientes, empleados y catálogos son los actuales, salvo los campos
++fiscales conservados en la factura y los responsables guardados en eventos de compra.
++Renombrar un catálogo no reescribe costos, precios, pagos ni importes históricos.
++
++`03_Reportes.sql` conserva las consultas originales de referencia. La aplicación
++utiliza el 38, actualizado para asignaciones y promedio por bodega. En el 03 Hasta
++era un instante exclusivo; en la API y la pantalla Hasta es un día UTC incluido.
++No es necesario ejecutar el 03 para instalar este módulo.
++
++## Contrato de API
++
++| Método | Ruta | Uso |
++| --- | --- | --- |
++| GET | `/api/reportes` | Catálogo de reportes permitido para la sesión |
++| GET | `/api/reportes/{codigo}` | Filas, indicadores, total, página y total de páginas |
++| GET | `/api/reportes/{codigo}/opciones?tipo=...&buscar=...` | Buscar opciones de un filtro permitido |
++
++Los parámetros de consulta usan `clienteId`, `tecnicoId`, `bodegaId`, `proveedorId`,
++`ordenId`, `categoriaId`, `repuestoId`, `estado`, `serie`, `desde`, `hasta`, `pagina`
++y `tamano`, sólo donde la tabla anterior los permite. IDs y página deben ser enteros
++positivos; serie hasta 80 caracteres; búsqueda de opciones hasta 150. Se rechazan
++parámetros duplicados, desconocidos y filtros ajenos al reporte.
++
++El usuario actor procede de la sesión, nunca de un parámetro del navegador. Sin
++sesión devuelve 401; acceso ajeno 403; código desconocido 404; filtros inválidos 400.
++Una espera o interbloqueo ofrece actualizar con respuesta 409. Otros errores de
++base de datos se presentan como 503 sin revelar detalles internos.
++
++Las columnas del reporte son un contrato explícito: clave, título, tipo y visibilidad.
++Las filas transportan escalares como texto o null para conservar bigint, importes y
++seis decimales. El total y la paginación son números. Las fechas y horas llevan UTC.
++En R12 las listas son cadenas JSON independientes; sus bigint e importes también son
++cadenas exactas. El frontend no calcula totales financieros desde las filas.
++
++Las consultas usan parámetros JDBC y SQL estático, con una transacción SERIALIZABLE
++de lectura para que resumen y página correspondan al mismo estado. Pueden esperar
++por una operación en curso. No se utilizan lecturas sucias ni se cambian existencias.
++
++## Verificación de esta entrega
++
++- Backend: **315 pruebas correctas**, incluidas 47 nuevas de reportes. Usan JDBC
++  simulado y cubren los doce contratos, sesión, actor, validación, precisión,
++  paginación, transacción de lectura y errores controlados.
++- Frontend: TypeScript y compilación de producción correctos.
++- Navegador con API simulada: **13 escenarios correctos**, los doce reportes,
++  escritorio/móvil de 390 px, filtros, fechas, historial del navegador, precisión,
++  detalle y permisos. Sin errores JavaScript ni solicitudes de escritura.
++- SQL 38 y 39: análisis sintáctico T-SQL completo. El 39 incluye 60 casos de roles,
++  historial incompleto, Unicode, importes, saldos, filtros y rollback.
++  **Su ejecución real en SQL Server está pendiente en la instancia del proyecto**;
++  las pruebas con JDBC simulado no sustituyen esa verificación.
++
++Después de aplicar: ejecutar el 39, generar reportes con las cinco cuentas demo de
++distintos roles y comprobar una compra recibida, un consumo y una factura con varios
++abonos. El script es secuencial; no demuestra concurrencia entre sesiones reales.
++
++El siguiente bloque previsto es conectar el resumen general del taller con datos
++reales; después corresponde la validación integral y la documentación final.
+diff --git a/README.md b/README.md
+index 4e7eaf6..32b2e51 100644
+--- a/README.md
++++ b/README.md
+@@ -4,14 +4,18 @@ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional
+ normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
+ Clientes, equipos, órdenes, servicio técnico, facturación, pagos, entrega y los catálogos de
+ abastecimiento tienen API e interfaz conectadas. El acceso usa las cuentas y roles de la BD,
+-con login, sesión y cierre de sesión. Compras, recepción, inventario por bodega y kardex también están conectados.
+-Los reportes, el resumen general y los manuales con capturas aún deben completarse.
++con login, sesión y cierre de sesión. Compras, recepción, inventario por bodega, kardex
++y los doce reportes también están conectados. El resumen general del taller y los
++manuales finales con capturas aún deben completarse.
+ 
+ Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
+ La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
+ las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
+ Una instalación nueva con un maestro anterior debe incluir también las
+-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento), 30 (Compras y costos por bodega) y 33 (Inventario y kardex).
++actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes),
++19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento),
++30 (Compras y costos por bodega), 33 (Inventario y kardex),
++36 (Redondeo de costos) y 38 (Reportes para la API).
+ 
+ Administración permite consultar y registrar cuentas, empleados y roles desde
+ una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
+@@ -36,6 +40,11 @@ Instalación: [INTEGRACION_ABASTECIMIENTO.md](INTEGRACION_ABASTECIMIENTO.md).
+ Inventario y kardex permiten consultar existencias, mínimos, valoración y movimientos por bodega.
+ Instalación: [INTEGRACION_INVENTARIO.md](INTEGRACION_INVENTARIO.md); scripts 33 y 34.
+ 
++Los reportes R01–R12 tienen filtros, paginación, resúmenes completos y detalle por
++registro, con acceso según el rol. Instalación: [INTEGRACION_REPORTES.md](INTEGRACION_REPORTES.md);
++scripts 38 y 39. `03_Reportes.sql` conserva las consultas originales de referencia;
++la aplicación utiliza el 38, actualizado para asignaciones y costos por bodega.
++
+ ## Ejecución desde cero
+ 
+ 1. Utilizar una instancia de **SQL Server 2019 o posterior** y SQL Server Management Studio.
+diff --git a/backend/src/main/java/com/techcare/backend/reportes/ReportesContrato.java b/backend/src/main/java/com/techcare/backend/reportes/ReportesContrato.java
+new file mode 100644
+index 0000000..00e2047
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/reportes/ReportesContrato.java
+@@ -0,0 +1,30 @@
++package com.techcare.backend.reportes;
++import java.util.List;
++import java.util.Map;
++import java.util.Locale;
++import org.springframework.http.HttpStatus;
++import org.springframework.web.server.ResponseStatusException;
++public final class ReportesContrato {
++ private ReportesContrato() {}
++ public record Columna(String clave,String titulo,String tipo,boolean visible) {}
++ public record Indicador(String clave,String titulo,String tipo) {}
++ public record Definicion(String codigo,String titulo,String descripcion,List<String> filtros,List<String> roles,List<Columna> columnas,List<Indicador> indicadores) {}
++ public static final Map<String,Definicion> REPORTES=Map.ofEntries(
++  Map.entry("R01",new Definicion("R01","Órdenes activas por estado, prioridad y técnico","Una fila por orden no final. Incluye al técnico asignado antes del diagnóstico.",List.of("estado","tecnicoId","desde","hasta"),List.of("ADMIN","RECEPCION","TECNICO"),List.of(new Columna("OrdenID","ID de orden","entero",false),new Columna("NumeroOrden","Orden","texto",true),new Columna("FechaIngreso","Ingreso","fechaHora",true),new Columna("Estado","Estado","texto",true),new Columna("Prioridad","Prioridad","texto",true),new Columna("Cliente","Cliente","texto",true),new Columna("NumeroSerie","Serie","texto",true),new Columna("Tecnico","Técnico","texto",true),new Columna("ReparacionID","Reparación","entero",false)),List.of())),
++  Map.entry("R02",new Definicion("R02","Historial de órdenes por cliente","Incluye clientes sin equipos y equipos sin órdenes. Los datos fiscales de la factura se conservan en su documento.",List.of("clienteId"),List.of("ADMIN","RECEPCION"),List.of(new Columna("ClienteID","ID de cliente","entero",false),new Columna("NIT","NIT","texto",true),new Columna("Cliente","Cliente","texto",true),new Columna("NumeroSerie","Serie","texto",true),new Columna("OrdenID","ID de orden","entero",false),new Columna("NumeroOrden","Orden","texto",true),new Columna("FechaIngreso","Ingreso","fechaHora",true),new Columna("EstadoCodigo","Estado","texto",true),new Columna("Diagnostico","Diagnóstico","textoLargo",false),new Columna("DescripcionTrabajo","Trabajo","textoLargo",false),new Columna("NumeroFactura","Factura","texto",true),new Columna("Total","Total facturado","moneda",true),new Columna("Saldo","Saldo","moneda",true),new Columna("FechaEntrega","Entrega","fechaHora",false)),List.of())),
++  Map.entry("R03",new Definicion("R03","Historial técnico por número de serie","Incluye equipos sin servicio. El técnico consulta las órdenes que le corresponden. Serie exacta.",List.of("serie"),List.of("ADMIN","RECEPCION","TECNICO"),List.of(new Columna("EquipoID","ID de equipo","entero",false),new Columna("NumeroSerie","Serie","texto",true),new Columna("Cliente","Cliente","texto",true),new Columna("Tipo","Tipo","texto",true),new Columna("Marca","Marca","texto",true),new Columna("Modelo","Modelo","texto",true),new Columna("OrdenID","ID de orden","entero",false),new Columna("NumeroOrden","Orden","texto",true),new Columna("EstadoCodigo","Estado","texto",true),new Columna("FechaDiagnostico","Diagnóstico","fechaHora",false),new Columna("Diagnostico","Diagnóstico","textoLargo",false),new Columna("FechaInicio","Inicio reparación","fechaHora",false),new Columna("FechaFin","Fin reparación","fechaHora",false),new Columna("DescripcionTrabajo","Trabajo","textoLargo",false),new Columna("Tecnico","Técnico","texto",true)),List.of())),
++  Map.entry("R04",new Definicion("R04","Diagnósticos y reparaciones por técnico","Una fila por proceso. La mano de obra estimada y la de reparación corresponden a etapas distintas.",List.of("tecnicoId","desde","hasta"),List.of("ADMIN","TECNICO"),List.of(new Columna("Proceso","Proceso","texto",true),new Columna("RegistroID","Registro","entero",false),new Columna("Fecha","Fecha","fechaHora",true),new Columna("OrdenID","ID de orden","entero",false),new Columna("NumeroOrden","Orden","texto",true),new Columna("NumeroSerie","Serie","texto",true),new Columna("Cliente","Cliente","texto",true),new Columna("UsuarioID","ID de técnico","entero",false),new Columna("Tecnico","Técnico","texto",true),new Columna("Trabajo","Trabajo","textoLargo",false),new Columna("ManoObra","Mano de obra","moneda",true)),List.of())),
++  Map.entry("R05",new Definicion("R05","Repuestos utilizados en reparaciones","Una fila por consumo, con cantidad, costo y precio históricos.",List.of("ordenId","tecnicoId","bodegaId"),List.of("ADMIN","BODEGA","TECNICO"),List.of(new Columna("OrdenID","ID de orden","entero",false),new Columna("NumeroOrden","Orden","texto",true),new Columna("Tecnico","Técnico","texto",true),new Columna("Bodega","Bodega","texto",true),new Columna("Codigo","Código","texto",true),new Columna("Repuesto","Repuesto","texto",true),new Columna("Cantidad","Cantidad","entero",true),new Columna("CostoUnitario","Costo unitario","moneda",true),new Columna("PrecioUnitario","Precio unitario","moneda",true),new Columna("CostoHistorico","Costo histórico","moneda",true),new Columna("VentaHistorica","Venta histórica","moneda",true),new Columna("MovimientoID","Movimiento","entero",false),new Columna("Fecha","Fecha","fechaHora",false)),List.of(new Indicador("CostoHistoricoTotal","Costo de los consumos","moneda"),new Indicador("VentaHistoricaTotal","Venta de los consumos","moneda")))),
++  Map.entry("R06",new Definicion("R06","Inventario actual por bodega","Incluye asociaciones vacías e inactivos. Valoración al costo promedio móvil por bodega.",List.of("bodegaId","categoriaId","repuestoId"),List.of("ADMIN","BODEGA"),List.of(new Columna("BodegaID","ID de bodega","entero",false),new Columna("Bodega","Bodega","texto",true),new Columna("Categoria","Categoría","texto",true),new Columna("Codigo","Código","texto",true),new Columna("Repuesto","Repuesto","texto",true),new Columna("Existencia","Existencias","entero",true),new Columna("StockMinimo","Mínimo","entero",true),new Columna("Faltante","Faltan para el mínimo","entero",true),new Columna("EstadoStock","Estado","texto",true),new Columna("CostoPromedio","Costo promedio","moneda6",true),new Columna("ValorExistencia","Valor a costo promedio","moneda6",true),new Columna("BodegaActiva","Bodega activa","booleano",false),new Columna("RepuestoActivo","Repuesto activo","booleano",false)),List.of(new Indicador("ValorTotal","Valor a costo promedio","moneda6")))),
++  Map.entry("R07",new Definicion("R07","Existencias en mínimo o por debajo","Incluye stock cero con mínimo cero. El faltante indica unidades para igualar el mínimo.",List.of("bodegaId","categoriaId","repuestoId"),List.of("ADMIN","BODEGA"),List.of(new Columna("BodegaID","ID de bodega","entero",false),new Columna("Bodega","Bodega","texto",true),new Columna("Categoria","Categoría","texto",true),new Columna("Codigo","Código","texto",true),new Columna("Repuesto","Repuesto","texto",true),new Columna("Existencia","Existencias","entero",true),new Columna("StockMinimo","Mínimo","entero",true),new Columna("Faltante","Faltan para el mínimo","entero",true),new Columna("EstadoStock","Estado","texto",true),new Columna("CostoPromedio","Costo promedio","moneda6",true),new Columna("ValorExistencia","Valor a costo promedio","moneda6",true),new Columna("BodegaActiva","Bodega activa","booleano",false),new Columna("RepuestoActivo","Repuesto activo","booleano",false)),List.of())),
++  Map.entry("R08",new Definicion("R08","Compras por proveedor","Una fila por línea de compra. Las pendientes y anuladas conservan su detalle; sólo recibir mueve stock.",List.of("proveedorId","bodegaId","estado","desde","hasta"),List.of("ADMIN","BODEGA"),List.of(new Columna("CompraID","ID de compra","entero",false),new Columna("Proveedor","Proveedor","texto",true),new Columna("NumeroCompra","Compra","texto",true),new Columna("Fecha","Registro","fechaHora",true),new Columna("Estado","Estado","texto",true),new Columna("Linea","Línea","entero",false),new Columna("Codigo","Código","texto",true),new Columna("Repuesto","Repuesto","texto",true),new Columna("Destino","Bodega destino","texto",true),new Columna("Cantidad","Cantidad","entero",true),new Columna("CostoUnitario","Costo unitario","moneda",true),new Columna("CostoLinea","Costo de línea","moneda",true),new Columna("RegistradoPor","Registró","texto",false)),List.of(new Indicador("Compras","Compras distintas","entero"),new Indicador("CostoTotal","Costo de líneas seleccionadas","moneda")))),
++  Map.entry("R09",new Definicion("R09","Movimientos de inventario y origen","Una fila por movimiento. Los saldos son fotografías de cada repuesto y bodega; no se suman entre productos.",List.of("bodegaId","repuestoId","desde","hasta"),List.of("ADMIN","BODEGA"),List.of(new Columna("MovimientoID","Movimiento","entero",true),new Columna("Fecha","Fecha","fechaHora",true),new Columna("Tipo","Tipo","texto",true),new Columna("Bodega","Bodega","texto",true),new Columna("Codigo","Código","texto",true),new Columna("Repuesto","Repuesto","texto",true),new Columna("Cantidad","Cantidad","entero",true),new Columna("CantidadFirmada","Cantidad con signo","entero",false),new Columna("ExistenciaResultante","Saldo histórico","entero",true),new Columna("DocumentoOrigen","Documento","texto",true),new Columna("Proveedor","Proveedor","texto",false),new Columna("Responsable","Responsable","texto",true),new Columna("CostoUnitario","Costo unitario histórico","moneda",true),new Columna("CostoPosterior","Promedio posterior","moneda6",true)),List.of())),
++  Map.entry("R10",new Definicion("R10","Facturas pendientes y sus abonos","Una fila por abono o factura sin pagos. El resumen cuenta cada factura una vez.",List.of("clienteId"),List.of("ADMIN","CAJA"),List.of(new Columna("FacturaID","ID de factura","entero",false),new Columna("NumeroFactura","Factura","texto",true),new Columna("Cliente","Cliente","texto",true),new Columna("NumeroOrden","Orden","texto",true),new Columna("Subtotal","Subtotal","moneda",true),new Columna("Impuesto","Impuesto","moneda",true),new Columna("Total","Total facturado","moneda",true),new Columna("Pagado","Pagado","moneda",true),new Columna("Saldo","Saldo","moneda",true),new Columna("PagoID","ID de pago","entero",false),new Columna("FechaPago","Fecha del abono","fechaHora",true),new Columna("Monto","Abono","moneda",true),new Columna("Metodo","Medio de pago","texto",true),new Columna("Cajero","Registró abono","texto",false)),List.of(new Indicador("Facturas","Facturas distintas","entero"),new Indicador("TotalFacturado","Total facturado","moneda"),new Indicador("PagadoTotal","Pagado","moneda"),new Indicador("SaldoTotal","Saldo pendiente","moneda")))),
++  Map.entry("R11",new Definicion("R11","Ingresos facturados por mes","Importes facturados, distintos del efectivo cobrado. Excluye facturas anuladas; respeta las fechas seleccionadas dentro de cada mes.",List.of("clienteId","desde","hasta"),List.of("ADMIN","CAJA"),List.of(new Columna("Mes","Mes","mes",true),new Columna("CantidadFacturas","Facturas","entero",true),new Columna("ManoObra","Mano de obra","moneda",true),new Columna("Repuestos","Repuestos","moneda",true),new Columna("Impuesto","Impuesto","moneda",true),new Columna("TotalFacturado","Total facturado","moneda",true)),List.of(new Indicador("Facturas","Facturas","entero"),new Indicador("TotalFacturado","Total facturado","moneda")))),
++  Map.entry("R12",new Definicion("R12","Trazabilidad completa de órdenes","Una fila por orden. Estados, repuestos y pagos se consultan como listas independientes desde Ver detalle.",List.of("ordenId","clienteId"),List.of("ADMIN"),List.of(new Columna("OrdenID","ID de orden","entero",false),new Columna("NumeroOrden","Orden","texto",true),new Columna("FechaIngreso","Ingreso","fechaHora",true),new Columna("EstadoCodigo","Estado","texto",true),new Columna("ProblemaReportado","Problema reportado","textoLargo",false),new Columna("NIT","NIT","texto",false),new Columna("Cliente","Cliente","texto",true),new Columna("NumeroSerie","Serie","texto",true),new Columna("Recepcion","Recepción","texto",false),new Columna("TecnicoDiagnostico","Técnico diagnóstico","texto",false),new Columna("FechaDiagnostico","Fecha diagnóstico","fechaHora",false),new Columna("Diagnostico","Diagnóstico","textoLargo",false),new Columna("DescripcionTrabajo","Trabajo","textoLargo",false),new Columna("FechaInicio","Inicio reparación","fechaHora",false),new Columna("FechaFin","Fin reparación","fechaHora",false),new Columna("TecnicoReparacion","Técnico reparación","texto",false),new Columna("NumeroFactura","Factura","texto",true),new Columna("EstadoFactura","Estado de factura","texto",false),new Columna("NombreFacturacion","Nombre fiscal","texto",false),new Columna("Subtotal","Subtotal","moneda",true),new Columna("Impuesto","Impuesto","moneda",true),new Columna("Total","Total facturado","moneda",true),new Columna("Pagado","Pagado","moneda",true),new Columna("Saldo","Saldo","moneda",true),new Columna("NombreRecibe","Recibió equipo","texto",false),new Columna("FechaEntrega","Entrega","fechaHora",false),new Columna("HistorialEstados","Historial de estados","coleccion",false),new Columna("RepuestosYMovimientos","Repuestos y movimientos","coleccion",false),new Columna("Pagos","Pagos","coleccion",false)),List.of()))
++ );
++ public static Definicion obtener(String codigo) {
++  var r=REPORTES.get(codigo==null?"":codigo.toUpperCase(Locale.ROOT));
++  if(r==null)throw new ResponseStatusException(HttpStatus.NOT_FOUND,"El reporte no existe.");return r;
++ }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/reportes/ReportesController.java b/backend/src/main/java/com/techcare/backend/reportes/ReportesController.java
+new file mode 100644
+index 0000000..f2717c2
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/reportes/ReportesController.java
+@@ -0,0 +1,22 @@
++package com.techcare.backend.reportes;
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.util.MultiValueMap;
++import org.springframework.web.bind.annotation.*;
++import java.util.List;
++
++@RestController
++@RequestMapping("/api/reportes")
++public class ReportesController {
++ private final ReportesServicio servicio;
++ public ReportesController(ReportesServicio servicio) { this.servicio=servicio; }
++ @GetMapping
++ public List<ReportesContrato.Definicion> catalogo(@AuthenticationPrincipal UsuarioAutenticado u) { return servicio.catalogo(u.getUsuarioId()); }
++ @GetMapping("/{codigo}")
++ public ReportesServicio.Resultado consultar(@AuthenticationPrincipal UsuarioAutenticado u,@PathVariable String codigo,@RequestParam MultiValueMap<String,String> filtros) {
++  return servicio.consultar(u.getUsuarioId(),codigo,filtros);
++ }
++ @GetMapping("/{codigo}/opciones")
++ public List<ReportesServicio.Opcion> opciones(@AuthenticationPrincipal UsuarioAutenticado u,@PathVariable String codigo,
++   @RequestParam String tipo,@RequestParam(required=false) String buscar) { return servicio.opciones(u.getUsuarioId(),codigo,tipo,buscar); }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/reportes/ReportesErrores.java b/backend/src/main/java/com/techcare/backend/reportes/ReportesErrores.java
+new file mode 100644
+index 0000000..3ccc8e5
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/reportes/ReportesErrores.java
+@@ -0,0 +1,32 @@
++package com.techcare.backend.reportes;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.dao.DataAccessException;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.*;
++import org.springframework.web.bind.MissingServletRequestParameterException;
++import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
++import org.springframework.web.server.ResponseStatusException;
++import java.sql.SQLException;
++import java.util.Map;
++@RestControllerAdvice(assignableTypes=ReportesController.class)
++public class ReportesErrores {
++ private static final Logger LOG=LoggerFactory.getLogger(ReportesErrores.class);
++ @ExceptionHandler({MethodArgumentTypeMismatchException.class,MissingServletRequestParameterException.class})
++ ResponseEntity<Map<String,Object>> entrada(Exception e) { return error(400,"Revisá el reporte, sus filtros y la paginación."); }
++ @ExceptionHandler(ResponseStatusException.class)
++ ResponseEntity<Map<String,Object>> estado(ResponseStatusException e) { return error(e.getStatusCode().value(),e.getReason()); }
++ @ExceptionHandler(DataAccessException.class)
++ ResponseEntity<Map<String,Object>> sql(DataAccessException e) {
++  for(Throwable c=e;c!=null;c=c.getCause())if(c instanceof SQLException s)
++   for(SQLException x=s;x!=null;x=x.getNextException())switch(x.getErrorCode()) {
++    case 52300: return error(400,"Los filtros no son válidos para este reporte.");
++    case 52302: return error(404,"El reporte no existe.");
++    case 52304: return error(403,"Tu usuario no tiene permiso para este reporte o alcance.");
++    case 1205,1222: return error(409,"La consulta coincidió con otra operación. Volvé a actualizar el reporte.");
++    default: break;
++   }
++  LOG.error("No se pudo consultar el reporte.",e);return error(503,"No se pudo consultar el reporte. Volvé a intentar.");
++ }
++ private static ResponseEntity<Map<String,Object>> error(int estado,String mensaje) { return ResponseEntity.status(estado).body(Map.of("estado",estado,"mensaje",mensaje)); }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/reportes/ReportesServicio.java b/backend/src/main/java/com/techcare/backend/reportes/ReportesServicio.java
+new file mode 100644
+index 0000000..1491bc8
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/reportes/ReportesServicio.java
+@@ -0,0 +1,80 @@
++package com.techcare.backend.reportes;
++import org.springframework.http.HttpStatus;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Isolation;
++import org.springframework.transaction.annotation.Transactional;
++import org.springframework.util.MultiValueMap;
++import org.springframework.web.server.ResponseStatusException;
++import java.math.BigDecimal;
++import java.sql.Timestamp;
++import java.time.*;
++import java.time.format.DateTimeParseException;
++import java.util.*;
++
++@Service
++public class ReportesServicio {
++ private static final String CONSULTA="EXEC dbo.spConsultarReporteApi ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
++ private final JdbcTemplate jdbc;
++ public ReportesServicio(JdbcTemplate jdbc) { this.jdbc=jdbc; }
++ public List<ReportesContrato.Definicion> catalogo(int actor) {
++  return jdbc.queryForList("EXEC dbo.spCatalogoReportesApi ?",actor).stream().map(r->ReportesContrato.obtener(String.valueOf(r.get("Codigo")))).toList();
++ }
++ public List<Opcion> opciones(int actor,String codigo,String tipo,String buscar) {
++  var r=ReportesContrato.obtener(codigo);
++  if(!r.filtros().contains(tipo)||List.of("serie","desde","hasta").contains(tipo))mal("El reporte no ofrece ese catálogo de filtros.");
++  if(buscar!=null&&buscar.length()>150)mal("La búsqueda admite hasta 150 caracteres.");
++  return jdbc.queryForList("EXEC dbo.spOpcionesReporteApi ?, ?, ?, ?",actor,r.codigo(),tipo,buscar).stream()
++    .map(row->new Opcion(texto(row.get("Valor")),texto(row.get("Etiqueta")))).toList();
++ }
++ @Transactional(readOnly=true,isolation=Isolation.SERIALIZABLE)
++ public Resultado consultar(int actor,String codigo,MultiValueMap<String,String> entrada) {
++  var reporte=ReportesContrato.obtener(codigo);var valores=new HashMap<String,String>();
++  entrada.forEach((k,v)->{
++   if((!reporte.filtros().contains(k)&&!List.of("pagina","tamano").contains(k))||v.size()!=1)mal("El filtro "+k+" no es válido para este reporte.");
++   String s=v.get(0);if(s!=null&&!s.isBlank())valores.put(k,s.strip());
++  });
++  LocalDate desde=fechaFiltro(valores.get("desde")),hasta=fechaFiltro(valores.get("hasta"));
++  if(desde!=null&&hasta!=null&&desde.isAfter(hasta))mal("La fecha inicial no puede ser posterior a la final.");
++  String serie=valores.get("serie"),estado=valores.get("estado");
++  if(serie!=null&&serie.length()>80)mal("La serie admite hasta 80 caracteres.");
++  if(estado!=null&&estado.length()>30)mal("El estado admite hasta 30 caracteres.");
++  int pagina=numero(valores.get("pagina"),1),tamano=numero(valores.get("tamano"),25);
++  if(tamano>100)mal("El tamaño de página debe estar entre 1 y 100.");
++  Object[] args={actor,reporte.codigo(),desde,hasta,id(valores,"clienteId"),id(valores,"tecnicoId"),id(valores,"bodegaId"),id(valores,"proveedorId"),id(valores,"ordenId"),id(valores,"categoriaId"),id(valores,"repuestoId"),estado,serie,true,1,tamano};
++  var cabeceras=jdbc.queryForList(CONSULTA,args);
++  if(cabeceras.isEmpty())throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"No se pudo obtener el resumen del reporte.");
++  var resumen=cabeceras.get(0);long total=resumen.get("Total") instanceof Number n?n.longValue():0;
++  long paginas=Math.max(1,(total-1)/tamano+1);int actual=(int)Math.min(pagina,paginas);
++  Object[] detalle=args.clone();detalle[13]=false;detalle[14]=actual;
++  var filas=jdbc.queryForList(CONSULTA,detalle).stream().map(fila->{
++   var segura=new LinkedHashMap<String,String>();
++   for(var c:reporte.columnas())segura.put(c.clave(),texto(fila.get(c.clave())));
++   return segura;
++  }).toList();
++  var indicadores=reporte.indicadores().stream().map(i->new Indicador(i.titulo(),i.tipo(),texto(resumen.get(i.clave())))).toList();
++  return new Resultado(reporte.codigo(),reporte.titulo(),filas,indicadores,actual,tamano,total,paginas);
++ }
++ private static Integer id(Map<String,String> v,String k) { return v.containsKey(k)?numero(v.get(k),1):null; }
++ private static int numero(String s,int defecto) {
++  if(s==null)return defecto;
++  try { if(!s.matches("[1-9][0-9]{0,9}"))throw new NumberFormatException();return Integer.parseInt(s); }
++  catch(NumberFormatException e) { mal("Los identificadores, la página y el tamaño deben ser enteros positivos.");return 0; }
++ }
++ private static LocalDate fechaFiltro(String s) {
++  if(s==null)return null;
++  try { var d=LocalDate.parse(s);if(d.getYear()<1||d.getYear()>9999)throw new DateTimeParseException("rango",s,0);return d; }
++  catch(DateTimeParseException e) { mal("Ingresá una fecha válida entre los años 1 y 9999.");return null; }
++ }
++ private static void mal(String s) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST,s); }
++ private static String texto(Object v) {
++  if(v==null)return null;if(v instanceof BigDecimal d)return d.toPlainString();
++  if(v instanceof Timestamp t)return t.toLocalDateTime().atOffset(ZoneOffset.UTC).toString();
++  if(v instanceof LocalDateTime t)return t.atOffset(ZoneOffset.UTC).toString();
++  if(v instanceof java.sql.Date d)return d.toLocalDate().toString();
++  return v.toString();
++ }
++ public record Opcion(String valor,String etiqueta) {}
++ public record Indicador(String titulo,String tipo,String valor) {}
++ public record Resultado(String codigo,String titulo,List<LinkedHashMap<String,String>> filas,List<Indicador> indicadores,int pagina,int tamano,long total,long totalPaginas) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+index 71ab598..1afe9ad 100644
+--- a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
++++ b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+@@ -53,6 +53,7 @@ public class SeguridadConfig {
+                 .authorizeHttpRequests(a -> a
+                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+                         .requestMatchers(HttpMethod.GET,"/api/auth/csrf").permitAll()
++                        .requestMatchers(HttpMethod.GET,"/api/reportes","/api/reportes/**").hasAnyRole("ADMIN","RECEPCION","TECNICO","BODEGA","CAJA")
+                         .requestMatchers(HttpMethod.GET,"/api/inventario","/api/inventario/**").hasAnyRole("ADMIN","BODEGA")
+                         .requestMatchers(HttpMethod.GET,"/api/compras","/api/compras/**").hasAnyRole("ADMIN","BODEGA")
+                         .requestMatchers(HttpMethod.POST,"/api/compras","/api/compras/*/recepcion","/api/compras/*/anulacion").hasAnyRole("ADMIN","BODEGA")
+diff --git a/backend/src/test/java/com/techcare/backend/reportes/ReportesApiTests.java b/backend/src/test/java/com/techcare/backend/reportes/ReportesApiTests.java
+new file mode 100644
+index 0000000..ff7c2a5
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/reportes/ReportesApiTests.java
+@@ -0,0 +1,132 @@
++package com.techcare.backend.reportes;
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.junit.jupiter.params.provider.ValueSource;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.jdbc.UncategorizedSQLException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.request.RequestPostProcessor;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.transaction.PlatformTransactionManager;
++import org.springframework.transaction.TransactionDefinition;
++import org.springframework.transaction.support.SimpleTransactionStatus;
++import org.springframework.web.context.WebApplicationContext;
++import java.math.BigDecimal;
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.time.LocalDate;
++import java.util.*;
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.hasSize;
++import static org.hamcrest.Matchers.not;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.*;
++import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(properties="spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class ReportesApiTests {
++ @Autowired WebApplicationContext context;
++ @MockitoBean JdbcTemplate jdbc;
++ @MockitoBean PlatformTransactionManager transactions;
++ private MockMvc mvc;
++ private Map<String,Object> fila,resumen;
++ @BeforeEach void preparar() {
++  reset(jdbc,transactions);when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
++  mvc=MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
++  fila=new HashMap<>();fila.putAll(Map.of("OrdenID",7,"NumeroOrden","OS-7","Cliente","Cliente ñ 漢字","NumeroSerie","SER-7","Tecnico","Técnico ñ","FechaIngreso",Timestamp.valueOf("2026-10-23 10:20:30"),"PasswordHash","PRIVADO","LoginSQL","INTERNO"));
++  fila.putAll(Map.of("Total",new BigDecimal("79.52"),"Saldo",new BigDecimal("49.52"),"CostoPromedio",new BigDecimal("15.571429"),"ValorExistencia",new BigDecimal("21474836469978525163.530000"),"MovimientoID",9007199254740993L,"Existencia",9007199254740995L,"Mes",java.sql.Date.valueOf("2026-10-01")));
++  fila.put("HistorialEstados","[{\"EstadoNuevo\":\"RECIBIDO\",\"Observacion\":\"Garantía ñ 漢字\"}]");
++  fila.put("RepuestosYMovimientos","[{\"Cantidad\":1,\"CostoUnitario\":\"12.25\",\"MovimientoID\":\"9007199254740993\"}]");
++  fila.put("Pagos","[{\"Monto\":\"20.00\"},{\"Monto\":\"10.00\"}]");
++  resumen=new HashMap<>();resumen.putAll(Map.of("Total",60L,"Facturas",1L,"TotalFacturado",new BigDecimal("79.52"),"PagadoTotal",new BigDecimal("30.00"),"SaldoTotal",new BigDecimal("49.52"),"ValorTotal",new BigDecimal("21474836469978525163.530000")));
++  when(jdbc.queryForList(anyString(),any(Object[].class))).thenAnswer(i->{
++   String sql=i.getArgument(0);Object[] args=(Object[])i.getRawArguments()[1];
++   if(sql.contains("spCatalogoReportesApi"))return List.of(Map.of("Codigo","R01"),Map.of("Codigo","R12"));
++   if(sql.contains("spOpcionesReporteApi"))return List.of(Map.of("Valor","42","Etiqueta","Técnico ñ 漢字","PasswordHash","PRIVADO"));
++   return List.of(Boolean.TRUE.equals(args[13])?resumen:fila);
++  });
++ }
++ private RequestPostProcessor actor(String rol) {
++  var u=new UsuarioAutenticado(42,"personal","Personal prueba","EMP-42",List.of(rol),true,null);
++  return authentication(UsernamePasswordAuthenticationToken.authenticated(u,null,u.getAuthorities()));
++ }
++ @Test void todasLasRutasExigenSesion() throws Exception {
++  for(String p:List.of("/api/reportes","/api/reportes/R01","/api/reportes/R01/opciones?tipo=tecnicoId"))mvc.perform(get(p)).andExpect(status().isUnauthorized());verifyNoInteractions(jdbc);
++ }
++ @ParameterizedTest @ValueSource(strings={"ADMIN","RECEPCION","TECNICO","BODEGA","CAJA"})
++ void catalogoConsultaPermisosConElActorAutenticado(String rol) throws Exception {
++  mvc.perform(get("/api/reportes").with(actor(rol))).andExpect(status().isOk()).andExpect(jsonPath("$[0].codigo").value("R01")).andExpect(jsonPath("$[0].columnas",hasSize(9)));
++  verify(jdbc).queryForList("EXEC dbo.spCatalogoReportesApi ?",42);
++ }
++ @ParameterizedTest @ValueSource(strings={"R01","R02","R03","R04","R05","R06","R07","R08","R09","R10","R11","R12"})
++ void doceReportesSerializanColumnasDeclaradasYResumenTransaccional(String codigo) throws Exception {
++  mvc.perform(get("/api/reportes/"+codigo).with(actor("ADMIN"))).andExpect(status().isOk()).andExpect(jsonPath("$.codigo").value(codigo)).andExpect(jsonPath("$.total").value(60)).andExpect(jsonPath("$.totalPaginas").value(3))
++   .andExpect(content().string(not(containsString("PRIVADO")))).andExpect(content().string(not(containsString("INTERNO"))));
++  verify(transactions).getTransaction(argThat(t->t.isReadOnly()&&t.getIsolationLevel()==TransactionDefinition.ISOLATION_SERIALIZABLE));verify(transactions).commit(any());
++ }
++ @Test void importesYBigintNoPierdenDigitos() throws Exception {
++  mvc.perform(get("/api/reportes/R06").with(actor("BODEGA"))).andExpect(status().isOk())
++   .andExpect(jsonPath("$.filas[0].Existencia").value("9007199254740995")).andExpect(jsonPath("$.filas[0].CostoPromedio").value("15.571429"))
++   .andExpect(jsonPath("$.filas[0].ValorExistencia").value("21474836469978525163.530000"));
++  mvc.perform(get("/api/reportes/R09").with(actor("ADMIN"))).andExpect(jsonPath("$.filas[0].MovimientoID").value("9007199254740993"));
++ }
++ @Test void fechasOuterUtcYMesNoSeConviertenAFlotantes() throws Exception {
++  mvc.perform(get("/api/reportes/R01").with(actor("ADMIN"))).andExpect(jsonPath("$.filas[0].FechaIngreso").value("2026-10-23T10:20:30Z"));
++  mvc.perform(get("/api/reportes/R11").with(actor("CAJA"))).andExpect(jsonPath("$.filas[0].Mes").value("2026-10-01"));
++ }
++ @Test void detalleR12ConservaListasIndependientesYTextoUnicode() throws Exception {
++  mvc.perform(get("/api/reportes/R12").with(actor("ADMIN"))).andExpect(jsonPath("$.filas[0].HistorialEstados").value(containsString("Garantía ñ 漢字")))
++   .andExpect(jsonPath("$.filas[0].Pagos").value("[{\"Monto\":\"20.00\"},{\"Monto\":\"10.00\"}]"));
++ }
++ @Test void resumenFinancieroProvieneDeSqlSinSumarFilasEnJava() throws Exception {
++  mvc.perform(get("/api/reportes/R10").with(actor("CAJA"))).andExpect(jsonPath("$.indicadores[0].valor").value("1"))
++   .andExpect(jsonPath("$.indicadores[1].valor").value("79.52")).andExpect(jsonPath("$.indicadores[2].valor").value("30.00")).andExpect(jsonPath("$.indicadores[3].valor").value("49.52"));
++ }
++ @Test void parametrosFechasYFiltrosTienenPosicionesFijas() throws Exception {
++  mvc.perform(get("/api/reportes/r01").with(actor("TECNICO")).param("tecnicoId","42").param("estado","RECIBIDO").param("desde","2026-10-01").param("hasta","2026-10-23").param("pagina","2").param("tamano","10")).andExpect(status().isOk());
++  verify(jdbc).queryForList(anyString(),eq(42),eq("R01"),eq(LocalDate.of(2026,10,1)),eq(LocalDate.of(2026,10,23)),isNull(),eq(42),isNull(),isNull(),isNull(),isNull(),isNull(),eq("RECIBIDO"),isNull(),eq(true),eq(1),eq(10));
++  verify(jdbc).queryForList(anyString(),eq(42),eq("R01"),eq(LocalDate.of(2026,10,1)),eq(LocalDate.of(2026,10,23)),isNull(),eq(42),isNull(),isNull(),isNull(),isNull(),isNull(),eq("RECIBIDO"),isNull(),eq(false),eq(2),eq(10));
++ }
++ @Test void busquedaLiteralSeEnviaComoParametro() throws Exception {
++  mvc.perform(get("/api/reportes/R08/opciones").with(actor("BODEGA")).param("tipo","proveedorId").param("buscar","%_' OR 1=1")).andExpect(status().isOk()).andExpect(content().string(not(containsString("PRIVADO"))));
++  verify(jdbc).queryForList("EXEC dbo.spOpcionesReporteApi ?, ?, ?, ?",42,"R08","proveedorId","%_' OR 1=1");
++ }
++ @ParameterizedTest @ValueSource(strings={"/R01?clienteId=1","/R01?usuarioActorId=999","/R01?pagina=0","/R01?tamano=101","/R01?tecnicoId=1.5","/R01?tecnicoId=2147483648","/R01?tecnicoId=-1","/R01?tecnicoId=1&tecnicoId=2","/R01?desde=2026-02-30","/R01?desde=0000-01-01","/R01?desde=2026-10-23&hasta=2026-10-01","/R11?bodegaId=1","/R03?serie="})
++ void filtrosInvalidosSeRechazanSinConsultarSql(String path) throws Exception {
++  if(path.equals("/R03?serie="))path="/R03?serie="+"x".repeat(81);
++  mvc.perform(get("/api/reportes"+path).with(actor("ADMIN"))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++ }
++ @Test void codigosYCatalogosAjenosSeRechazan() throws Exception {
++  mvc.perform(get("/api/reportes/R99").with(actor("ADMIN"))).andExpect(status().isNotFound());
++  mvc.perform(get("/api/reportes/R01/opciones?tipo=clienteId").with(actor("ADMIN"))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++ }
++ @Test void paginaFueraDeRangoSeAjustaSinAlterarTotal() throws Exception {
++  mvc.perform(get("/api/reportes/R01?pagina=2147483647").with(actor("ADMIN"))).andExpect(jsonPath("$.pagina").value(3));
++  verify(jdbc).queryForList(anyString(),eq(42),eq("R01"),isNull(),isNull(),isNull(),isNull(),isNull(),isNull(),isNull(),isNull(),isNull(),isNull(),isNull(),eq(false),eq(3),eq(25));
++ }
++ @Test void consultaVaciaConservaResumenCero() throws Exception {
++  resumen.put("Total",0L);
++  when(jdbc.queryForList(anyString(),any(Object[].class))).thenAnswer(i->Boolean.TRUE.equals(((Object[])i.getRawArguments()[1])[13])?List.of(resumen):List.of());
++  mvc.perform(get("/api/reportes/R01").with(actor("ADMIN"))).andExpect(jsonPath("$.filas",hasSize(0))).andExpect(jsonPath("$.total").value(0)).andExpect(jsonPath("$.pagina").value(1));
++ }
++ @Test void moduloNoTieneEscriturasNiAceptaRolesDesconocidos() throws Exception {
++  mvc.perform(get("/api/reportes").with(actor("OTRO"))).andExpect(status().isForbidden());
++  for(var metodo:List.of(org.springframework.http.HttpMethod.POST,org.springframework.http.HttpMethod.PUT,org.springframework.http.HttpMethod.DELETE))
++   mvc.perform(request(metodo,"/api/reportes/R01").with(actor("ADMIN")).with(csrf())).andExpect(status().isForbidden());verifyNoInteractions(jdbc);
++ }
++ @ParameterizedTest @CsvSource({"52300,400","52302,404","52304,403","1205,409","1222,409","2812,503"})
++ void erroresSqlMantienenContratoSinExponerDetalles(int codigo,int estado) throws Exception {
++  when(jdbc.queryForList(anyString(),any(Object[].class))).thenThrow(new UncategorizedSQLException("reporte","EXEC",new SQLException("INTERNO_SQL","S0001",codigo)));
++  mvc.perform(get("/api/reportes/R01").with(actor("TECNICO"))).andExpect(status().is(estado)).andExpect(content().string(not(containsString("INTERNO_SQL"))));
++ }
++}
+diff --git a/frontend/README.md b/frontend/README.md
+index 54d700e..018348c 100644
+--- a/frontend/README.md
++++ b/frontend/README.md
+@@ -22,10 +22,16 @@ Se conserva la configuración local existente de `VITE_PROXY_TARGET` y
+   un empleado nuevo o un empleado activo que todavía no tenga cuenta.
+ - Órdenes: recepción con confirmación, listado con filtros, expediente e historial,
+   asignación de técnicos y cancelación según el estado. Requiere la actualización SQL 16.
+-  Diagnósticos y reparaciones existentes se consultan; su registro y los cobros
+-  se integran en las siguientes etapas.
++  Servicio técnico: diagnóstico, autorización, reparación, actividades, consumo de
++  repuestos y cierre en LISTO. Requiere la actualización SQL 19.
++- Caja y entrega: factura con detalle PDF, abonos y entrega con saldo cero (SQL 23).
++- Abastecimiento: categorías, repuestos, proveedores, bodegas y asociaciones (SQL 26).
++- Compras: registro, recepción y anulación; promedio móvil por bodega (SQL 30 y 36).
++- Inventario: existencias, mínimos, valoración y kardex (SQL 33).
++- Reportes: R01–R12, filtros por reporte, paginación, resúmenes y trazabilidad,
++  según el rol de la sesión (SQL 38). Ver `../INTEGRACION_REPORTES.md`.
+ 
+-Los demás módulos conservan sus pantallas pendientes de integración. El mapa
++El resumen general del taller conserva sus datos de demostración. El mapa
+ `/integracion`, disponible para ADMIN, detalla los endpoints implementados.
+ 
+ ## Sesión y permisos
+@@ -40,8 +46,10 @@ Las rutas protegidas redirigen al login cuando no hay sesión. El menú y las
+ acciones se ajustan a los roles; el servidor comprueba los mismos permisos.
+ Al salir o vencer la sesión se limpia la caché de consultas para el siguiente usuario.
+ 
+-Las respuestas de Clientes y Equipos conservan PascalCase. Acceso, usuarios y órdenes
+-usan DTO camelCase en sus respectivos archivos de `src/services/`.
++Las respuestas de Clientes y Equipos conservan PascalCase. Los otros módulos
++usan DTO camelCase en sus respectivos archivos de `src/services/`; las filas
++de Reportes conservan las claves de su contrato de columnas. Sus importes,
++IDs y cantidades se transportan como texto para conservar la precisión.
+ Los errores mantienen `{estado,mensaje,errores?}`. El alta usa una solicitud directa
+ y no guarda la contraseña en la caché de consultas o de mutaciones.
+ 
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 917be2b..52f0654 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -11,7 +11,7 @@ import { OrdenesListPage } from "./features/ordenes/OrdenesListPage";
+ import { OrdenNuevaPage } from "./features/ordenes/OrdenNuevaPage";
+ import { OrdenExpedientePage } from "./features/ordenes/OrdenExpedientePage";
+ 
+-import { ReportesPage } from "./features/reportes/ReportesPage";
++const ReportesPage = lazy(() => import("./features/reportes/ReportesPage").then(m => ({ default: m.ReportesPage })));
+ import { AdministracionPage } from "./features/administracion/AdministracionPage";
+ import { IntegracionPage } from "./features/integracion/IntegracionPage";
+ import { LoginPage } from "./features/auth/LoginPage";
+@@ -56,7 +56,7 @@ export default function App() {
+ 
+         <Route path="/facturacion" element={<Suspense fallback={<LoadingState titulo="Cargando caja…" />}><FacturacionPage /></Suspense>} />
+ 
+-        <Route path="/reportes" element={<ReportesPage />} />
++        <Route path="/reportes" element={<Suspense fallback={<LoadingState titulo="Cargando reportes…" />}><ReportesPage /></Suspense>} />
+ 
+         <Route path="/administracion" element={<AdministracionPage />} />
+         <Route path="/integracion" element={<IntegracionPage />} />
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index 8d46a5e..a9ed69a 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -1,7 +1,7 @@
+ /**
+  * Capacidades conectadas de acceso, servicio, caja y abastecimiento.
+  * Las rutas disponibles requieren sesión y permisos del servidor.
+- * Compras e inventario están conectados; los reportes conservan su estado pendiente.
++ * Compras, inventario y los doce reportes están conectados.
+  */
+ 
+ export type EstadoCapacidad = "disponible" | "incompleta" | "ausente";
+@@ -650,17 +650,17 @@ export const OPERACIONES: OperacionApi[] = [
+ 
+   // ---- Reportes ----
+   {
+-    id: "reportes.consultar",
+-    modulo: "Reportes",
+-    operacion: "Doce reportes de la consigna",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/reportes/{r01..r12})",
+-    entrada: "filtros por reporte",
+-    respuesta: "filas del reporte",
+-    roles: "Segun rol",
+-    estado: "ausente",
+-    procedimiento: "03_Reportes.sql (R01..R12)",
+-    nota: "Los datos deben venir de consultas del servidor. No construir JOIN ni agregaciones en el navegador.",
++    id: "reportes.catalogo", modulo: "Reportes", operacion: "Consultar reportes disponibles para la sesión", metodo: "GET", ruta: "/api/reportes",
++    entrada: "Sesión", respuesta: "DefinicionReporte[]", roles: "ADMIN, RECEPCION, TECNICO, BODEGA, CAJA", estado: "disponible", procedimiento: "spCatalogoReportesApi",
++  },
++  {
++    id: "reportes.consultar", modulo: "Reportes", operacion: "Consultar R01 a R12 con resumen y paginación", metodo: "GET", ruta: "/api/reportes/{codigo}",
++    entrada: "Filtros propios del reporte + pagina?, tamano?", respuesta: "filas[] + indicadores[] + paginación", roles: "Según reporte; técnico limitado a su trabajo", estado: "disponible", procedimiento: "spConsultarReporteApi",
++    nota: "Consultas estáticas y filtros parametrizados. R10 resume por factura; R12 conserva listas independientes. Importes y bigint viajan como texto.",
++  },
++  {
++    id: "reportes.opciones", modulo: "Reportes", operacion: "Buscar opciones de los filtros permitidos", metodo: "GET", ruta: "/api/reportes/{codigo}/opciones",
++    entrada: "tipo, buscar?", respuesta: "valor + etiqueta (hasta 100)", roles: "Según reporte y alcance", estado: "disponible", procedimiento: "spOpcionesReporteApi",
+   },
+ 
+   // ---- Administracion ----
+diff --git a/frontend/src/app/navigation.ts b/frontend/src/app/navigation.ts
+index 68c4342..1912eab 100644
+--- a/frontend/src/app/navigation.ts
++++ b/frontend/src/app/navigation.ts
+@@ -130,6 +130,7 @@ export const NAVEGACION: NavGrupo[] = [
+         ruta: "/reportes",
+         icono: FileBarChart,
+         descripcion: "Doce reportes operativos del taller.",
++        roles: ["ADMIN", "RECEPCION", "TECNICO", "BODEGA", "CAJA"],
+       },
+     ],
+   },
+diff --git a/frontend/src/features/integracion/IntegracionPage.tsx b/frontend/src/features/integracion/IntegracionPage.tsx
+index 78f3203..38fe5f9 100644
+--- a/frontend/src/features/integracion/IntegracionPage.tsx
++++ b/frontend/src/features/integracion/IntegracionPage.tsx
+@@ -63,7 +63,7 @@ export function IntegracionPage() {
+ 
+       <div className="tc-stack">
+         <Alert tono="info" titulo="Contrato verificado">
+-          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF, entrega, abastecimiento, compras, recepción, inventario y kardex tienen rutas bajo <code>{API_BASE_URL}</code>.
++          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF, entrega, abastecimiento, compras, recepción, inventario, kardex y reportes tienen rutas bajo <code>{API_BASE_URL}</code>.
+           Las operaciones requieren sesión, rol y protección CSRF al escribir. El servicio técnico valida además
+           el responsable asignado. Los errores mantienen la forma <code>{"{ estado, mensaje, errores? }"}</code>.
+         </Alert>
+diff --git a/frontend/src/features/reportes/ReporteDetalle.tsx b/frontend/src/features/reportes/ReporteDetalle.tsx
+new file mode 100644
+index 0000000..ef1bb7a
+--- /dev/null
++++ b/frontend/src/features/reportes/ReporteDetalle.tsx
+@@ -0,0 +1,26 @@
++import { Dialog } from "../../components/ui/Dialog";
++import { Button } from "../../components/ui/Button";
++import { DataTable, type Columna } from "../../components/ui/DataTable";
++import { Alert } from "../../components/ui/Alert";
++import { formatoReporte, type DefinicionReporte } from "../../services/reportes";
++const listas: Record<string, [string, string, string][]> = {
++  HistorialEstados: [["EstadoAnterior", "Anterior", "texto"], ["EstadoNuevo", "Nuevo", "texto"], ["Fecha", "Fecha", "fechaHora"], ["Responsable", "Responsable", "texto"], ["Observacion", "Observación", "texto"]],
++  RepuestosYMovimientos: [["Linea", "Línea", "entero"], ["Codigo", "Código", "texto"], ["Repuesto", "Repuesto", "texto"], ["Bodega", "Bodega", "texto"], ["Cantidad", "Cantidad", "entero"], ["CostoUnitario", "Costo histórico", "moneda"], ["PrecioUnitario", "Precio histórico", "moneda"], ["MovimientoID", "Movimiento", "entero"], ["Fecha", "Fecha", "fechaHora"], ["ExistenciaResultante", "Saldo histórico", "entero"]],
++  Pagos: [["PagoID", "Pago", "entero"], ["Fecha", "Fecha", "fechaHora"], ["Monto", "Monto", "moneda"], ["Metodo", "Medio de pago", "texto"], ["Referencia", "Referencia", "texto"]],
++};
++function Coleccion({ clave, valor }: { clave: string; valor: string | null }) {
++  let filas: Record<string, unknown>[];
++  try { const parsed: unknown = JSON.parse(valor ?? "[]"); if (!Array.isArray(parsed) || parsed.some(v => !v || typeof v !== "object")) throw new Error(); filas = parsed; }
++  catch { return <Alert tono="danger">No se pudo leer esta parte de la trazabilidad. Actualizá el reporte.</Alert>; }
++  const columnas: Columna<Record<string, unknown>>[] = (listas[clave] ?? []).map(([k, t, tipo]) => ({ clave: k, encabezado: t, numerica: tipo === "entero" || tipo === "moneda", render: r => <span style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{formatoReporte(r[k], tipo)}</span> }));
++  return <DataTable columnas={columnas} filas={filas} claveFila={r => filas.indexOf(r)} vacio="Sin registros en esta etapa." />;
++}
++export function ReporteDetalle({ reporte, fila, onCerrar }: { reporte: DefinicionReporte; fila: Record<string, string | null>; onCerrar: () => void }) {
++  return <Dialog abierto titulo={`${reporte.codigo} · Detalle del registro`} ancho={1100} onCerrar={onCerrar}>
++    <div className="tc-stack"><p data-autofocus tabIndex={-1} style={{ margin: 0, outline: "none" }}>{reporte.titulo}</p>
++      <dl className="tc-grid tc-grid--2">{reporte.columnas.filter(c => c.tipo !== "coleccion").map(c => <div key={c.clave}><dt className="tc-field__hint">{c.titulo}</dt><dd style={{ margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{formatoReporte(fila[c.clave], c.tipo)}</dd></div>)}</dl>
++      {reporte.columnas.filter(c => c.tipo === "coleccion").map(c => <section key={c.clave} style={{ minWidth: 0 }}><h3 className="tc-section-title">{c.titulo}</h3><Coleccion clave={c.clave} valor={fila[c.clave]} /></section>)}
++      <Button onClick={onCerrar}>Cerrar detalle</Button>
++    </div>
++  </Dialog>;
++}
+diff --git a/frontend/src/features/reportes/ReporteFiltros.tsx b/frontend/src/features/reportes/ReporteFiltros.tsx
+new file mode 100644
+index 0000000..d8a14d6
+--- /dev/null
++++ b/frontend/src/features/reportes/ReporteFiltros.tsx
+@@ -0,0 +1,22 @@
++import { useEffect, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Field, SelectInput, TextInput } from "../../components/ui/inputs";
++import { Button } from "../../components/ui/Button";
++import { reportesApi } from "../../services/reportes";
++import { mensajeDeError } from "../../services/errors";
++export const etiquetasFiltro: Record<string, string> = { clienteId: "Cliente", tecnicoId: "Técnico", bodegaId: "Bodega", proveedorId: "Proveedor", ordenId: "Orden", categoriaId: "Categoría", repuestoId: "Repuesto", estado: "Estado", serie: "Número de serie exacto", desde: "Desde (día UTC)", hasta: "Hasta (día UTC, incluido)" };
++export function FiltroReporte({ codigo, nombre, valor, onChange }: { codigo: string; nombre: string; valor: string; onChange: (v: string) => void }) {
++  const [buscar, setBuscar] = useState(""), [busqueda, setBusqueda] = useState("");
++  useEffect(() => { const timer = setTimeout(() => setBusqueda(buscar.trim()), 250); return () => clearTimeout(timer); }, [buscar]);
++  const catalogo = !["serie", "desde", "hasta"].includes(nombre), label = etiquetasFiltro[nombre], id = `reporte-${nombre}`;
++  const opciones = useQuery({ queryKey: ["reportes", "opciones", codigo, nombre, busqueda], queryFn: ({ signal }) => reportesApi.opciones(codigo, nombre, busqueda, signal), enabled: catalogo });
++  if (!catalogo) return <Field label={label} htmlFor={id}><TextInput id={id} type={nombre === "serie" ? "text" : "date"} maxLength={nombre === "serie" ? 80 : undefined} min={nombre !== "serie" ? "0001-01-01" : undefined} max={nombre !== "serie" ? "9999-12-31" : undefined} value={valor} onChange={e => onChange(e.target.value)} /></Field>;
++  return <Field label={label} htmlFor={id} hint="Hasta 100 coincidencias; escribí para buscar otras opciones.">
++    <TextInput aria-label={`Buscar ${label.toLowerCase()}`} placeholder={`Buscar ${label.toLowerCase()}…`} maxLength={150} value={buscar} onChange={e => setBuscar(e.target.value)} />
++    <SelectInput id={id} value={valor} disabled={opciones.isLoading || opciones.isError} onChange={e => onChange(e.target.value)}><option value="">Todos</option>
++      {valor && !opciones.data?.some(o => o.valor === valor) ? <option value={valor}>Seleccionado: {valor}</option> : null}
++      {opciones.data?.map(o => <option key={o.valor} value={o.valor}>{o.etiqueta}</option>)}
++    </SelectInput>
++    {opciones.isError ? <div role="alert" className="tc-field__error">{mensajeDeError(opciones.error)} <Button tamano="sm" onClick={() => opciones.refetch()}>Reintentar {label.toLowerCase()}</Button></div> : null}
++  </Field>;
++}
+diff --git a/frontend/src/features/reportes/ReportesPage.tsx b/frontend/src/features/reportes/ReportesPage.tsx
+index 8508e9f..0eef3d7 100644
+--- a/frontend/src/features/reportes/ReportesPage.tsx
++++ b/frontend/src/features/reportes/ReportesPage.tsx
+@@ -1,99 +1,75 @@
+-import { useState } from "react";
+-import { Info } from "lucide-react";
++import { useEffect, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { useSearchParams } from "react-router-dom";
++import { RefreshCw } from "lucide-react";
+ import { PageHeader, Card } from "../../components/ui/Card";
+-import { Badge } from "../../components/ui/Badge";
+-import { PendingState } from "../../components/ui/StateView";
++import { Alert } from "../../components/ui/Alert";
++import { Button } from "../../components/ui/Button";
++import { DataTable, Paginacion, type Columna } from "../../components/ui/DataTable";
++import { Field, SelectInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { reportesApi, formatoReporte, type DefinicionReporte } from "../../services/reportes";
++import { mensajeDeError } from "../../services/errors";
++import { FiltroReporte } from "./ReporteFiltros";
++import { ReporteDetalle } from "./ReporteDetalle";
+ 
+-interface Reporte {
+-  codigo: string;
+-  titulo: string;
+-  filtros: string;
+-  descripcion: string;
++function ReportePanel({ reporte }: { reporte: DefinicionReporte }) {
++  const [params, setParams] = useSearchParams();
++  const aplicados = Object.fromEntries(reporte.filtros.map(k => [k, params.get(k) ?? ""]));
++  const [entrada, setEntrada] = useState(aplicados), [error, setError] = useState("");
++  const [detalle, setDetalle] = useState<Record<string, string | null> | null>(null);
++  const consultado = params.get("consultar") === "1", raw = params.get("pagina") ?? "1";
++  const pagina = /^[1-9]\d*$/.test(raw) && Number(raw) <= 2147483647 ? Number(raw) : 1;
++  useEffect(() => { setEntrada(Object.fromEntries(reporte.filtros.map(k => [k, params.get(k) ?? ""]))); setError(""); setDetalle(null); }, [params, reporte]);
++  const datos = useQuery({ queryKey: ["reportes", "consulta", reporte.codigo, aplicados, pagina], queryFn: ({ signal }) => reportesApi.consultar(reporte.codigo, aplicados, pagina, signal), enabled: consultado, staleTime: 0 });
++  function aplicar(f: Record<string, string>, p = 1) {
++    const q = new URLSearchParams({ reporte: reporte.codigo, consultar: "1" });
++    Object.entries(f).forEach(([k, v]) => { if (v.trim()) q.set(k, v.trim()); });
++    if (p > 1) q.set("pagina", String(p));
++    setParams(q);
++  }
++  const columnas: Columna<Record<string, string | null>>[] = reporte.columnas.filter(c => c.visible).map(c => ({ clave: c.clave, encabezado: c.titulo, numerica: ["entero", "moneda", "moneda6"].includes(c.tipo), render: r => formatoReporte(r[c.clave], c.tipo) }));
++  columnas.push({ clave: "detalle", encabezado: "Detalle", render: r => <Button tamano="sm" onClick={() => setDetalle(r)}>Ver detalle</Button> });
++  const pendientes = JSON.stringify(entrada) !== JSON.stringify(aplicados);
++  return <div className="tc-stack">
++    <Card><h2 className="tc-section-title">{reporte.codigo} · {reporte.titulo}</h2><p className="tc-section-sub">{reporte.descripcion}</p>
++      <form className="tc-stack" onSubmit={e => {
++        e.preventDefault();
++        if (entrada.desde && entrada.hasta && entrada.desde > entrada.hasta) { setError("La fecha inicial no puede ser posterior a la final."); return; }
++        setError("");
++        const limpio = Object.fromEntries(Object.entries(entrada).map(([k, v]) => [k, v.trim()]));
++        if (consultado && pagina === 1 && JSON.stringify(limpio) === JSON.stringify(aplicados)) void datos.refetch();
++        else aplicar(limpio);
++      }}>
++        <div className="tc-grid tc-grid--2">{reporte.filtros.map(k => <FiltroReporte key={k} codigo={reporte.codigo} nombre={k} valor={entrada[k] ?? ""} onChange={v => setEntrada(a => ({ ...a, [k]: v }))} />)}</div>
++        <div className="tc-row"><Button type="submit" variante="primario" disabled={datos.isFetching}>Generar reporte</Button><Button onClick={() => { setError(""); setEntrada(Object.fromEntries(reporte.filtros.map(k => [k, ""]))); setParams({ reporte: reporte.codigo }); }}>Limpiar</Button>
++          {consultado ? <Button icono={<RefreshCw size={16} />} disabled={datos.isFetching} onClick={() => datos.refetch()}>Actualizar resultados</Button> : null}</div>
++      </form>
++    </Card>
++    {error ? <Alert tono="danger">{error}</Alert> : null}
++    {pendientes && consultado ? <Alert tono="info">Tenés filtros sin aplicar. Los resultados corresponden a la última consulta; pulsá Generar reporte para actualizarlos.</Alert> : null}
++    {!consultado ? <Alert tono="info">Elegí los filtros y pulsá Generar reporte. Dejar un filtro vacío incluye todos los registros permitidos para tu usuario.</Alert> : datos.isLoading ? <LoadingState titulo="Generando reporte…" /> : datos.isError ? <Alert tono="danger" accion={<Button onClick={() => datos.refetch()}>Reintentar reporte</Button>}>{mensajeDeError(datos.error)}</Alert> : datos.data ? <>
++      <div className="tc-grid tc-grid--cards"><Card><div className="tc-metric__label">Filas del filtro completo</div><div className="tc-metric__value">{formatoReporte(datos.data.total, "entero")}</div></Card>
++        {datos.data.indicadores.map(i => <Card key={i.titulo}><div className="tc-metric__label">{i.titulo}</div><strong style={{ overflowWrap: "anywhere" }}>{formatoReporte(i.valor, i.tipo)}</strong></Card>)}</div>
++      <DataTable columnas={columnas} filas={datos.data.filas} claveFila={r => datos.data!.filas.indexOf(r)} vacio="No hay registros para estos filtros." />
++      <Paginacion pagina={datos.data.pagina} totalPaginas={datos.data.totalPaginas} total={datos.data.total} onCambiar={p => aplicar(aplicados, p)} />
++      <p className="tc-field__hint">Los resúmenes se calculan sobre todo el filtro. Las fechas de filtro son días UTC incluidos; las horas de las filas se muestran en tu zona horaria.</p>
++    </> : null}
++    {detalle ? <ReporteDetalle reporte={reporte} fila={detalle} onCerrar={() => setDetalle(null)} /> : null}
++  </div>;
+ }
+-
+-const REPORTES: Reporte[] = [
+-  { codigo: "R01", titulo: "Ordenes activas por estado, prioridad y tecnico", filtros: "estado, tecnico, rango de fechas", descripcion: "Ordenes no finales con su estado, prioridad, cliente, serie y tecnico responsable." },
+-  { codigo: "R02", titulo: "Historial completo de ordenes de un cliente", filtros: "cliente", descripcion: "Incluye clientes sin ordenes (LEFT JOIN)." },
+-  { codigo: "R03", titulo: "Historial tecnico por numero de serie", filtros: "serie", descripcion: "Diagnosticos, reparaciones y tecnico por equipo, incluso sin servicio." },
+-  { codigo: "R04", titulo: "Diagnosticos y reparaciones por tecnico y fechas", filtros: "tecnico, rango de fechas", descripcion: "Union de diagnosticos y reparaciones con mano de obra." },
+-  { codigo: "R05", titulo: "Repuestos utilizados por orden, tecnico y bodega", filtros: "orden, tecnico, bodega", descripcion: "Costo y venta historicos por consumo." },
+-  { codigo: "R06", titulo: "Inventario actual por bodega, categoria y repuesto", filtros: "bodega", descripcion: "Existencia calculada del kardex con minimo y precios de referencia." },
+-  { codigo: "R07", titulo: "Existencias iguales o inferiores al minimo", filtros: "bodega", descripcion: "Alerta de reposicion con faltante para el minimo." },
+-  { codigo: "R08", titulo: "Compras por proveedor con detalle y costos historicos", filtros: "proveedor, rango de fechas", descripcion: "Lineas de compra con destino y costo por linea." },
+-  { codigo: "R09", titulo: "Movimientos de inventario con origen y usuario", filtros: "bodega, rango de fechas", descripcion: "Kardex con documento origen, responsable y existencia resultante." },
+-  { codigo: "R10", titulo: "Facturas con saldo pendiente y detalle de pagos", filtros: "cliente", descripcion: "Una fila por pago; no sumar Total sobre este resultado (usar vFacturaSaldo)." },
+-  { codigo: "R11", titulo: "Ingresos facturados por periodo", filtros: "cliente, rango de fechas", descripcion: "Mano de obra, repuestos e impuesto por mes (devengado)." },
+-  { codigo: "R12", titulo: "Trazabilidad completa de una orden", filtros: "orden, cliente", descripcion: "Una fila por orden con colecciones JSON independientes (estados, repuestos/movimientos, pagos)." },
+-];
+-
+ export function ReportesPage() {
+-  const [seleccionado, setSeleccionado] = useState<Reporte>(REPORTES[0]);
+-
+-  return (
+-    <>
+-      <PageHeader
+-        eyebrow="Reportes"
+-        titulo="Reportes del taller"
+-        descripcion="Doce reportes obligatorios. Cada uno exige una consulta del servidor; el navegador no construye JOIN ni agrega sobre listados incompletos."
+-      />
+-
+-      <div className="tc-stack">
+-        <p className="tc-inline-note">
+-          <Info size={16} aria-hidden="true" />
+-          Los reportes se generan en el servidor. Mientras no exista esa conexion, la vista queda preparada y sin
+-          datos.
+-        </p>
+-
+-        <div className="tc-split">
+-          <Card flush>
+-            <nav aria-label="Lista de reportes">
+-              <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+-                {REPORTES.map((r) => (
+-                  <li key={r.codigo}>
+-                    <button
+-                      type="button"
+-                      onClick={() => setSeleccionado(r)}
+-                      aria-current={r.codigo === seleccionado.codigo}
+-                      style={{
+-                        display: "block",
+-                        width: "100%",
+-                        textAlign: "left",
+-                        background: r.codigo === seleccionado.codigo ? "var(--tc-interactive)" : "transparent",
+-                        border: 0,
+-                        borderBottom: "1px solid var(--tc-divider)",
+-                        padding: "14px 20px",
+-                        cursor: "pointer",
+-                      }}
+-                    >
+-                      <div className="tc-row" style={{ gap: 8 }}>
+-                        <Badge tono="neutral">{r.codigo}</Badge>
+-                      </div>
+-                      <div style={{ fontSize: 13, marginTop: 4 }}>{r.titulo}</div>
+-                    </button>
+-                  </li>
+-                ))}
+-              </ul>
+-            </nav>
+-          </Card>
+-
+-          <Card>
+-            <h2 className="tc-section-title">
+-              {seleccionado.codigo} · {seleccionado.titulo}
+-            </h2>
+-            <p className="tc-section-sub">{seleccionado.descripcion}</p>
+-            <dl className="tc-dl">
+-              <dt>Filtros</dt>
+-              <dd>{seleccionado.filtros}</dd>
+-            </dl>
+-            <div style={{ marginTop: 12 }}>
+-              <PendingState
+-                titulo="Reporte sin datos"
+-                descripcion="Cuando el servidor entregue el reporte, aqui se mostraran las filas con carga, vacio y error diferenciados."
+-              />
+-            </div>
+-          </Card>
+-        </div>
+-      </div>
+-    </>
+-  );
++  const [params, setParams] = useSearchParams();
++  const catalogo = useQuery({ queryKey: ["reportes", "catalogo"], queryFn: ({ signal }) => reportesApi.catalogo(signal) });
++  const codigo = params.get("reporte") ?? catalogo.data?.[0]?.codigo;
++  const seleccionado = catalogo.data?.find(r => r.codigo === codigo);
++  return <>
++    <PageHeader eyebrow="Reportes" titulo="Reportes del taller" descripcion="Consultas de servicio, inventario y caja según los permisos de tu usuario." />
++    <div className="tc-stack">{catalogo.isLoading ? <LoadingState titulo="Cargando reportes disponibles…" /> : catalogo.isError ? <Alert tono="danger" accion={<Button onClick={() => catalogo.refetch()}>Reintentar catálogo</Button>}>{mensajeDeError(catalogo.error)}</Alert> : <>
++      <Card><Field label="Reporte" htmlFor="reporte-seleccion"><SelectInput id="reporte-seleccion" value={seleccionado?.codigo ?? ""} onChange={e => setParams({ reporte: e.target.value })}>
++        {!seleccionado ? <option value="">Elegí un reporte disponible</option> : null}{catalogo.data?.map(r => <option key={r.codigo} value={r.codigo}>{r.codigo} · {r.titulo}</option>)}
++      </SelectInput></Field></Card>
++      {seleccionado ? <ReportePanel key={seleccionado.codigo} reporte={seleccionado} /> : <Alert tono="danger">El reporte no está disponible para tu usuario. Elegí uno de la lista.</Alert>}
++    </>}</div>
++  </>;
+ }
+diff --git a/frontend/src/services/reportes.ts b/frontend/src/services/reportes.ts
+new file mode 100644
+index 0000000..3e904e4
+--- /dev/null
++++ b/frontend/src/services/reportes.ts
+@@ -0,0 +1,27 @@
++import { http } from "./http";
++import { quetzales } from "./compras";
++import { fechaHora } from "../utils/format";
++export interface ColumnaReporte { clave: string; titulo: string; tipo: string; visible: boolean }
++export interface DefinicionReporte { codigo: string; titulo: string; descripcion: string; filtros: string[]; roles: string[]; columnas: ColumnaReporte[] }
++export interface IndicadorReporte { titulo: string; tipo: string; valor: string | null }
++export interface ResultadoReporte { codigo: string; titulo: string; filas: Record<string, string | null>[]; indicadores: IndicadorReporte[]; pagina: number; tamano: number; total: number; totalPaginas: number }
++export interface OpcionReporte { valor: string; etiqueta: string }
++export const reportesApi = {
++  catalogo: (signal?: AbortSignal) => http.get<DefinicionReporte[]>("/reportes", signal),
++  consultar: (codigo: string, filtros: Record<string, string>, pagina: number, signal?: AbortSignal) => {
++    const p = new URLSearchParams({ pagina: String(pagina), tamano: "25" });
++    Object.entries(filtros).forEach(([k, v]) => { if (v) p.set(k, v); });
++    return http.get<ResultadoReporte>(`/reportes/${codigo}?${p}`, signal);
++  },
++  opciones: (codigo: string, tipo: string, buscar: string, signal?: AbortSignal) => http.get<OpcionReporte[]>(`/reportes/${codigo}/opciones?${new URLSearchParams({ tipo, buscar })}`, signal),
++};
++export function formatoReporte(valor: unknown, tipo: string): string {
++  if (valor === null || valor === undefined || valor === "") return "—";
++  const s = String(valor);
++  if (tipo === "moneda" || tipo === "moneda6") return quetzales(s, tipo === "moneda6" ? 6 : 2);
++  if (tipo === "entero") return BigInt(s).toLocaleString("es-GT");
++  if (tipo === "fechaHora") return fechaHora(s);
++  if (tipo === "mes") { const [a, m] = s.split("-"); return `${m}/${a}`; }
++  if (tipo === "booleano") return s === "true" || s === "1" ? "Sí" : "No";
++  return s;
++}

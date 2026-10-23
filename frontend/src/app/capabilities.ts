@@ -1,7 +1,7 @@
 /**
  * Capacidades conectadas de acceso, servicio, caja y abastecimiento.
  * Las rutas disponibles requieren sesión y permisos del servidor.
- * Compras e inventario están conectados; los reportes conservan su estado pendiente.
+ * Compras, inventario y los doce reportes están conectados.
  */
 
 export type EstadoCapacidad = "disponible" | "incompleta" | "ausente";
@@ -650,17 +650,17 @@ export const OPERACIONES: OperacionApi[] = [
 
   // ---- Reportes ----
   {
-    id: "reportes.consultar",
-    modulo: "Reportes",
-    operacion: "Doce reportes de la consigna",
-    metodo: "Sin endpoint",
-    ruta: "(requiere /api/reportes/{r01..r12})",
-    entrada: "filtros por reporte",
-    respuesta: "filas del reporte",
-    roles: "Segun rol",
-    estado: "ausente",
-    procedimiento: "03_Reportes.sql (R01..R12)",
-    nota: "Los datos deben venir de consultas del servidor. No construir JOIN ni agregaciones en el navegador.",
+    id: "reportes.catalogo", modulo: "Reportes", operacion: "Consultar reportes disponibles para la sesión", metodo: "GET", ruta: "/api/reportes",
+    entrada: "Sesión", respuesta: "DefinicionReporte[]", roles: "ADMIN, RECEPCION, TECNICO, BODEGA, CAJA", estado: "disponible", procedimiento: "spCatalogoReportesApi",
+  },
+  {
+    id: "reportes.consultar", modulo: "Reportes", operacion: "Consultar R01 a R12 con resumen y paginación", metodo: "GET", ruta: "/api/reportes/{codigo}",
+    entrada: "Filtros propios del reporte + pagina?, tamano?", respuesta: "filas[] + indicadores[] + paginación", roles: "Según reporte; técnico limitado a su trabajo", estado: "disponible", procedimiento: "spConsultarReporteApi",
+    nota: "Consultas estáticas y filtros parametrizados. R10 resume por factura; R12 conserva listas independientes. Importes y bigint viajan como texto.",
+  },
+  {
+    id: "reportes.opciones", modulo: "Reportes", operacion: "Buscar opciones de los filtros permitidos", metodo: "GET", ruta: "/api/reportes/{codigo}/opciones",
+    entrada: "tipo, buscar?", respuesta: "valor + etiqueta (hasta 100)", roles: "Según reporte y alcance", estado: "disponible", procedimiento: "spOpcionesReporteApi",
   },
 
   // ---- Administracion ----

@@ -4,14 +4,18 @@ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional
 normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
 Clientes, equipos, órdenes, servicio técnico, facturación, pagos, entrega y los catálogos de
 abastecimiento tienen API e interfaz conectadas. El acceso usa las cuentas y roles de la BD,
-con login, sesión y cierre de sesión. Compras, recepción, inventario por bodega y kardex también están conectados.
-Los reportes, el resumen general y los manuales con capturas aún deben completarse.
+con login, sesión y cierre de sesión. Compras, recepción, inventario por bodega, kardex
+y los doce reportes también están conectados. El resumen general del taller y los
+manuales finales con capturas aún deben completarse.
 
 Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
 La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
 las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
 Una instalación nueva con un maestro anterior debe incluir también las
-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento), 30 (Compras y costos por bodega) y 33 (Inventario y kardex).
+actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes),
+19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento),
+30 (Compras y costos por bodega), 33 (Inventario y kardex),
+36 (Redondeo de costos) y 38 (Reportes para la API).
 
 Administración permite consultar y registrar cuentas, empleados y roles desde
 una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
@@ -35,6 +39,11 @@ Instalación: [INTEGRACION_ABASTECIMIENTO.md](INTEGRACION_ABASTECIMIENTO.md).
 
 Inventario y kardex permiten consultar existencias, mínimos, valoración y movimientos por bodega.
 Instalación: [INTEGRACION_INVENTARIO.md](INTEGRACION_INVENTARIO.md); scripts 33 y 34.
+
+Los reportes R01–R12 tienen filtros, paginación, resúmenes completos y detalle por
+registro, con acceso según el rol. Instalación: [INTEGRACION_REPORTES.md](INTEGRACION_REPORTES.md);
+scripts 38 y 39. `03_Reportes.sql` conserva las consultas originales de referencia;
+la aplicación utiliza el 38, actualizado para asignaciones y costos por bodega.
 
 ## Ejecución desde cero
 

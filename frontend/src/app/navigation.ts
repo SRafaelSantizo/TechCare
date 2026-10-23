@@ -130,6 +130,7 @@ export const NAVEGACION: NavGrupo[] = [
         ruta: "/reportes",
         icono: FileBarChart,
         descripcion: "Doce reportes operativos del taller.",
+        roles: ["ADMIN", "RECEPCION", "TECNICO", "BODEGA", "CAJA"],
       },
     ],
   },

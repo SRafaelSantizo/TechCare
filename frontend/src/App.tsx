@@ -11,7 +11,7 @@ import { OrdenesListPage } from "./features/ordenes/OrdenesListPage";
 import { OrdenNuevaPage } from "./features/ordenes/OrdenNuevaPage";
 import { OrdenExpedientePage } from "./features/ordenes/OrdenExpedientePage";
 
-import { ReportesPage } from "./features/reportes/ReportesPage";
+const ReportesPage = lazy(() => import("./features/reportes/ReportesPage").then(m => ({ default: m.ReportesPage })));
 import { AdministracionPage } from "./features/administracion/AdministracionPage";
 import { IntegracionPage } from "./features/integracion/IntegracionPage";
 import { LoginPage } from "./features/auth/LoginPage";
@@ -56,7 +56,7 @@ export default function App() {
 
         <Route path="/facturacion" element={<Suspense fallback={<LoadingState titulo="Cargando caja…" />}><FacturacionPage /></Suspense>} />
 
-        <Route path="/reportes" element={<ReportesPage />} />
+        <Route path="/reportes" element={<Suspense fallback={<LoadingState titulo="Cargando reportes…" />}><ReportesPage /></Suspense>} />
 
         <Route path="/administracion" element={<AdministracionPage />} />
         <Route path="/integracion" element={<IntegracionPage />} />

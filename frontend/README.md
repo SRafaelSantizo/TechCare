@@ -22,10 +22,16 @@ Se conserva la configuración local existente de `VITE_PROXY_TARGET` y
   un empleado nuevo o un empleado activo que todavía no tenga cuenta.
 - Órdenes: recepción con confirmación, listado con filtros, expediente e historial,
   asignación de técnicos y cancelación según el estado. Requiere la actualización SQL 16.
-  Diagnósticos y reparaciones existentes se consultan; su registro y los cobros
-  se integran en las siguientes etapas.
+  Servicio técnico: diagnóstico, autorización, reparación, actividades, consumo de
+  repuestos y cierre en LISTO. Requiere la actualización SQL 19.
+- Caja y entrega: factura con detalle PDF, abonos y entrega con saldo cero (SQL 23).
+- Abastecimiento: categorías, repuestos, proveedores, bodegas y asociaciones (SQL 26).
+- Compras: registro, recepción y anulación; promedio móvil por bodega (SQL 30 y 36).
+- Inventario: existencias, mínimos, valoración y kardex (SQL 33).
+- Reportes: R01–R12, filtros por reporte, paginación, resúmenes y trazabilidad,
+  según el rol de la sesión (SQL 38). Ver `../INTEGRACION_REPORTES.md`.
 
-Los demás módulos conservan sus pantallas pendientes de integración. El mapa
+El resumen general del taller conserva sus datos de demostración. El mapa
 `/integracion`, disponible para ADMIN, detalla los endpoints implementados.
 
 ## Sesión y permisos
@@ -40,8 +46,10 @@ Las rutas protegidas redirigen al login cuando no hay sesión. El menú y las
 acciones se ajustan a los roles; el servidor comprueba los mismos permisos.
 Al salir o vencer la sesión se limpia la caché de consultas para el siguiente usuario.
 
-Las respuestas de Clientes y Equipos conservan PascalCase. Acceso, usuarios y órdenes
-usan DTO camelCase en sus respectivos archivos de `src/services/`.
+Las respuestas de Clientes y Equipos conservan PascalCase. Los otros módulos
+usan DTO camelCase en sus respectivos archivos de `src/services/`; las filas
+de Reportes conservan las claves de su contrato de columnas. Sus importes,
+IDs y cantidades se transportan como texto para conservar la precisión.
 Los errores mantienen `{estado,mensaje,errores?}`. El alta usa una solicitud directa
 y no guarda la contraseña en la caché de consultas o de mutaciones.
 

@@ -1,0 +1,192 @@
+diff --git a/38_Reportes_Procedimientos.sql b/38_Reportes_Procedimientos.sql
+index 9bf714a3724d7efa97ee7c177b0e9ce0633aa15c..7da87bfddd5b5849b4fd5fa28bb86012195aad56 100644
+--- a/38_Reportes_Procedimientos.sql
++++ b/38_Reportes_Procedimientos.sql
+@@ -414,6 +414,7 @@
+  END;
+  IF @Codigo=N'R12'
+  BEGIN
++  -- Las etapas opcionales mantienen listas JSON vacías, nunca NULL.
+   IF @SoloResumen=1
+   BEGIN
+    ;WITH Datos AS (
+@@ -422,18 +423,18 @@
+  d.Fecha AS FechaDiagnostico,d.Descripcion AS Diagnostico,r.DescripcionTrabajo,r.FechaInicio,r.FechaFin,
+  CASE WHEN ut.UsuarioID IS NULL THEN NULL ELSE CONCAT(et.Nombres,N' ',et.Apellidos) END AS TecnicoReparacion,
+  f.NumeroFactura,f.Estado AS EstadoFactura,ff.NombreFacturacion,f.Subtotal,f.Impuesto,f.Total,f.Pagado,f.Saldo,en.NombreRecibe,en.Fecha AS FechaEntrega,
+- (SELECT CONVERT(varchar(20),h.HistorialID) AS HistorialID,h.EstadoAnterior,h.EstadoNuevo,CONVERT(varchar(19),h.Fecha,126)+'Z' AS Fecha,CONCAT(em.Nombres,N' ',em.Apellidos) AS Responsable,h.Observacion
++ ISNULL((SELECT CONVERT(varchar(20),h.HistorialID) AS HistorialID,h.EstadoAnterior,h.EstadoNuevo,CONVERT(varchar(19),h.Fecha,126)+'Z' AS Fecha,CONCAT(em.Nombres,N' ',em.Apellidos) AS Responsable,h.Observacion
+   FROM dbo.HistorialEstadoOrden h JOIN dbo.Usuario u ON u.UsuarioID=h.UsuarioID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
+-  WHERE h.OrdenID=o.OrdenID ORDER BY h.HistorialID FOR JSON PATH,INCLUDE_NULL_VALUES) AS HistorialEstados,
+- (SELECT rr.Linea,p.Codigo,p.Nombre AS Repuesto,b.Nombre AS Bodega,rr.Cantidad,CONVERT(varchar(40),rr.CostoUnitario) AS CostoUnitario,
++  WHERE h.OrdenID=o.OrdenID ORDER BY h.HistorialID FOR JSON PATH,INCLUDE_NULL_VALUES),N'[]') AS HistorialEstados,
++ CASE WHEN r.ReparacionID IS NULL THEN N'[]' ELSE ISNULL((SELECT rr.Linea,p.Codigo,p.Nombre AS Repuesto,b.Nombre AS Bodega,rr.Cantidad,CONVERT(varchar(40),rr.CostoUnitario) AS CostoUnitario,
+   CONVERT(varchar(40),rr.PrecioUnitario) AS PrecioUnitario,CONVERT(varchar(20),m.MovimientoID) AS MovimientoID,m.Tipo,CONVERT(varchar(19),m.Fecha,126)+'Z' AS Fecha,
+   CONVERT(varchar(20),m.ExistenciaResultante) AS ExistenciaResultante
+   FROM dbo.ReparacionRepuesto rr JOIN dbo.Repuesto p ON p.RepuestoID=rr.RepuestoID JOIN dbo.Bodega b ON b.BodegaID=rr.BodegaID
+   LEFT JOIN dbo.MovimientoInventario m ON m.ReparacionID=rr.ReparacionID AND m.LineaReparacion=rr.Linea
+-  WHERE rr.ReparacionID=r.ReparacionID ORDER BY rr.Linea FOR JSON PATH,INCLUDE_NULL_VALUES) AS RepuestosYMovimientos,
+- (SELECT CONVERT(varchar(20),pg.PagoID) AS PagoID,CONVERT(varchar(19),pg.Fecha,126)+'Z' AS Fecha,CONVERT(varchar(40),pg.Monto) AS Monto,mp.Nombre AS Metodo,pg.Referencia
++  WHERE rr.ReparacionID=r.ReparacionID ORDER BY rr.Linea FOR JSON PATH,INCLUDE_NULL_VALUES),N'[]') END AS RepuestosYMovimientos,
++ CASE WHEN f.FacturaID IS NULL THEN N'[]' ELSE ISNULL((SELECT CONVERT(varchar(20),pg.PagoID) AS PagoID,CONVERT(varchar(19),pg.Fecha,126)+'Z' AS Fecha,CONVERT(varchar(40),pg.Monto) AS Monto,mp.Nombre AS Metodo,pg.Referencia
+   FROM dbo.Pago pg JOIN dbo.MetodoPago mp ON mp.MetodoPagoID=pg.MetodoPagoID WHERE pg.FacturaID=f.FacturaID
+-  ORDER BY pg.PagoID FOR JSON PATH,INCLUDE_NULL_VALUES) AS Pagos
++  ORDER BY pg.PagoID FOR JSON PATH,INCLUDE_NULL_VALUES),N'[]') END AS Pagos
+  FROM dbo.vOrdenAcceso o LEFT JOIN dbo.Diagnostico d ON d.OrdenID=o.OrdenID
+  LEFT JOIN dbo.Usuario ud ON ud.UsuarioID=d.UsuarioTecnicoID LEFT JOIN dbo.Empleado ed ON ed.EmpleadoID=ud.EmpleadoID
+  LEFT JOIN dbo.Reparacion r ON r.DiagnosticoID=d.DiagnosticoID LEFT JOIN dbo.Usuario ut ON ut.UsuarioID=r.UsuarioTecnicoID
+@@ -451,18 +452,18 @@
+  d.Fecha AS FechaDiagnostico,d.Descripcion AS Diagnostico,r.DescripcionTrabajo,r.FechaInicio,r.FechaFin,
+  CASE WHEN ut.UsuarioID IS NULL THEN NULL ELSE CONCAT(et.Nombres,N' ',et.Apellidos) END AS TecnicoReparacion,
+  f.NumeroFactura,f.Estado AS EstadoFactura,ff.NombreFacturacion,f.Subtotal,f.Impuesto,f.Total,f.Pagado,f.Saldo,en.NombreRecibe,en.Fecha AS FechaEntrega,
+- (SELECT CONVERT(varchar(20),h.HistorialID) AS HistorialID,h.EstadoAnterior,h.EstadoNuevo,CONVERT(varchar(19),h.Fecha,126)+'Z' AS Fecha,CONCAT(em.Nombres,N' ',em.Apellidos) AS Responsable,h.Observacion
++ ISNULL((SELECT CONVERT(varchar(20),h.HistorialID) AS HistorialID,h.EstadoAnterior,h.EstadoNuevo,CONVERT(varchar(19),h.Fecha,126)+'Z' AS Fecha,CONCAT(em.Nombres,N' ',em.Apellidos) AS Responsable,h.Observacion
+   FROM dbo.HistorialEstadoOrden h JOIN dbo.Usuario u ON u.UsuarioID=h.UsuarioID JOIN dbo.Empleado em ON em.EmpleadoID=u.EmpleadoID
+-  WHERE h.OrdenID=o.OrdenID ORDER BY h.HistorialID FOR JSON PATH,INCLUDE_NULL_VALUES) AS HistorialEstados,
+- (SELECT rr.Linea,p.Codigo,p.Nombre AS Repuesto,b.Nombre AS Bodega,rr.Cantidad,CONVERT(varchar(40),rr.CostoUnitario) AS CostoUnitario,
++  WHERE h.OrdenID=o.OrdenID ORDER BY h.HistorialID FOR JSON PATH,INCLUDE_NULL_VALUES),N'[]') AS HistorialEstados,
++ CASE WHEN r.ReparacionID IS NULL THEN N'[]' ELSE ISNULL((SELECT rr.Linea,p.Codigo,p.Nombre AS Repuesto,b.Nombre AS Bodega,rr.Cantidad,CONVERT(varchar(40),rr.CostoUnitario) AS CostoUnitario,
+   CONVERT(varchar(40),rr.PrecioUnitario) AS PrecioUnitario,CONVERT(varchar(20),m.MovimientoID) AS MovimientoID,m.Tipo,CONVERT(varchar(19),m.Fecha,126)+'Z' AS Fecha,
+   CONVERT(varchar(20),m.ExistenciaResultante) AS ExistenciaResultante
+   FROM dbo.ReparacionRepuesto rr JOIN dbo.Repuesto p ON p.RepuestoID=rr.RepuestoID JOIN dbo.Bodega b ON b.BodegaID=rr.BodegaID
+   LEFT JOIN dbo.MovimientoInventario m ON m.ReparacionID=rr.ReparacionID AND m.LineaReparacion=rr.Linea
+-  WHERE rr.ReparacionID=r.ReparacionID ORDER BY rr.Linea FOR JSON PATH,INCLUDE_NULL_VALUES) AS RepuestosYMovimientos,
+- (SELECT CONVERT(varchar(20),pg.PagoID) AS PagoID,CONVERT(varchar(19),pg.Fecha,126)+'Z' AS Fecha,CONVERT(varchar(40),pg.Monto) AS Monto,mp.Nombre AS Metodo,pg.Referencia
++  WHERE rr.ReparacionID=r.ReparacionID ORDER BY rr.Linea FOR JSON PATH,INCLUDE_NULL_VALUES),N'[]') END AS RepuestosYMovimientos,
++ CASE WHEN f.FacturaID IS NULL THEN N'[]' ELSE ISNULL((SELECT CONVERT(varchar(20),pg.PagoID) AS PagoID,CONVERT(varchar(19),pg.Fecha,126)+'Z' AS Fecha,CONVERT(varchar(40),pg.Monto) AS Monto,mp.Nombre AS Metodo,pg.Referencia
+   FROM dbo.Pago pg JOIN dbo.MetodoPago mp ON mp.MetodoPagoID=pg.MetodoPagoID WHERE pg.FacturaID=f.FacturaID
+-  ORDER BY pg.PagoID FOR JSON PATH,INCLUDE_NULL_VALUES) AS Pagos
++  ORDER BY pg.PagoID FOR JSON PATH,INCLUDE_NULL_VALUES),N'[]') END AS Pagos
+  FROM dbo.vOrdenAcceso o LEFT JOIN dbo.Diagnostico d ON d.OrdenID=o.OrdenID
+  LEFT JOIN dbo.Usuario ud ON ud.UsuarioID=d.UsuarioTecnicoID LEFT JOIN dbo.Empleado ed ON ed.EmpleadoID=ud.EmpleadoID
+  LEFT JOIN dbo.Reparacion r ON r.DiagnosticoID=d.DiagnosticoID LEFT JOIN dbo.Usuario ut ON ut.UsuarioID=r.UsuarioTecnicoID
+diff --git a/39_Pruebas_Reportes.sql b/39_Pruebas_Reportes.sql
+index 3f3a57af9776407062638078f9da68be809a1cb7..f5813ebce9635309ee5223060149989772e10798 100644
+--- a/39_Pruebas_Reportes.sql
++++ b/39_Pruebas_Reportes.sql
+@@ -73,7 +73,10 @@
+ (57,N'Cambiar cliente y precios no reescribe la factura ni consumo',0),
+ (58,N'Consultas no alteran stock, promedio ni contexto',0),
+ (59,N'Último día del año 9999 no desborda',0),
+-(60,N'JSON conserva importes e IDs como texto y fechas UTC',0);
++(60,N'JSON conserva importes e IDs como texto y fechas UTC',0),
++(61,N'R12 conserva reparación sólo con mano de obra y sin factura',0),
++(62,N'R12 conserva factura sin abonos con listas vacías',0),
++(63,N'R12 combina órdenes completas e incompletas sin perder filas',0);
+ DECLARE @Antes TABLE (Nombre sysname PRIMARY KEY,Cantidad bigint);
+ INSERT @Antes
+ SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
+@@ -135,7 +138,7 @@
+ DECLARE @Hash varchar(255)='$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
+ SELECT TOP(1) @Metodo=MetodoPagoID FROM dbo.MetodoPago ORDER BY MetodoPagoID;
+ IF @Metodo IS NULL THROW 52390,N'Se requiere un medio de pago.',1;
+-WHILE @Caso<=60
++WHILE @Caso<=(SELECT MAX(ID) FROM @Casos)
+ BEGIN
+  SELECT @Nombre=Caso,@Esperado=ErrorEsperado FROM @Casos WHERE ID=@Caso;
+  SET @Resultado='PASS';SET @Detalle=NULL;SET @Preparado=0;
+@@ -271,7 +274,20 @@
+   INSERT #S10 EXEC dbo.spConsultarReporteApi @Caja,N'R10',@ClienteID=@Cliente,@SoloResumen=1;
+   IF NOT EXISTS(SELECT 1 FROM #S10 WHERE Total=2 AND Facturas=1 AND TotalFacturado=79.52 AND PagadoTotal=30 AND SaldoTotal=49.52) THROW 52392,N'El resumen financiero duplicó factura o saldo.',1;
+  END;
+- IF @Caso=14 BEGIN INSERT #R12 EXEC dbo.spConsultarReporteApi @Admin,N'R12',@OrdenID=@Orden2;IF NOT EXISTS(SELECT 1 FROM #R12 WHERE Diagnostico IS NULL AND NumeroFactura IS NULL AND Pagos=N'[]' AND RepuestosYMovimientos=N'[]') THROW 52392,N'Se perdió la orden incompleta.',1;END;
++ IF @Caso=14
++ BEGIN
++  INSERT #R12 EXEC dbo.spConsultarReporteApi @Admin,N'R12',@OrdenID=@Orden2;
++  IF (SELECT COUNT(*) FROM #R12)<>1 OR NOT EXISTS(SELECT 1 FROM #R12 WHERE OrdenID=@Orden2)
++   THROW 52392,N'R12 no conservó una fila para la orden incompleta solicitada.',1;
++  IF EXISTS(SELECT 1 FROM #R12 WHERE Diagnostico IS NOT NULL OR FechaDiagnostico IS NOT NULL OR DescripcionTrabajo IS NOT NULL OR NumeroFactura IS NOT NULL OR Total IS NOT NULL)
++   THROW 52392,N'La orden incompleta presenta datos de una etapa inexistente.',1;
++  IF EXISTS(SELECT 1 FROM #R12 WHERE ISNULL(RepuestosYMovimientos,N'<NULL>')<>N'[]')
++   THROW 52392,N'Una orden sin reparación debe devolver repuestos como [] y no NULL.',1;
++  IF EXISTS(SELECT 1 FROM #R12 WHERE ISNULL(Pagos,N'<NULL>')<>N'[]')
++   THROW 52392,N'Una orden sin factura debe devolver pagos como [] y no NULL.',1;
++  IF EXISTS(SELECT 1 FROM #R12 WHERE ISNULL(ISJSON(HistorialEstados),0)<>1 OR HistorialEstados=N'[]')
++   THROW 52392,N'La orden incompleta perdió su historial de ingreso y asignación.',1;
++ END;
+  IF @Caso IN(15,26) BEGIN INSERT #R02 EXEC dbo.spConsultarReporteApi @Recepcion,N'R02',@ClienteID=@Cliente;IF (SELECT COUNT(*) FROM #R02)<>3 OR NOT EXISTS(SELECT 1 FROM #R02 WHERE OrdenID IS NULL AND NumeroSerie=@SerieVacia) THROW 52392,N'El historial de cliente omitió equipos sin órdenes.',1;END;
+  IF @Caso=16 BEGIN INSERT #R03 EXEC dbo.spConsultarReporteApi @Tec1,N'R03',@Serie=@Serie;IF (SELECT COUNT(*) FROM #R03)<>1 OR EXISTS(SELECT 1 FROM #R03 WHERE OrdenID<>@Orden) THROW 52392,N'R03 reveló otra orden al técnico.',1;END;
+  IF @Caso=17 BEGIN INSERT #R01 EXEC dbo.spConsultarReporteApi @Tec1,N'R01';IF (SELECT COUNT(*) FROM #R01)<>1 OR EXISTS(SELECT 1 FROM #R01 WHERE OrdenID<>@Orden) THROW 52392,N'R01 reveló trabajo ajeno.',1;END;
+@@ -350,6 +366,39 @@
+   INSERT #S10 EXEC dbo.spConsultarReporteApi @Caja,N'R10',@ClienteID=@Cliente,@SoloResumen=1;
+   IF dbo.fnExistencia(@Bodega,@Repuesto)<>@Stock OR (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>@Promedio
+    OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos OR TRY_CONVERT(int,SESSION_CONTEXT(N'UsuarioID'))<>@Admin THROW 52392,N'La consulta modificó datos o contexto.',1;
++ END;
++ IF @Caso IN(61,62)
++ BEGIN
++  INSERT #ResultadoOrden EXEC dbo.spRegistrarDiagnosticoOrden @Tec2,@Orden2,N'Diagnóstico sin repuestos ñ',0;
++  INSERT #ResultadoOrden EXEC dbo.spIniciarReparacionOrden @Tec2,@Orden2,N'Sólo mano de obra ñ',10,N'Autorizado';
++  SELECT @Reparacion=ReparacionID FROM dbo.vOrdenAcceso WHERE OrdenID=@Orden2;
++  EXEC dbo.spCerrarReparacion @Reparacion,@Tec2;
++  IF @Caso=62
++  BEGIN
++   SET @Codigo='SINP-'+@Sufijo;
++   EXEC dbo.spGenerarFactura @Orden2,@Codigo,@Caja,@Factura2 OUTPUT,0.12;
++  END;
++  INSERT #R12 EXEC dbo.spConsultarReporteApi @Admin,N'R12',@OrdenID=@Orden2;
++  IF (SELECT COUNT(*) FROM #R12)<>1 OR NOT EXISTS(SELECT 1 FROM #R12 WHERE OrdenID=@Orden2 AND Diagnostico=N'Diagnóstico sin repuestos ñ' AND DescripcionTrabajo=N'Sólo mano de obra ñ' AND FechaFin IS NOT NULL)
++   THROW 52392,N'Se perdió la reparación sin repuestos.',1;
++  IF EXISTS(SELECT 1 FROM #R12 WHERE ISNULL(RepuestosYMovimientos,N'<NULL>')<>N'[]' OR ISNULL(Pagos,N'<NULL>')<>N'[]')
++   THROW 52392,N'Las colecciones sin registros deben ser [] incluso si existe su etapa.',1;
++  IF @Caso=61 AND EXISTS(SELECT 1 FROM #R12 WHERE NumeroFactura IS NOT NULL OR Total IS NOT NULL)
++   THROW 52392,N'La orden sin factura inventó importes fiscales.',1;
++  IF @Caso=62 AND NOT EXISTS(SELECT 1 FROM #R12 WHERE NumeroFactura=@Codigo AND Total=11.20 AND Pagado=0 AND Saldo=11.20)
++   THROW 52392,N'La factura sin abonos perdió su total o saldo.',1;
++ END;
++ IF @Caso=63
++ BEGIN
++  INSERT #R12 EXEC dbo.spConsultarReporteApi @Admin,N'R12',@ClienteID=@Cliente;
++  IF (SELECT COUNT(*) FROM #R12)<>2 OR (SELECT COUNT(DISTINCT OrdenID) FROM #R12)<>2
++   THROW 52392,N'La consulta mixta perdió o duplicó órdenes.',1;
++  IF NOT EXISTS(SELECT 1 FROM #R12 WHERE OrdenID=@Orden2 AND Diagnostico IS NULL AND NumeroFactura IS NULL AND Pagos=N'[]' AND RepuestosYMovimientos=N'[]')
++   THROW 52392,N'La orden incompleta no conservó las colecciones vacías junto a otra completa.',1;
++  SELECT @Json=RepuestosYMovimientos FROM #R12 WHERE OrdenID=@Orden;
++  IF (SELECT COUNT(*) FROM OPENJSON(@Json))<>2 THROW 52392,N'La consulta mixta alteró los consumos de la orden completa.',1;
++  SELECT @Json=Pagos FROM #R12 WHERE OrdenID=@Orden;
++  IF (SELECT COUNT(*) FROM OPENJSON(@Json))<>2 THROW 52392,N'La consulta mixta alteró los abonos de la orden completa.',1;
+  END;
+  IF @Esperado<>0 BEGIN SET @Resultado='FAIL';SET @Detalle=N'La operación inválida fue aceptada.';END;
+  IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
+diff --git a/INTEGRACION_REPORTES.md b/INTEGRACION_REPORTES.md
+index 5ea64b613527f9729e17bace0a4fa5acb6d73257..a1944df9c6d1a87e50d5062bdfcf1ddb04484a71 100644
+--- a/INTEGRACION_REPORTES.md
++++ b/INTEGRACION_REPORTES.md
+@@ -18,7 +18,7 @@
+    Crea o actualiza dos funciones y cuatro procedimientos de consulta y validación;
+    permite repetir su instalación.
+ 4. Ejecutar `39_Pruebas_Reportes.sql` en desarrollo, sin otras escrituras concurrentes.
+-   Presenta **60 casos**. Cada caso crea sus propios datos, revierte la transacción,
++   Presenta **63 casos**. Cada caso crea sus propios datos, revierte la transacción,
+    restaura el contexto de auditoría y compara las cantidades persistentes al terminar.
+    Requiere ADMIN activo, los catálogos base y un medio de pago. Las identidades
+    pueden dejar huecos. Un error al preparar los datos también se informa como FAIL.
+@@ -149,7 +149,7 @@
+ - Navegador con API simulada: **13 escenarios correctos**, los doce reportes,
+   escritorio/móvil de 390 px, filtros, fechas, historial del navegador, precisión,
+   detalle y permisos. Sin errores JavaScript ni solicitudes de escritura.
+-- SQL 38 y 39: análisis sintáctico T-SQL completo. El 39 incluye 60 casos de roles,
++- SQL 38 y 39: análisis sintáctico T-SQL completo. El 39 incluye 63 casos de roles,
+   historial incompleto, Unicode, importes, saldos, filtros y rollback.
+   **Su ejecución real en SQL Server está pendiente en la instancia del proyecto**;
+   las pruebas con JDBC simulado no sustituyen esa verificación.
+@@ -160,3 +160,20 @@
+ 
+ El siguiente bloque previsto es conectar el resumen general del taller con datos
+ reales; después corresponde la validación integral y la documentación final.
++
++## Corrección de colecciones vacías de R12
++
++`41_Correccion_Reportes_R12.patch` se aplica sobre el bloque 40 ya instalado.
++Actualiza el 38 para devolver `[]` en las listas sin registros, también cuando
++no existe reparación o factura. Mantiene null en los campos de esas etapas y
++conserva los registros presentes. Cambia la consulta SQL real, además de las pruebas.
++
++Después de aplicar el 41, detener el backend, ejecutar nuevamente el **38** y
++luego el **39** completo. El 39 tiene ahora **63 casos**: conserva los 60 originales,
++distingue la causa del caso 14 y agrega reparación sin repuestos, factura sin abonos
++y consulta conjunta de una orden completa y otra incompleta. Cada caso revierte
++sus propios datos como antes. Reiniciar el backend; este ajuste no requiere
++cambios ni compilación de Java o React.
++
++Las verificaciones locales de esta corrección cubren sintaxis T-SQL y aplicación
++del patch. La confirmación de los 63 casos corresponde a SQL Server del proyecto.
