@@ -1,7 +1,7 @@
 /**
  * Capacidades conectadas de acceso, servicio, caja y abastecimiento.
  * Las rutas disponibles requieren sesión y permisos del servidor.
- * Las compras, el kardex general y los reportes conservan su estado pendiente.
+ * Compras e inventario están conectados; los reportes conservan su estado pendiente.
  */
 
 export type EstadoCapacidad = "disponible" | "incompleta" | "ausente";
@@ -394,29 +394,18 @@ export const OPERACIONES: OperacionApi[] = [
 
   // ---- Inventario / repuestos / bodegas ----
   {
-    id: "inventario.consultar",
-    modulo: "Inventario",
-    operacion: "Existencias por bodega/repuesto",
-    metodo: "Sin endpoint",
-    ruta: "(requiere /api/inventario)",
-    entrada: "bodegaId, categoriaId, texto",
-    respuesta: "existencia, minimo, condicion",
-    roles: "BODEGA, ADMIN",
-    estado: "ausente",
-    procedimiento: "vInventario",
-    nota: "El stock se obtiene del kardex. No debe existir un campo editable de existencia.",
+    id: "inventario.consultar", modulo: "Inventario", operacion: "Consultar existencias, mínimos y valoración por bodega",
+    metodo: "GET", ruta: "/api/inventario", entrada: "buscar?, bodegaId?, categoriaId?, estadoStock?, activo?, pagina?, tamano?",
+    respuesta: "filas[] + resumen global del filtro + paginación", roles: "BODEGA, ADMIN", estado: "disponible",
+    procedimiento: "spResumenInventarioApi, spListarInventarioApi",
+    nota: "Existencias y costos de consulta; la respuesta conserva seis decimales sin redondeo en JavaScript.",
   },
   {
-    id: "inventario.movimientos",
-    modulo: "Inventario",
-    operacion: "Kardex / movimientos",
-    metodo: "Sin endpoint",
-    ruta: "(requiere /api/inventario/movimientos)",
-    entrada: "bodegaId, fechas",
-    respuesta: "movimientos con origen y existencia resultante",
-    roles: "BODEGA, ADMIN",
-    estado: "ausente",
-    procedimiento: "vMovimientoInventario",
+    id: "inventario.movimientos", modulo: "Inventario", operacion: "Consultar kardex de un repuesto en una bodega",
+    metodo: "GET", ruta: "/api/inventario/{bodegaId}/{repuestoId}/kardex", entrada: "desde?, hasta?, tipo?, pagina?, tamano?",
+    respuesta: "inventario + resumen del período + movimientos[] + paginación", roles: "BODEGA, ADMIN", estado: "disponible",
+    procedimiento: "spConsultarInventarioApi, spResumenKardexApi, spListarKardexApi",
+    nota: "Días UTC incluidos. Saldos independientes del filtro de tipo y de la página. Documentos, actor y costos históricos.",
   },
   {
     id: "repuestos.catalogo",

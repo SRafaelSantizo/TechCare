@@ -78,6 +78,7 @@ export const NAVEGACION: NavGrupo[] = [
         ruta: "/inventario",
         icono: Boxes,
         descripcion: "Existencias por bodega y minimos.",
+        roles: ["BODEGA", "ADMIN"],
       },
       {
         etiqueta: "Repuestos",

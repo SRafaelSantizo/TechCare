@@ -53,6 +53,7 @@ public class SeguridadConfig {
                 .authorizeHttpRequests(a -> a
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(HttpMethod.GET,"/api/auth/csrf").permitAll()
+                        .requestMatchers(HttpMethod.GET,"/api/inventario","/api/inventario/**").hasAnyRole("ADMIN","BODEGA")
                         .requestMatchers(HttpMethod.GET,"/api/compras","/api/compras/**").hasAnyRole("ADMIN","BODEGA")
                         .requestMatchers(HttpMethod.POST,"/api/compras","/api/compras/*/recepcion","/api/compras/*/anulacion").hasAnyRole("ADMIN","BODEGA")
                         .requestMatchers(HttpMethod.POST,"/api/auth/login").permitAll()

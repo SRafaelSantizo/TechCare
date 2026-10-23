@@ -10,11 +10,20 @@ CREATE OR ALTER FUNCTION dbo.fnPromedioEntrada
 (@Stock bigint,@Costo decimal(18,6),@Cantidad int,@CostoEntrada decimal(12,2))
 RETURNS decimal(18,6) AS
 BEGIN
-    -- Los productos caben en decimal(37,6); su suma conserva seis decimales.
-    RETURN CONVERT(decimal(18,6),
-       (CONVERT(decimal(37,6),CONVERT(decimal(19,0),@Stock)*@Costo)
-       +CONVERT(decimal(37,6),CONVERT(decimal(19,0),@Cantidad)*@CostoEntrada))
-       /NULLIF(CONVERT(decimal(19,0),@Stock)+@Cantidad,0));
+    -- Se opera en millonésimas enteras para redondear una sola vez al final.
+    -- bigint (19 dígitos) * costo en millonésimas (18) cabe en decimal(38,0).
+    DECLARE @CostoMicro decimal(18,0)=CONVERT(decimal(18,0),@Costo*CONVERT(decimal(7,0),1000000));
+    DECLARE @EntradaMicro decimal(18,0)=CONVERT(decimal(18,0),@CostoEntrada*CONVERT(decimal(7,0),1000000));
+    DECLARE @ValorMicro decimal(38,0)=CONVERT(decimal(19,0),@Stock)*@CostoMicro
+                                       +CONVERT(decimal(19,0),@Cantidad)*@EntradaMicro;
+    DECLARE @Unidades decimal(20,0)=CONVERT(decimal(20,0),@Stock)+@Cantidad;
+    DECLARE @Resto decimal(20,0)=@ValorMicro % NULLIF(@Unidades,0);
+    -- Se retira el resto antes de dividir. La base tiene seis decimales
+    -- exactos; decimal(37,6) deja espacio para la escala de la división.
+    DECLARE @ValorBase decimal(37,6)=CONVERT(decimal(37,6),(@ValorMicro-@Resto)*CONVERT(decimal(7,6),0.000001));
+    DECLARE @Promedio decimal(18,6)=CONVERT(decimal(18,6),@ValorBase/NULLIF(@Unidades,0));
+    IF @Resto*CONVERT(decimal(1,0),2)>=@Unidades SET @Promedio=@Promedio+CONVERT(decimal(7,6),0.000001);
+    RETURN @Promedio;
 END;
 GO
 BEGIN TRY

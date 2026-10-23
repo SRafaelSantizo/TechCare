@@ -116,7 +116,7 @@ export function Paginacion({
   return (
     <div className="tc-row" style={{ justifyContent: "space-between", marginTop: 12 }}>
       <span className="tc-field__hint">
-        Pagina {pagina} de {totalPaginas} � {total} registro(s)
+        Página {pagina} de {totalPaginas} · {total} registro(s)
       </span>
       <div className="tc-row" style={{ gap: 8 }}>
         <Button

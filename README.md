@@ -4,14 +4,14 @@ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional
 normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
 Clientes, equipos, órdenes, servicio técnico, facturación, pagos, entrega y los catálogos de
 abastecimiento tienen API e interfaz conectadas. El acceso usa las cuentas y roles de la BD,
-con login, sesión y cierre de sesión. Compras y recepción también están conectadas; inventario general, reportes y manuales con
-capturas aún deben completarse.
+con login, sesión y cierre de sesión. Compras, recepción, inventario por bodega y kardex también están conectados.
+Los reportes, el resumen general y los manuales con capturas aún deben completarse.
 
 Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
 La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
 las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
 Una instalación nueva con un maestro anterior debe incluir también las
-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento) y 30 (Compras y costos por bodega).
+actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento), 30 (Compras y costos por bodega) y 33 (Inventario y kardex).
 
 Administración permite consultar y registrar cuentas, empleados y roles desde
 una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
@@ -32,6 +32,9 @@ Facturación, abonos, entrega y factura PDF están conectados mediante el 23. In
 Repuestos, categorías, proveedores y bodegas se administran desde la aplicación con el 26.
 Incluye catálogo ofrecido, asociación de repuestos a bodegas, mínimos y auditoría de precios.
 Instalación: [INTEGRACION_ABASTECIMIENTO.md](INTEGRACION_ABASTECIMIENTO.md).
+
+Inventario y kardex permiten consultar existencias, mínimos, valoración y movimientos por bodega.
+Instalación: [INTEGRACION_INVENTARIO.md](INTEGRACION_INVENTARIO.md); scripts 33 y 34.
 
 ## Ejecución desde cero
 
@@ -193,6 +196,7 @@ Documentos para el equipo:
 - `INTEGRACION_FACTURACION_ENTREGA.md`: caja, abonos, entrega y factura PDF detallada; scripts 23 y 24.
 - `INTEGRACION_ABASTECIMIENTO.md`: repuestos, categorías, proveedores, bodegas y asociaciones; scripts 26 y 27.
 - `INTEGRACION_COMPRAS.md`: compras pendientes, recepción, anulación y promedio por bodega; scripts 30 y 31.
+- `INTEGRACION_INVENTARIO.md`: existencias, mínimos, valoración y kardex por bodega; scripts 33 y 34.
 
 - `GUIA_TRIGGERS.md`: definición, inserted/deleted, ejemplo reversible y los 16 objetos.
 - `GUIA_GITHUB.md`: publicación privada con GitHub Desktop y trabajo por ramas.

@@ -1,0 +1,1390 @@
+diff --git a/33_Inventario_Procedimientos.sql b/33_Inventario_Procedimientos.sql
+new file mode 100644
+index 0000000..1ba05a3
+--- /dev/null
++++ b/33_Inventario_Procedimientos.sql
+@@ -0,0 +1,152 @@
++-- Inventario y kardex de consulta. Ejecutar completo después del 30.
++-- No inserta ni modifica existencias, movimientos, costos o documentos.
++USE [TechCare];
++GO
++SET NOCOUNT ON;
++IF OBJECT_ID(N'dbo.ValoracionInventario',N'U') IS NULL
++   OR COL_LENGTH(N'dbo.Inventario',N'CostoPromedio') IS NULL
++    THROW 52290,N'Ejecutá primero 30_Compras_Procedimientos.sql.',1;
++GO
++CREATE OR ALTER VIEW dbo.vInventarioApi AS
++SELECT i.BodegaID,b.Codigo AS CodigoBodega,b.Nombre AS Bodega,b.Activo AS BodegaActiva,
++       i.RepuestoID,p.Codigo,p.Nombre AS Repuesto,p.Activo AS RepuestoActivo,
++       p.CategoriaID,c.Nombre AS Categoria,i.Existencia,i.StockMinimo,
++       CASE WHEN i.Existencia<i.StockMinimo THEN CONVERT(bigint,i.StockMinimo)-i.Existencia ELSE CONVERT(bigint,0) END AS Faltante,
++       CONVERT(varchar(15),CASE WHEN i.Existencia=0 THEN 'SIN_EXISTENCIA'
++            WHEN i.Existencia<=i.StockMinimo THEN 'BAJO' ELSE 'DISPONIBLE' END) AS EstadoStock,
++       v.CostoPromedio,CONVERT(decimal(38,6),CONVERT(decimal(19,0),i.Existencia)*v.CostoPromedio) AS ValorExistencia
++FROM dbo.vInventario i JOIN dbo.Inventario v ON v.BodegaID=i.BodegaID AND v.RepuestoID=i.RepuestoID
++JOIN dbo.Bodega b ON b.BodegaID=i.BodegaID JOIN dbo.Repuesto p ON p.RepuestoID=i.RepuestoID
++JOIN dbo.CategoriaRepuesto c ON c.CategoriaID=p.CategoriaID;
++GO
++CREATE OR ALTER VIEW dbo.vKardexApi AS
++SELECT m.MovimientoID,m.Fecha,m.Tipo,m.BodegaID,m.RepuestoID,m.Cantidad,
++       m.ExistenciaResultante-m.CantidadFirmada AS ExistenciaAnterior,m.ExistenciaResultante,
++       COALESCE(dc.CostoUnitario,rr.CostoUnitario) AS CostoUnitario,
++       CONVERT(decimal(38,2),CONVERT(decimal(10,0),m.Cantidad)*COALESCE(dc.CostoUnitario,rr.CostoUnitario)) AS Importe,
++       v.CostoAnterior,v.CostoPosterior,
++       CONVERT(decimal(38,6),CONVERT(decimal(19,0),m.ExistenciaResultante)*v.CostoPosterior) AS ValorExistencia,
++       v.EsMigracion,m.CompraID,m.LineaCompra,c.NumeroCompra,c.ProveedorID,pr.Nombre AS Proveedor,
++       o.OrdenID,o.NumeroOrden,m.ReparacionID,m.LineaReparacion,m.UsuarioID,
++       COALESCE(ev.Responsable,CONCAT(e.Nombres,N' ',e.Apellidos)) AS Responsable,
++       CONVERT(bit,CASE WHEN ev.CompraID IS NOT NULL THEN 1 ELSE 0 END) AS NombreHistorico
++FROM dbo.vMovimientoInventario m
++LEFT JOIN dbo.DetalleCompra dc ON dc.CompraID=m.CompraID AND dc.Linea=m.LineaCompra
++LEFT JOIN dbo.ReparacionRepuesto rr ON rr.ReparacionID=m.ReparacionID AND rr.Linea=m.LineaReparacion
++LEFT JOIN dbo.Compra c ON c.CompraID=m.CompraID LEFT JOIN dbo.Proveedor pr ON pr.ProveedorID=c.ProveedorID
++LEFT JOIN dbo.Reparacion r ON r.ReparacionID=m.ReparacionID LEFT JOIN dbo.Diagnostico d ON d.DiagnosticoID=r.DiagnosticoID
++LEFT JOIN dbo.OrdenServicio o ON o.OrdenID=d.OrdenID
++JOIN dbo.Usuario u ON u.UsuarioID=m.UsuarioID JOIN dbo.Empleado e ON e.EmpleadoID=u.EmpleadoID
++LEFT JOIN dbo.ValoracionInventario v ON v.MovimientoID=m.MovimientoID
++LEFT JOIN dbo.EventoCompraApi ev ON ev.CompraID=m.CompraID AND ev.Tipo='RECEPCION';
++GO
++CREATE OR ALTER FUNCTION dbo.fnInventarioFiltradoApi(
++    @Buscar nvarchar(max),@BodegaID int,@CategoriaID int,@EstadoStock nvarchar(max),@Activo bit
++) RETURNS TABLE AS RETURN (
++    SELECT * FROM dbo.vInventarioApi
++    WHERE (@Buscar IS NULL OR @Buscar=N'' OR CHARINDEX(@Buscar,Codigo)>0 OR CHARINDEX(@Buscar,Repuesto)>0
++           OR CHARINDEX(@Buscar,CodigoBodega)>0 OR CHARINDEX(@Buscar,Bodega)>0 OR CHARINDEX(@Buscar,Categoria)>0)
++      AND (@BodegaID IS NULL OR BodegaID=@BodegaID) AND (@CategoriaID IS NULL OR CategoriaID=@CategoriaID)
++      AND (@EstadoStock IS NULL OR @EstadoStock=N'' OR EstadoStock=@EstadoStock)
++      AND (@Activo IS NULL OR (@Activo=1 AND BodegaActiva=1 AND RepuestoActivo=1)
++           OR (@Activo=0 AND (BodegaActiva=0 OR RepuestoActivo=0)))
++);
++GO
++CREATE OR ALTER PROCEDURE dbo.spValidarFiltrosInventarioApi
++    @UsuarioActorID int,@BodegaID int=NULL,@RepuestoID int=NULL,@CategoriaID int=NULL,
++    @Buscar nvarchar(max)=NULL,@EstadoStock nvarchar(max)=NULL,@Desde date=NULL,@Hasta date=NULL,
++    @Tipo nvarchar(max)=NULL,@Pagina int=1,@Tamano int=25
++AS
++BEGIN
++    SET NOCOUNT ON; EXEC dbo.spValidarActorAbastecimiento @UsuarioActorID;
++    IF @BodegaID<=0 OR @RepuestoID<=0 OR @CategoriaID<=0 OR DATALENGTH(@Buscar)>300
++       OR @EstadoStock NOT IN (N'',N'SIN_EXISTENCIA',N'BAJO',N'DISPONIBLE')
++       OR @Tipo NOT IN (N'',N'E',N'S') OR @Desde>@Hasta
++       OR @Pagina IS NULL OR @Pagina<=0 OR @Tamano IS NULL OR @Tamano NOT BETWEEN 1 AND 100
++        THROW 52200,N'Revisá IDs positivos, búsqueda (150), estado, tipo, fechas y paginación (1 a 100 filas).',1;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spResumenInventarioApi
++    @UsuarioActorID int,@Buscar nvarchar(max)=NULL,@BodegaID int=NULL,@CategoriaID int=NULL,
++    @EstadoStock nvarchar(max)=NULL,@Activo bit=NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarFiltrosInventarioApi @UsuarioActorID,@BodegaID,NULL,@CategoriaID,@Buscar,@EstadoStock;
++    SELECT COUNT_BIG(*) AS Total,
++           COALESCE(SUM(CONVERT(bigint,CASE WHEN EstadoStock='SIN_EXISTENCIA' THEN 1 ELSE 0 END)),0) AS SinExistencia,
++           COALESCE(SUM(CONVERT(bigint,CASE WHEN EstadoStock='BAJO' THEN 1 ELSE 0 END)),0) AS StockBajo,
++           COALESCE(SUM(ValorExistencia),CONVERT(decimal(38,6),0)) AS ValorTotal
++    FROM dbo.fnInventarioFiltradoApi(@Buscar,@BodegaID,@CategoriaID,@EstadoStock,@Activo);
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spListarInventarioApi
++    @UsuarioActorID int,@Buscar nvarchar(max)=NULL,@BodegaID int=NULL,@CategoriaID int=NULL,
++    @EstadoStock nvarchar(max)=NULL,@Activo bit=NULL,@Pagina int=1,@Tamano int=25
++AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarFiltrosInventarioApi @UsuarioActorID,@BodegaID,NULL,@CategoriaID,@Buscar,@EstadoStock,
++         @Pagina=@Pagina,@Tamano=@Tamano;
++    SELECT * FROM dbo.fnInventarioFiltradoApi(@Buscar,@BodegaID,@CategoriaID,@EstadoStock,@Activo)
++    ORDER BY Bodega,Repuesto,BodegaID,RepuestoID
++    OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spConsultarInventarioApi @UsuarioActorID int,@BodegaID int,@RepuestoID int AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarFiltrosInventarioApi @UsuarioActorID,@BodegaID,@RepuestoID;
++    IF NOT EXISTS(SELECT 1 FROM dbo.Inventario WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID)
++        THROW 52202,N'El repuesto no está asociado a esa bodega.',1;
++    SELECT * FROM dbo.vInventarioApi WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spResumenKardexApi
++    @UsuarioActorID int,@BodegaID int,@RepuestoID int,@Desde date=NULL,@Hasta date=NULL,@Tipo nvarchar(max)=NULL
++AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarFiltrosInventarioApi @UsuarioActorID,@BodegaID,@RepuestoID,@Desde=@Desde,@Hasta=@Hasta,@Tipo=@Tipo;
++    IF NOT EXISTS(SELECT 1 FROM dbo.Inventario WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID)
++        THROW 52202,N'El repuesto no está asociado a esa bodega.',1;
++    -- Los saldos incluyen ambos tipos. Filtrar E/S sólo cambia las filas y Total.
++    SELECT COALESCE(SUM(CASE WHEN @Desde IS NOT NULL AND Fecha<@Desde THEN CantidadFirmada ELSE CONVERT(bigint,0) END),0) AS SaldoInicial,
++      COALESCE(SUM(CASE WHEN (@Desde IS NULL OR Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,Fecha)<=@Hasta)
++                       AND Tipo='E' THEN CantidadFirmada ELSE CONVERT(bigint,0) END),0) AS Entradas,
++      COALESCE(SUM(CASE WHEN (@Desde IS NULL OR Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,Fecha)<=@Hasta)
++                       AND Tipo='S' THEN -CantidadFirmada ELSE CONVERT(bigint,0) END),0) AS Salidas,
++      COALESCE(SUM(CASE WHEN @Hasta IS NULL OR CONVERT(date,Fecha)<=@Hasta THEN CantidadFirmada ELSE CONVERT(bigint,0) END),0) AS SaldoFinal,
++      COALESCE(SUM(CONVERT(bigint,CASE WHEN (@Desde IS NULL OR Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,Fecha)<=@Hasta)
++                       AND (@Tipo IS NULL OR @Tipo=N'' OR Tipo=@Tipo) THEN 1 ELSE 0 END)),0) AS Total
++    FROM dbo.vMovimientoInventario WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID;
++END;
++GO
++CREATE OR ALTER PROCEDURE dbo.spListarKardexApi
++    @UsuarioActorID int,@BodegaID int,@RepuestoID int,@Desde date=NULL,@Hasta date=NULL,
++    @Tipo nvarchar(max)=NULL,@Pagina int=1,@Tamano int=25
++AS
++BEGIN
++    SET NOCOUNT ON;
++    EXEC dbo.spValidarFiltrosInventarioApi @UsuarioActorID,@BodegaID,@RepuestoID,
++         @Desde=@Desde,@Hasta=@Hasta,@Tipo=@Tipo,@Pagina=@Pagina,@Tamano=@Tamano;
++    IF NOT EXISTS(SELECT 1 FROM dbo.Inventario WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID)
++        THROW 52202,N'El repuesto no está asociado a esa bodega.',1;
++    SELECT * FROM dbo.vKardexApi WHERE BodegaID=@BodegaID AND RepuestoID=@RepuestoID
++      AND (@Desde IS NULL OR Fecha>=@Desde) AND (@Hasta IS NULL OR CONVERT(date,Fecha)<=@Hasta)
++      AND (@Tipo IS NULL OR @Tipo=N'' OR Tipo=@Tipo)
++    ORDER BY MovimientoID
++    OFFSET (CONVERT(bigint,@Pagina)-1)*@Tamano ROWS FETCH NEXT @Tamano ROWS ONLY;
++END;
++GO
++IF DATABASE_PRINCIPAL_ID(N'techcare_app') IS NOT NULL
++BEGIN
++    GRANT SELECT ON dbo.vInventarioApi TO techcare_app;
++    GRANT SELECT ON dbo.vKardexApi TO techcare_app;
++    GRANT EXECUTE ON dbo.spResumenInventarioApi TO techcare_app;
++    GRANT EXECUTE ON dbo.spListarInventarioApi TO techcare_app;
++    GRANT EXECUTE ON dbo.spConsultarInventarioApi TO techcare_app;
++    GRANT EXECUTE ON dbo.spResumenKardexApi TO techcare_app;
++    GRANT EXECUTE ON dbo.spListarKardexApi TO techcare_app;
++END;
++GO
+diff --git a/34_Pruebas_Inventario.sql b/34_Pruebas_Inventario.sql
+new file mode 100644
+index 0000000..fde6b68
+--- /dev/null
++++ b/34_Pruebas_Inventario.sql
+@@ -0,0 +1,396 @@
++-- Ejecutar después del 33 en DESARROLLO, sin otras escrituras concurrentes.
++-- Datos propios por caso, ROLLBACK y verificación de cantidades antes/después.
++-- Las identidades pueden dejar huecos. No es prueba entre sesiones concurrentes.
++USE [TechCare];
++GO
++SET NOCOUNT ON; SET XACT_ABORT ON;
++IF @@TRANCOUNT<>0 THROW 52090,N'Ejecutá sin una transacción abierta.',1;
++IF OBJECT_ID(N'dbo.spListarInventarioApi',N'P') IS NULL
++    THROW 52090,N'Ejecutá primero 33_Inventario_Procedimientos.sql.',1;
++DECLARE @Admin int=(SELECT TOP (1) UsuarioID FROM dbo.Usuario WHERE dbo.fnTieneRol(UsuarioID,'ADMIN')=1 ORDER BY UsuarioID);
++DECLARE @Modelo int=(SELECT TOP (1) ModeloEquipoID FROM dbo.ModeloEquipo ORDER BY ModeloEquipoID);
++DECLARE @Tipo int=(SELECT TOP (1) TipoClienteID FROM dbo.TipoCliente ORDER BY TipoClienteID);
++IF @Admin IS NULL OR @Modelo IS NULL OR @Tipo IS NULL THROW 52090,N'Se requiere ADMIN activo y catálogos base.',1;
++DECLARE @ContextoInicial sql_variant=SESSION_CONTEXT(N'UsuarioID');
++DECLARE @Casos TABLE(ID int PRIMARY KEY,Caso nvarchar(200),ErrorEsperado int);
++INSERT @Casos VALUES
++(1,N'Inventario incluye pares con stock y asociaciones vacías',0),
++(2,N'Nombres Unicode se conservan en inventario',0),
++(3,N'Búsqueda Unicode encuentra el repuesto',0),
++(4,N'Porcentaje se busca como texto literal',0),
++(5,N'Guion bajo se busca como texto literal',0),
++(6,N'Filtro de categoría separa sus pares',0),
++(7,N'Filtro de bodega devuelve sólo su ubicación',0),
++(8,N'Stock cero y mínimo cero se muestra sin existencias',0),
++(9,N'Existencia igual al mínimo genera alerta sin faltante',0),
++(10,N'Existencia inferior al mínimo calcula el faltante',0),
++(11,N'Resumen suma todos los resultados del filtro',0),
++(12,N'Repuesto inactivo conserva stock e historia visible',0),
++(13,N'Filtro activo excluye repuestos inactivos',0),
++(14,N'Filtro inactivo incluye bodegas inactivas',0),
++(15,N'Consultar no crea asociaciones de inventario',0),
++(16,N'Paginación estable conserva resumen completo',0),
++(17,N'Página cero rechazada',52200),
++(18,N'Tamaño mayor de cien rechazado',52200),
++(19,N'ID negativo rechazado',52200),
++(20,N'Estado de stock desconocido rechazado',52200),
++(21,N'Búsqueda larga rechazada sin truncar',52200),
++(22,N'Técnico no consulta inventario general',52004),
++(23,N'Recepción no consulta kardex',52004),
++(24,N'Caja no consulta resumen',52004),
++(25,N'Cuenta de bodega inactiva rechazada',52004),
++(26,N'ADMIN consulta inventario y kardex',0),
++(27,N'Entrada conserva compra, línea, costo y responsable',0),
++(28,N'Nueva entrada conserva el promedio del primer movimiento',0),
++(29,N'Salida conserva orden, técnico y costo histórico',0),
++(30,N'Kardex completo cuadra entradas, salidas y saldo',0),
++(31,N'Rango por día conserva saldo anterior al período',0),
++(32,N'Filtro de entradas no elimina salidas del resumen',0),
++(33,N'Filtro de salidas no elimina entradas del resumen',0),
++(34,N'Período anterior al primer movimiento devuelve ceros',0),
++(35,N'Período futuro conserva saldo sin inventar movimientos',0),
++(36,N'Bodega sin movimientos devuelve kardex vacío y saldo cero',0),
++(37,N'Páginas del kardex conservan orden por MovimientoID',0),
++(38,N'Cambiar catálogo no reescribe costos del kardex',0),
++(39,N'Pareja no asociada devuelve error controlado',52202),
++(40,N'Rango de fechas invertido rechazado',52200),
++(41,N'Tipo de movimiento inválido rechazado',52200),
++(42,N'Catálogos inactivos no ocultan movimientos históricos',0),
++(43,N'Consultas conservan stock, costo y contexto de auditoría',0),
++(44,N'Recepción sin cargo presenta costo y valoración cero',0),
++(45,N'Importe grande conserva centavos y seis decimales',0),
++(46,N'Consultar repetidamente no duplica movimientos',0),
++(47,N'Recepción conserva nombre histórico al renombrar empleado',0),
++(48,N'Valoración y saldo posterior corresponden al movimiento',0),
++(49,N'Filtro sin coincidencias devuelve resumen cero',0),
++(50,N'Último día del año 9999 no desborda el filtro',0);
++DECLARE @Antes TABLE (Nombre sysname PRIMARY KEY,Cantidad bigint);
++INSERT @Antes
++SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Cliente UNION ALL
++SELECT 'Equipo' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Equipo UNION ALL
++SELECT 'Usuario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Usuario UNION ALL
++SELECT 'Empleado' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Bodega UNION ALL
++SELECT 'Inventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ProveedorRepuesto UNION ALL
++SELECT 'Compra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AuditoriaPrecioRepuesto UNION ALL
++SELECT 'Factura' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Factura UNION ALL
++SELECT 'FacturaDetalle' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.FacturaDetalle UNION ALL
++SELECT 'Pago' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Pago UNION ALL
++SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
++SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi UNION ALL
++SELECT 'ValoracionInventario',COUNT_BIG(*) FROM dbo.ValoracionInventario UNION ALL
++SELECT 'SolicitudCompraApi',COUNT_BIG(*) FROM dbo.SolicitudCompraApi UNION ALL
++SELECT 'EventoCompraApi',COUNT_BIG(*) FROM dbo.EventoCompraApi;
++SELECT TOP (0) * INTO #ResultadoOrden FROM dbo.vOrdenAcceso;
++-- Las vistas tienen JOIN; los IDs de estas tablas temporales no son IDENTITY.
++SELECT TOP (0) * INTO #I FROM dbo.vInventarioApi;
++SELECT TOP (0) * INTO #K FROM dbo.vKardexApi;
++SELECT TOP (0) * INTO #CompraApi FROM dbo.vCompraApi;
++CREATE TABLE #RI(Total bigint,SinExistencia bigint,StockBajo bigint,ValorTotal decimal(38,6));
++CREATE TABLE #RK(SaldoInicial bigint,Entradas bigint,Salidas bigint,SaldoFinal bigint,Total bigint);
++DECLARE @Resultados TABLE(ID int,Caso nvarchar(200),Resultado varchar(4),Detalle nvarchar(4000));
++DECLARE @Caso int=1,@Esperado int,@Nombre nvarchar(200),@Resultado varchar(4),@Detalle nvarchar(4000),@Preparado bit;
++DECLARE @Sufijo varchar(8),@Codigo varchar(30),@Usuario varchar(50),@Nit varchar(20),@Serie varchar(80),@Texto nvarchar(max);
++DECLARE @Cliente int,@Equipo int,@Empleado int,@Tec1 int,@Tec2 int,@Recepcion int,@Orden int,@Categoria int,@Repuesto int,@Bodega int,@Proveedor int,@Compra int,@Actividad int;
++DECLARE @Bodeguero int,@Caja int,@Extra int,@ExtraCodigo varchar(30),@Bodega2 int,@CompraNueva int,@Revision nvarchar(64),@Mov1 bigint;
++DECLARE @Movimientos bigint,@Inventarios bigint,@Auditorias bigint,@Promedio decimal(18,6),@Stock bigint;
++DECLARE @Lineas dbo.TipoDetalleCompra;
++DECLARE @Hoy date=CONVERT(date,SYSUTCDATETIME()),@Ayer date,@AntesDeTodo date,@Manana date;
++SET @Ayer=DATEADD(day,-1,@Hoy);SET @AntesDeTodo=DATEADD(day,-2,@Hoy);SET @Manana=DATEADD(day,1,@Hoy);
++DECLARE @Solicitud nvarchar(36),@Json nvarchar(max),@NumeroCompra nvarchar(30);
++DECLARE @Hash varchar(255)='$pbkdf2-sha256$600000$HuxZL8PtNPKcYu8utgbkoQ==$NmPYFGhLXt0tyvkysSHHNFjQMIFqSF/tSTU66h3jzik=';
++WHILE @Caso<=50
++BEGIN
++    SELECT @Nombre=Caso,@Esperado=ErrorEsperado FROM @Casos WHERE ID=@Caso;
++    SET @Resultado='PASS';SET @Detalle=NULL;SET @Preparado=0;
++    SET @Sufijo=LEFT(REPLACE(CONVERT(varchar(36),NEWID()),'-',''),8);
++    DELETE #ResultadoOrden;DELETE #I;DELETE #K;DELETE #RI;DELETE #RK;DELETE #CompraApi;DELETE @Lineas;
++    BEGIN TRY
++        BEGIN TRANSACTION;
++        SET @Nit = 'TCAB-C-' + @Sufijo; SET @Serie = 'TCAB-E-' + @Sufijo;
++        INSERT dbo.Cliente(TipoClienteID, NIT, Nombre, Activo) VALUES (@Tipo, @Nit, N'Cliente de prueba técnica', 1);
++        SET @Cliente = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Equipo(ClienteID, ModeloEquipoID, NumeroSerie, Descripcion, Activo)
++            VALUES (@Cliente, @Modelo, @Serie, N'Equipo de prueba técnica', 1);
++        SET @Equipo = CONVERT(int, SCOPE_IDENTITY());
++
++        SET @Codigo = 'TCABT1-' + @Sufijo; SET @Usuario = 'tcst1_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Uno', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec1 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCABT2-' + @Sufijo; SET @Usuario = 'tcst2_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Técnico', N'Dos', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Tec2 = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo = 'TCABR-' + @Sufijo; SET @Usuario = 'tcsr_' + @Sufijo;
++        INSERT dbo.Empleado(Codigo, Nombres, Apellidos, Activo) VALUES (@Codigo, N'Recepción', N'Prueba', 1);
++        SET @Empleado = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID, NombreUsuario, PasswordHash, Activo) VALUES (@Empleado, @Usuario, @Hash, 1);
++        SET @Recepcion = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.UsuarioRol VALUES (@Tec1, 'TECNICO'), (@Tec2, 'TECNICO'), (@Recepcion, 'RECEPCION');
++
++        SET @Codigo = 'TCAB-' + @Sufijo;
++        EXEC dbo.spCrearOrden @Codigo, @Equipo, @Admin, N'No enciende ñ 漢字', @Orden OUTPUT;
++        INSERT #ResultadoOrden EXEC dbo.spAsignarTecnicoOrden @Admin, @Orden, @Tec1;
++        DELETE FROM #ResultadoOrden;
++        SET @Texto = N'Categoría de prueba ' + @Sufijo;
++        INSERT dbo.CategoriaRepuesto(Nombre) VALUES (@Texto);
++        SET @Categoria = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Repuesto(CategoriaID, Codigo, Nombre, CostoReferencia, PrecioVenta, Activo)
++            VALUES (@Categoria, @Codigo, N'Fuente de prueba ñ', 12.25, 25.50, 1);
++        SET @Repuesto = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Bodega(Codigo, Nombre, Activo) VALUES (@Codigo, N'Bodega técnica de prueba', 1);
++        SET @Bodega = CONVERT(int, SCOPE_IDENTITY());
++        INSERT dbo.Inventario(BodegaID, RepuestoID, StockMinimo) VALUES (@Bodega, @Repuesto, 2);
++        SET @Nit = 'TCAB-P-' + @Sufijo;
++        INSERT dbo.Proveedor(NIT, Nombre, Activo) VALUES (@Nit, N'Proveedor de prueba técnica', 1);
++        SET @Proveedor = CONVERT(int, SCOPE_IDENTITY());
++        -- El detalle de compra exige que el proveedor ofrezca este repuesto.
++        INSERT dbo.ProveedorRepuesto(ProveedorID, RepuestoID) VALUES (@Proveedor, @Repuesto);
++        INSERT @Lineas VALUES (1, @Bodega, @Repuesto, 10, 12.25);
++        EXEC dbo.spRegistrarCompra @Codigo, @Proveedor, @Admin, @Lineas, @Compra OUTPUT,@Fecha=@Ayer;
++        EXEC dbo.spRecibirCompra @Compra, @Admin,@Fecha=@Ayer;
++        SET @Texto = N'Prueba con carga ' + @Sufijo;
++        INSERT dbo.Actividad(Nombre, Activo) VALUES (@Texto, 1);
++        SET @Actividad = CONVERT(int, SCOPE_IDENTITY());
++        SET @Codigo='TCABG-'+@Sufijo;SET @Usuario='tcabg_'+@Sufijo;
++        INSERT dbo.Empleado(Codigo,Nombres,Apellidos,Activo) VALUES (@Codigo,N'Bodega',N'Prueba',1);
++        SET @Empleado=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID,NombreUsuario,PasswordHash,Activo) VALUES (@Empleado,@Usuario,@Hash,1);
++        SET @Bodeguero=CONVERT(int,SCOPE_IDENTITY());INSERT dbo.UsuarioRol VALUES (@Bodeguero,'BODEGA');
++        SET @Codigo='TCABC-'+@Sufijo;SET @Usuario='tcabc_'+@Sufijo;
++        INSERT dbo.Empleado(Codigo,Nombres,Apellidos,Activo) VALUES (@Codigo,N'Caja',N'Prueba',1);
++        SET @Empleado=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Usuario(EmpleadoID,NombreUsuario,PasswordHash,Activo) VALUES (@Empleado,@Usuario,@Hash,1);
++        SET @Caja=CONVERT(int,SCOPE_IDENTITY());INSERT dbo.UsuarioRol VALUES (@Caja,'CAJA');
++        SET @ExtraCodigo='EXTRA-'+@Sufijo;
++        INSERT dbo.Repuesto(CategoriaID,Codigo,Nombre,CostoReferencia,PrecioVenta,Activo) VALUES (@Categoria,@ExtraCodigo,N'Repuesto adicional',0,0,1);
++        SET @Extra=CONVERT(int,SCOPE_IDENTITY());
++        SET @Codigo='B2-'+@Sufijo;
++        INSERT dbo.Bodega(Codigo,Nombre,Activo) VALUES(@Codigo,N'Segunda bodega',1);SET @Bodega2=CONVERT(int,SCOPE_IDENTITY());
++        INSERT dbo.Inventario(BodegaID,RepuestoID,StockMinimo) VALUES(@Bodega2,@Repuesto,0);
++        SELECT @Mov1=MovimientoID FROM dbo.MovimientoInventario WHERE CompraID=@Compra;
++        EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@Admin;
++        IF @Caso IN(28,29,30,31,32,33,35,37,38,42,43,46,47,48)
++        BEGIN
++            INSERT #ResultadoOrden EXEC dbo.spRegistrarDiagnosticoOrden @Tec1,@Orden,N'Diagnóstico ñ',0;
++            INSERT #ResultadoOrden EXEC dbo.spIniciarReparacionOrden @Tec1,@Orden,N'Cambiar pieza',0,N'Autorizado ñ';
++            INSERT #ResultadoOrden EXEC dbo.spUsarRepuestoOrden @Tec1,@Orden,@Bodega,@Repuesto,2,25.50;
++            SET @Solicitud=CONVERT(nvarchar(36),NEWID());SET @NumeroCompra=N'KI-'+@Sufijo;
++            SET @Json=(SELECT @Bodega AS bodegaId,@Repuesto AS repuestoId,6 AS cantidad,20.00 AS costoUnitario FOR JSON PATH);
++            INSERT #CompraApi EXEC dbo.spRegistrarCompraApi @Bodeguero,@Solicitud,@NumeroCompra,@Proveedor,N'Compra ñ',@Json;
++            SELECT @CompraNueva=CompraID,@Revision=Revision FROM #CompraApi;
++            DELETE #CompraApi;
++            INSERT #CompraApi EXEC dbo.spRecibirCompraApi @Bodeguero,@CompraNueva,@Revision;
++        END;
++        SELECT @Movimientos=COUNT_BIG(*) FROM dbo.MovimientoInventario;
++        SELECT @Inventarios=COUNT_BIG(*) FROM dbo.Inventario;
++        SELECT @Promedio=CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto;
++        SET @Stock=dbo.fnExistencia(@Bodega,@Repuesto);
++        SET @Preparado=1;
++
++        IF @Caso IN(1,2,6,11,12,13,14,15,16,26)
++        BEGIN
++            IF @Caso IN(12,13) UPDATE dbo.Repuesto SET Activo=0 WHERE RepuestoID=@Repuesto;
++            IF @Caso=14 UPDATE dbo.Bodega SET Activo=0 WHERE BodegaID=@Bodega;
++            IF @Caso NOT IN(13,14) INSERT #I EXEC dbo.spListarInventarioApi @Admin,@CategoriaID=@Categoria;
++            IF @Caso=13 INSERT #I EXEC dbo.spListarInventarioApi @Admin,@CategoriaID=@Categoria,@Activo=1;
++            IF @Caso=14 INSERT #I EXEC dbo.spListarInventarioApi @Admin,@CategoriaID=@Categoria,@Activo=0;
++            IF @Caso IN(1,6,12,26) AND (SELECT COUNT(*) FROM #I)<>2 THROW 52292,N'Faltan pares del inventario.',1;
++            IF @Caso=1 AND NOT EXISTS(SELECT 1 FROM #I WHERE BodegaID=@Bodega AND Existencia=10 AND CostoPromedio=12.25) THROW 52292,N'Existencia o promedio incorrecto.',1;
++            IF @Caso=2 AND NOT EXISTS(SELECT 1 FROM #I WHERE Repuesto=N'Fuente de prueba ñ' AND Bodega=N'Bodega técnica de prueba') THROW 52292,N'Se perdió Unicode.',1;
++            IF @Caso=11
++            BEGIN
++                INSERT #RI EXEC dbo.spResumenInventarioApi @Admin,@CategoriaID=@Categoria;
++                IF NOT EXISTS(SELECT 1 FROM #RI WHERE Total=2 AND SinExistencia=1 AND StockBajo=0 AND ValorTotal=122.500000) THROW 52292,N'Resumen incorrecto.',1;
++            END;
++            IF @Caso=12 AND EXISTS(SELECT 1 FROM #I WHERE RepuestoActivo<>0) THROW 52292,N'Se perdió el estado inactivo.',1;
++            IF @Caso=13 AND EXISTS(SELECT 1 FROM #I) THROW 52292,N'El filtro activo incluyó inactivos.',1;
++            IF @Caso=14 AND ((SELECT COUNT(*) FROM #I)<>1 OR NOT EXISTS(SELECT 1 FROM #I WHERE BodegaID=@Bodega AND BodegaActiva=0)) THROW 52292,N'Filtro inactivo incorrecto.',1;
++            IF @Caso=15 AND EXISTS(SELECT 1 FROM #I WHERE RepuestoID=@Extra) THROW 52292,N'Se creó una asociación inexistente.',1;
++            IF @Caso=16
++            BEGIN
++                DELETE #I;INSERT #I EXEC dbo.spListarInventarioApi @Admin,@CategoriaID=@Categoria,@Pagina=1,@Tamano=1;
++                IF NOT EXISTS(SELECT 1 FROM #I WHERE BodegaID=@Bodega) THROW 52292,N'Primera página incorrecta.',1;
++                DELETE #I;INSERT #I EXEC dbo.spListarInventarioApi @Admin,@CategoriaID=@Categoria,@Pagina=2,@Tamano=1;
++                INSERT #RI EXEC dbo.spResumenInventarioApi @Admin,@CategoriaID=@Categoria;
++                IF NOT EXISTS(SELECT 1 FROM #I WHERE BodegaID=@Bodega2) OR NOT EXISTS(SELECT 1 FROM #RI WHERE Total=2 AND ValorTotal=122.5) THROW 52292,N'La página alteró el resumen.',1;
++            END;
++        END;
++        IF @Caso=3
++        BEGIN
++            INSERT #I EXEC dbo.spListarInventarioApi @Bodeguero,@Buscar=N'Fuente de prueba ñ',@CategoriaID=@Categoria;
++            IF (SELECT COUNT(*) FROM #I)<>2 THROW 52292,N'La búsqueda Unicode no encontró los pares.',1;
++        END;
++        IF @Caso=4
++        BEGIN
++            INSERT #I EXEC dbo.spListarInventarioApi @Admin,@Buscar=N'%',@CategoriaID=@Categoria;
++            IF EXISTS(SELECT 1 FROM #I) THROW 52292,N'Porcentaje actuó como comodín.',1;
++        END;
++        IF @Caso=5
++        BEGIN
++            UPDATE dbo.Repuesto SET Nombre=N'Fuente_ñ' WHERE RepuestoID=@Repuesto;
++            INSERT #I EXEC dbo.spListarInventarioApi @Admin,@Buscar=N'_',@CategoriaID=@Categoria;
++            IF (SELECT COUNT(*) FROM #I)<>2 THROW 52292,N'Guion bajo perdió la coincidencia literal.',1;
++            DELETE #I;INSERT #I EXEC dbo.spListarInventarioApi @Admin,@Buscar=N'FuenteZñ',@CategoriaID=@Categoria;
++            IF EXISTS(SELECT 1 FROM #I) THROW 52292,N'Búsqueda literal incorrecta.',1;
++        END;
++        IF @Caso=7
++        BEGIN
++            INSERT #I EXEC dbo.spListarInventarioApi @Admin,@BodegaID=@Bodega;
++            IF (SELECT COUNT(*) FROM #I)<>1 OR EXISTS(SELECT 1 FROM #I WHERE BodegaID<>@Bodega) THROW 52292,N'Se mezclaron bodegas.',1;
++        END;
++        IF @Caso IN(8,9,10)
++        BEGIN
++            IF @Caso IN(9,10) UPDATE dbo.Inventario SET StockMinimo=CASE @Caso WHEN 9 THEN 10 ELSE 12 END WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto;
++            INSERT #I EXEC dbo.spListarInventarioApi @Admin,@CategoriaID=@Categoria;
++            IF @Caso=8 AND NOT EXISTS(SELECT 1 FROM #I WHERE BodegaID=@Bodega2 AND EstadoStock='SIN_EXISTENCIA' AND Faltante=0 AND CostoPromedio=0 AND ValorExistencia=0) THROW 52292,N'El par vacío no se presentó correctamente.',1;
++            IF @Caso=9 AND NOT EXISTS(SELECT 1 FROM #I WHERE BodegaID=@Bodega AND EstadoStock='BAJO' AND Faltante=0) THROW 52292,N'La igualdad con mínimo perdió la alerta.',1;
++            IF @Caso=10 AND NOT EXISTS(SELECT 1 FROM #I WHERE BodegaID=@Bodega AND EstadoStock='BAJO' AND Faltante=2) THROW 52292,N'Faltante incorrecto.',1;
++        END;
++        IF @Caso=17 EXEC dbo.spListarInventarioApi @Admin,@Pagina=0;
++        IF @Caso=18 EXEC dbo.spListarInventarioApi @Admin,@Tamano=101;
++        IF @Caso=19 EXEC dbo.spListarInventarioApi @Admin,@BodegaID=-1;
++        IF @Caso=20 EXEC dbo.spListarInventarioApi @Admin,@EstadoStock=N'INVALIDO';
++        IF @Caso=21 BEGIN SET @Texto=REPLICATE(N'a',151);EXEC dbo.spListarInventarioApi @Admin,@Buscar=@Texto;END;
++        IF @Caso=22 EXEC dbo.spListarInventarioApi @Tec1;
++        IF @Caso=23 EXEC dbo.spListarKardexApi @Recepcion,@Bodega,@Repuesto;
++        IF @Caso=24 EXEC dbo.spResumenInventarioApi @Caja;
++        IF @Caso=25 BEGIN UPDATE dbo.Usuario SET Activo=0 WHERE UsuarioID=@Bodeguero;EXEC dbo.spListarInventarioApi @Bodeguero;END;
++        IF @Caso=26 BEGIN INSERT #K EXEC dbo.spListarKardexApi @Admin,@Bodega,@Repuesto;IF (SELECT COUNT(*) FROM #K)<>1 THROW 52292,N'ADMIN no obtuvo el kardex.',1;END;
++        IF @Caso IN(27,28,29,30,31,32,33,34,35,36,37,38,42,46,47,48,50)
++        BEGIN
++            IF @Caso=38 UPDATE dbo.Repuesto SET CostoReferencia=CostoReferencia,PrecioVenta=99,Nombre=N'Nombre cambiado' WHERE RepuestoID=@Repuesto;
++            IF @Caso=42 BEGIN UPDATE dbo.Bodega SET Activo=0 WHERE BodegaID=@Bodega;UPDATE dbo.Repuesto SET Activo=0 WHERE RepuestoID=@Repuesto;END;
++            IF @Caso=47 UPDATE dbo.Empleado SET Nombres=N'Nombre posterior' WHERE EmpleadoID=(SELECT EmpleadoID FROM dbo.Usuario WHERE UsuarioID=@Bodeguero);
++            IF @Caso IN(27,28,29,30,37,38,42,46,47,48) INSERT #K EXEC dbo.spListarKardexApi @Admin,@Bodega,@Repuesto;
++            IF @Caso=27 AND NOT EXISTS(SELECT 1 FROM #K WHERE CompraID=@Compra AND LineaCompra=1 AND CostoUnitario=12.25 AND Cantidad=10 AND Responsable IS NOT NULL AND ExistenciaAnterior=0 AND ExistenciaResultante=10) THROW 52292,N'Origen o entrada incorrectos.',1;
++            IF @Caso=28 AND NOT EXISTS(SELECT 1 FROM #K WHERE MovimientoID=@Mov1 AND CostoAnterior=0 AND CostoPosterior=12.250000) THROW 52292,N'Se reescribió el promedio histórico.',1;
++            IF @Caso=29 AND NOT EXISTS(SELECT 1 FROM #K WHERE Tipo='S' AND OrdenID=@Orden AND UsuarioID=@Tec1 AND CostoUnitario=12.25 AND ExistenciaAnterior=10 AND ExistenciaResultante=8) THROW 52292,N'La salida perdió su origen.',1;
++            IF @Caso=30 BEGIN INSERT #RK EXEC dbo.spResumenKardexApi @Admin,@Bodega,@Repuesto;IF NOT EXISTS(SELECT 1 FROM #RK WHERE SaldoInicial=0 AND Entradas=16 AND Salidas=2 AND SaldoFinal=14 AND Total=3) THROW 52292,N'El kardex completo no cuadra.',1;END;
++            IF @Caso IN(31,32,33)
++            BEGIN
++                DECLARE @TipoMovimiento nvarchar(1)=CASE @Caso WHEN 32 THEN N'E' WHEN 33 THEN N'S' ELSE NULL END;
++                INSERT #RK EXEC dbo.spResumenKardexApi @Admin,@Bodega,@Repuesto,@Hoy,@Hoy,@TipoMovimiento;
++                INSERT #K EXEC dbo.spListarKardexApi @Admin,@Bodega,@Repuesto,@Hoy,@Hoy,@TipoMovimiento;
++                IF NOT EXISTS(SELECT 1 FROM #RK WHERE SaldoInicial=10 AND Entradas=6 AND Salidas=2 AND SaldoFinal=14 AND Total=CASE @Caso WHEN 31 THEN 2 ELSE 1 END) THROW 52292,N'El filtro alteró saldos del período.',1;
++                IF @Caso IN(32,33) AND EXISTS(SELECT 1 FROM #K WHERE Tipo<>@TipoMovimiento) THROW 52292,N'Se devolvió otro tipo de movimiento.',1;
++            END;
++            IF @Caso=34 BEGIN INSERT #RK EXEC dbo.spResumenKardexApi @Admin,@Bodega,@Repuesto,NULL,@AntesDeTodo;IF NOT EXISTS(SELECT 1 FROM #RK WHERE SaldoInicial=0 AND Entradas=0 AND Salidas=0 AND SaldoFinal=0 AND Total=0) THROW 52292,N'El período anterior contiene movimientos.',1;END;
++            IF @Caso=35 BEGIN INSERT #RK EXEC dbo.spResumenKardexApi @Admin,@Bodega,@Repuesto,@Manana,NULL;IF NOT EXISTS(SELECT 1 FROM #RK WHERE SaldoInicial=14 AND Entradas=0 AND Salidas=0 AND SaldoFinal=14 AND Total=0) THROW 52292,N'Período sin movimientos perdió saldo.',1;END;
++            IF @Caso=36
++            BEGIN
++                INSERT #RK EXEC dbo.spResumenKardexApi @Admin,@Bodega2,@Repuesto;
++                INSERT #K EXEC dbo.spListarKardexApi @Admin,@Bodega2,@Repuesto;
++                IF EXISTS(SELECT 1 FROM #K) OR NOT EXISTS(SELECT 1 FROM #RK WHERE SaldoInicial=0 AND Entradas=0 AND Salidas=0 AND SaldoFinal=0 AND Total=0) THROW 52292,N'El par vacío inventó movimientos.',1;
++            END;
++            IF @Caso=37
++            BEGIN
++                DELETE #K;INSERT #K EXEC dbo.spListarKardexApi @Admin,@Bodega,@Repuesto,@Pagina=1,@Tamano=1;
++                IF (SELECT COUNT(*) FROM #K)<>1 OR NOT EXISTS(SELECT 1 FROM #K WHERE MovimientoID=@Mov1) THROW 52292,N'Primera página del kardex incorrecta.',1;
++                DELETE #K;INSERT #K EXEC dbo.spListarKardexApi @Admin,@Bodega,@Repuesto,@Pagina=2,@Tamano=1;
++                IF (SELECT COUNT(*) FROM #K)<>1 OR NOT EXISTS(SELECT 1 FROM #K WHERE Tipo='S') THROW 52292,N'Segunda página del kardex incorrecta.',1;
++            END;
++            IF @Caso=38 AND (EXISTS(SELECT 1 FROM #K WHERE CostoUnitario=99) OR NOT EXISTS(SELECT 1 FROM #K WHERE MovimientoID=@Mov1 AND CostoUnitario=12.25)) THROW 52292,N'El catálogo reescribió el kardex.',1;
++            IF @Caso=42 AND (SELECT COUNT(*) FROM #K)<>3 THROW 52292,N'Los inactivos perdieron historia.',1;
++            IF @Caso=46 BEGIN INSERT #K EXEC dbo.spListarKardexApi @Admin,@Bodega,@Repuesto;IF (SELECT COUNT(*) FROM #K)<>6 OR (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos THROW 52292,N'La consulta duplicó movimientos.',1;END;
++            IF @Caso=47 AND NOT EXISTS(SELECT 1 FROM #K WHERE CompraID=@CompraNueva AND Responsable=N'Bodega Prueba' AND NombreHistorico=1) THROW 52292,N'Se perdió el nombre conservado en recepción.',1;
++            IF @Caso=48 AND NOT EXISTS(SELECT 1 FROM #K WHERE CompraID=@CompraNueva AND ExistenciaAnterior=8 AND ExistenciaResultante=14 AND CostoAnterior=12.25 AND CostoPosterior=15.571429 AND ValorExistencia=218.000006 AND EsMigracion=0) THROW 52292,N'Valoración histórica incorrecta.',1;
++            IF @Caso=50 BEGIN INSERT #RK EXEC dbo.spResumenKardexApi @Admin,@Bodega,@Repuesto,NULL,'99991231';IF NOT EXISTS(SELECT 1 FROM #RK WHERE SaldoFinal=10) THROW 52292,N'El límite superior perdió el movimiento.',1;END;
++        END;
++        IF @Caso=39 EXEC dbo.spListarKardexApi @Admin,@Bodega,@Extra;
++        IF @Caso=40 EXEC dbo.spResumenKardexApi @Admin,@Bodega,@Repuesto,@Hoy,@Ayer;
++        IF @Caso=41 EXEC dbo.spListarKardexApi @Admin,@Bodega,@Repuesto,@Tipo=N'ENTRADA';
++        IF @Caso=43
++        BEGIN
++            INSERT #I EXEC dbo.spListarInventarioApi @Admin,@CategoriaID=@Categoria;
++            INSERT #K EXEC dbo.spListarKardexApi @Admin,@Bodega,@Repuesto;
++            INSERT #RI EXEC dbo.spResumenInventarioApi @Admin,@CategoriaID=@Categoria;
++            INSERT #RK EXEC dbo.spResumenKardexApi @Admin,@Bodega,@Repuesto;
++            IF (SELECT COUNT_BIG(*) FROM dbo.MovimientoInventario)<>@Movimientos OR (SELECT COUNT_BIG(*) FROM dbo.Inventario)<>@Inventarios
++               OR dbo.fnExistencia(@Bodega,@Repuesto)<>@Stock OR (SELECT CostoPromedio FROM dbo.Inventario WHERE BodegaID=@Bodega AND RepuestoID=@Repuesto)<>@Promedio
++               OR TRY_CONVERT(int,SESSION_CONTEXT(N'UsuarioID'))<>@Admin THROW 52292,N'Las consultas alteraron datos o contexto.',1;
++        END;
++        IF @Caso IN(44,45)
++        BEGIN
++            DELETE @Lineas;
++            INSERT @Lineas VALUES(1,@Bodega2,@Repuesto,CASE @Caso WHEN 45 THEN 2147483647 ELSE 5 END,CASE @Caso WHEN 45 THEN CONVERT(decimal(12,2),9999999999.99) ELSE CONVERT(decimal(12,2),0) END);
++            SET @Codigo='VAL-'+@Sufijo;EXEC dbo.spRegistrarCompra @Codigo,@Proveedor,@Admin,@Lineas,@CompraNueva OUTPUT;
++            EXEC dbo.spRecibirCompra @CompraNueva,@Admin;
++            INSERT #I EXEC dbo.spListarInventarioApi @Admin,@BodegaID=@Bodega2;
++            IF @Caso=44 AND NOT EXISTS(SELECT 1 FROM #I WHERE Existencia=5 AND CostoPromedio=0 AND ValorExistencia=0) THROW 52292,N'La recepción gratis no conserva ceros.',1;
++            IF @Caso=45 AND NOT EXISTS(SELECT 1 FROM #I WHERE Existencia=2147483647 AND CostoPromedio=9999999999.990000 AND ValorExistencia=21474836469978525163.530000) THROW 52292,N'Se perdieron centavos en importe grande.',1;
++        END;
++        IF @Caso=49
++        BEGIN
++            INSERT #RI EXEC dbo.spResumenInventarioApi @Admin,@Buscar=N'NO-EXISTE-',@CategoriaID=@Categoria;
++            IF NOT EXISTS(SELECT 1 FROM #RI WHERE Total=0 AND SinExistencia=0 AND StockBajo=0 AND ValorTotal=0) THROW 52292,N'El resumen vacío no es cero.',1;
++        END;
++        IF @Esperado<>0 BEGIN SET @Resultado='FAIL';SET @Detalle=N'La operación inválida fue aceptada.';END;
++        IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
++    END TRY
++    BEGIN CATCH
++        SET @Detalle=ERROR_MESSAGE();
++        IF @Preparado=0 OR @Esperado=0 OR ERROR_NUMBER()<>@Esperado SET @Resultado='FAIL';
++        IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
++    END CATCH;
++    EXEC sys.sp_set_session_context @key=N'UsuarioID',@value=@ContextoInicial;
++    ;WITH Despues AS (
++SELECT 'OrdenServicio' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.OrdenServicio UNION ALL
++SELECT 'Diagnostico' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Diagnostico UNION ALL
++SELECT 'Reparacion' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Reparacion UNION ALL
++SELECT 'ReparacionActividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionActividad UNION ALL
++SELECT 'ReparacionRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ReparacionRepuesto UNION ALL
++SELECT 'MovimientoInventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.MovimientoInventario UNION ALL
++SELECT 'HistorialEstadoOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.HistorialEstadoOrden UNION ALL
++SELECT 'AsignacionOrden' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AsignacionOrden UNION ALL
++SELECT 'Cliente' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Cliente UNION ALL
++SELECT 'Equipo' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Equipo UNION ALL
++SELECT 'Usuario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Usuario UNION ALL
++SELECT 'Empleado' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Empleado UNION ALL
++SELECT 'UsuarioRol' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.UsuarioRol UNION ALL
++SELECT 'CategoriaRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.CategoriaRepuesto UNION ALL
++SELECT 'Repuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Repuesto UNION ALL
++SELECT 'Bodega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Bodega UNION ALL
++SELECT 'Inventario' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Inventario UNION ALL
++SELECT 'Proveedor' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Proveedor UNION ALL
++SELECT 'ProveedorRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.ProveedorRepuesto UNION ALL
++SELECT 'Compra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Compra UNION ALL
++SELECT 'DetalleCompra' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.DetalleCompra UNION ALL
++SELECT 'Actividad' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Actividad UNION ALL
++SELECT 'AuditoriaPrecioRepuesto' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.AuditoriaPrecioRepuesto UNION ALL
++SELECT 'Factura' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Factura UNION ALL
++SELECT 'FacturaDetalle' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.FacturaDetalle UNION ALL
++SELECT 'Pago' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Pago UNION ALL
++SELECT 'Entrega' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.Entrega UNION ALL
++SELECT 'SolicitudPagoApi' AS Nombre,COUNT_BIG(*) AS Cantidad FROM dbo.SolicitudPagoApi UNION ALL
++SELECT 'ValoracionInventario',COUNT_BIG(*) FROM dbo.ValoracionInventario UNION ALL
++SELECT 'SolicitudCompraApi',COUNT_BIG(*) FROM dbo.SolicitudCompraApi UNION ALL
++SELECT 'EventoCompraApi',COUNT_BIG(*) FROM dbo.EventoCompraApi
++    )
++    SELECT @Resultado=CASE WHEN EXISTS(SELECT 1 FROM Despues d JOIN @Antes a ON a.Nombre=d.Nombre WHERE a.Cantidad<>d.Cantidad) THEN 'FAIL' ELSE @Resultado END;
++    IF @Resultado='FAIL' AND @Detalle IS NULL SET @Detalle=N'La prueba dejó cantidades persistentes diferentes.';
++    INSERT @Resultados VALUES(@Caso,@Nombre,@Resultado,@Detalle);SET @Caso+=1;
++END;
++DROP TABLE #ResultadoOrden;DROP TABLE #I;DROP TABLE #K;DROP TABLE #RI;DROP TABLE #RK;DROP TABLE #CompraApi;
++SELECT ID,Caso,Resultado,Detalle FROM @Resultados ORDER BY ID;
++IF EXISTS(SELECT 1 FROM @Resultados WHERE Resultado='FAIL') THROW 52292,N'Una o más pruebas de inventario fallaron. Revisá los resultados.',1;
++GO
+diff --git a/INTEGRACION_INVENTARIO.md b/INTEGRACION_INVENTARIO.md
+new file mode 100644
+index 0000000..bff4acc
+--- /dev/null
++++ b/INTEGRACION_INVENTARIO.md
+@@ -0,0 +1,133 @@
++# Inventario y kardex
++
++Este bloque conecta las consultas de inventario con la API y la interfaz. Parte del
++commit `70caaf2`, que integra compras, recepción y promedio móvil por bodega.
++Mantiene las credenciales, la DLL, los datos y los procesos de recepción y consumo.
++
++## Instalación sobre la base existente
++
++1. Conservar el commit de compras. Aplicar `35_Inventario_Kardex_API.patch` desde
++   la raíz del repositorio, en la terminal de IntelliJ:
++
++   ```powershell
++   git apply --check 35_Inventario_Kardex_API.patch
++   git apply 35_Inventario_Kardex_API.patch
++   ```
++
++2. Detener el backend mientras se actualizan los objetos SQL.
++3. En SSMS, ejecutar completo `33_Inventario_Procedimientos.sql` sobre TechCare.
++   Requiere el 30 ya instalado. El 33 crea o actualiza dos vistas, una función de
++   filtrado y seis procedimientos de consulta/validación; se puede volver a ejecutar.
++4. Ejecutar `34_Pruebas_Inventario.sql` en desarrollo, sin escrituras concurrentes.
++   Presenta 50 resultados. Cada caso crea sus datos y revierte su transacción;
++   comprueba las cantidades persistentes al terminar. Las identidades pueden dejar
++   huecos. Requiere ADMIN activo y los catálogos base existentes.
++5. Iniciar backend y frontend. Entrar con BODEGA o ADMIN y abrir Servicios → Inventario.
++
++No volver a ejecutar 01 ni 02. El 33 no agrega columnas, modifica datos ni cambia
++los triggers o procedimientos que registran compras y consumos.
++
++## Inventario por bodega
++
++- Una fila representa un repuesto asociado a una bodega. Conserva asociaciones sin
++  movimientos, con existencia y costo cero. Un repuesto sin ninguna asociación no
++  aparece: se agrega desde Bodegas.
++- Filtros de búsqueda literal, bodega, categoría, estado de existencias y actividad
++  de los catálogos. `%` y `_` se buscan como texto. Por defecto incluye inactivos.
++- `activo=true`: bodega y repuesto activos. `activo=false`: cualquiera de los dos
++  está inactivo. No es un permiso para mover stock de catálogos inactivos.
++- Sin existencias: stock cero, incluso con mínimo cero. Alerta de mínimo: stock
++  positivo menor o igual al mínimo. Disponible: stock mayor que el mínimo.
++- Faltante: máximo entre mínimo menos existencia y cero. Igualar el mínimo genera
++  alerta con faltante cero; no significa una cantidad sugerida de compra.
++- El costo promedio mantiene seis decimales. El valor de existencias es cantidad
++  por promedio, también con seis decimales. No es precio de venta ni valor fiscal.
++- Las tarjetas resumen todos los resultados del filtro, no sólo la página visible.
++  Se cuentan pares bodega/repuesto; no se suman unidades de repuestos distintos.
++- Paginación en SQL, por defecto 25 filas, hasta 100 por solicitud. Las URL conservan
++  filtros y página al recargar o usar atrás/adelante del navegador. Una página que
++  quedó fuera de rango se ajusta a la última disponible en la respuesta.
++
++## Kardex por repuesto y bodega
++
++Abrir **Ver kardex** desde una fila. Muestra la existencia y el promedio actuales
++separados de los saldos y promedios históricos del período consultado.
++
++- Orden ascendente por MovimientoID, el mismo orden de integridad del kardex.
++- Desde y hasta son días UTC incluidos. Las horas de las filas se presentan en la
++  zona horaria del navegador. Un día local puede abarcar dos días UTC.
++- Saldo inicial: movimientos anteriores a Desde; cero si no se indica Desde.
++- Entradas y salidas: cantidades de ambos tipos dentro de las fechas seleccionadas.
++- Saldo final: movimientos hasta el día Hasta, o todos si no se indica Hasta.
++- Siempre se cumple inicial + entradas − salidas = final. Filtrar sólo entradas o
++  sólo salidas cambia las filas y su cantidad, conservando el resumen de ambos tipos.
++  Los totales tampoco dependen de la página. Un período sin movimientos puede tener
++  saldo inicial y final distintos de cero.
++- Cada fila conserva el origen real: compra/línea o reparación/línea y orden, ID del
++  responsable, costo unitario del documento y saldo anterior/posterior del movimiento.
++- El detalle presenta el importe, promedio anterior/posterior y valoración del saldo
++  posterior; no sustituye esos promedios por el costo actual del repuesto.
++- Los promedios reconstruidos durante la instalación del 30 se identifican como
++  migrados. Si falta una valoración, se presenta como no disponible, nunca se inventa.
++- Las recepciones nuevas por API usan el nombre conservado en EventoCompraApi. Las
++  salidas y movimientos antiguos muestran el nombre actual del empleado junto a su
++  ID histórico. El detalle explica esa diferencia. Proveedor y nombres de catálogos
++  son los actuales, no fotografías fiscales del documento.
++- BODEGA puede abrir el documento de compra. El enlace a una orden se ofrece a ADMIN;
++  BODEGA ve su número como referencia, porque no tiene acceso al expediente técnico.
++
++## API y seguridad
++
++| Método | Ruta | Parámetros opcionales |
++| --- | --- | --- |
++| GET | `/api/inventario` | buscar, bodegaId, categoriaId, estadoStock, activo, pagina, tamano |
++| GET | `/api/inventario/{bodegaId}/{repuestoId}/kardex` | desde, hasta, tipo, pagina, tamano |
++
++Estados: `SIN_EXISTENCIA`, `BAJO`, `DISPONIBLE`. Tipos: `E`, `S`. Fechas ISO
++`AAAA-MM-DD`. IDs positivos y tamaño entre 1 y 100. Búsqueda hasta 150 caracteres.
++Filtros inexistentes devuelven un listado vacío; un kardex de una pareja no asociada
++devuelve 404. Entradas inválidas devuelven 400, roles ajenos 403 y ausencia de sesión 401.
++
++Ambas rutas requieren ADMIN/BODEGA en Spring Security. SQL vuelve a validar cuenta,
++empleado activo y rol; el actor viene de la sesión autenticada. No hay endpoints de
++escritura en este módulo. Las consultas JDBC usan parámetros, DTOs explícitos y
++transacciones de lectura SERIALIZABLE para componer filas y resumen coherentes ante
++otras operaciones. Una consulta puede esperar por una recepción o consumo en curso;
++ante interbloqueo/timeout se ofrece actualizar. No se usan lecturas sucias.
++
++Los importes decimales, saldos bigint y MovimientoID viajan como cadenas JSON para
++evitar pérdidas en JavaScript. Las cantidades de cada línea y IDs int son números.
++La respuesta no expone credenciales, login SQL ni campos internos de las tablas.
++
++## Verificación funcional
++
++1. Consultar una bodega con existencias y otra con asociaciones sin entradas.
++2. Buscar un repuesto, filtrar mínimo/sin existencias y revisar las tarjetas.
++3. Abrir su kardex y un movimiento; comprobar documento, responsable, costo y saldo.
++4. Cambiar fechas y tipo. Verificar que los saldos del período sigan cuadrando.
++5. Recibir una compra desde Compras; actualizar Inventario y Kardex. Debe aparecer
++   una entrada y el nuevo promedio, sin cambiar los costos de filas anteriores.
++6. Como técnico asignado, consumir un repuesto desde la orden; volver como BODEGA o
++   ADMIN, actualizar y comprobar la salida. El técnico sigue usando su catálogo
++   dentro de su orden, sin acceso al inventario administrativo.
++
++La instalación no implementa ajustes manuales, traslados, devoluciones o recepciones
++parciales. Esos movimientos necesitan procesos propios con origen y reglas definidos.
++Los doce reportes, el resumen general del taller y los manuales finales se completan
++en bloques posteriores.
++
++El script 34 es secuencial y no demuestra concurrencia entre dos sesiones. Su ejecución
++real corresponde a la instancia de SQL Server del proyecto; los tests de API usan
++JDBC simulado y las verificaciones de navegador usan respuestas de prueba.
++
++## Validación de esta entrega
++
++- Backend: 268 pruebas, sin fallos ni omisiones, incluyendo 38 casos nuevos de
++  inventario con JDBC simulado. Cubren permisos HTTP, actor de sesión, parámetros,
++  transacciones de consulta, paginación, precisión y errores controlados.
++- Frontend: TypeScript y compilación de producción correctos.
++- Navegador con API simulada: 12 escenarios, escritorio y móvil de 390 px,
++  filtros/paginación, navegación atrás, kardex, detalle, errores y roles; cero
++  escrituras y cero errores de JavaScript.
++- SQL 33/34: revisión estructural y sintáctica T-SQL. Los 50 casos del 34 se deben
++  ejecutar en SQL Server; no se presentan como pruebas de motor ya ejecutadas.
+diff --git a/README.md b/README.md
+index 4f2ba7a..4e7eaf6 100644
+--- a/README.md
++++ b/README.md
+@@ -4,14 +4,14 @@ Este paquete cubre la parte de base de datos del proyecto UMG: modelo relacional
+ normalización, objetos SQL, datos ficticios, reportes y pruebas ejecutables.
+ Clientes, equipos, órdenes, servicio técnico, facturación, pagos, entrega y los catálogos de
+ abastecimiento tienen API e interfaz conectadas. El acceso usa las cuentas y roles de la BD,
+-con login, sesión y cierre de sesión. Compras y recepción también están conectadas; inventario general, reportes y manuales con
+-capturas aún deben completarse.
++con login, sesión y cierre de sesión. Compras, recepción, inventario por bodega y kardex también están conectados.
++Los reportes, el resumen general y los manuales con capturas aún deben completarse.
+ 
+ Para incorporar el login a una base existente: [INTEGRACION_LOGIN.md](INTEGRACION_LOGIN.md).
+ La actualización requiere ejecutar `11_Login_Procedimiento.sql` una vez; conserva
+ las tablas, usuarios y contraseñas existentes. El maestro 01 no se modifica.
+ Una instalación nueva con un maestro anterior debe incluir también las
+-actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento) y 30 (Compras y costos por bodega).
++actualizaciones 06 (Clientes), 08 (Equipos), 11 (Acceso), 13 (Usuarios), 16 (Órdenes), 19 (Servicio técnico), 23 (Facturación y entrega), 26 (Abastecimiento), 30 (Compras y costos por bodega) y 33 (Inventario y kardex).
+ 
+ Administración permite consultar y registrar cuentas, empleados y roles desde
+ una sesión ADMIN. Instalación: [INTEGRACION_USUARIOS.md](INTEGRACION_USUARIOS.md).
+@@ -33,6 +33,9 @@ Repuestos, categorías, proveedores y bodegas se administran desde la aplicació
+ Incluye catálogo ofrecido, asociación de repuestos a bodegas, mínimos y auditoría de precios.
+ Instalación: [INTEGRACION_ABASTECIMIENTO.md](INTEGRACION_ABASTECIMIENTO.md).
+ 
++Inventario y kardex permiten consultar existencias, mínimos, valoración y movimientos por bodega.
++Instalación: [INTEGRACION_INVENTARIO.md](INTEGRACION_INVENTARIO.md); scripts 33 y 34.
++
+ ## Ejecución desde cero
+ 
+ 1. Utilizar una instancia de **SQL Server 2019 o posterior** y SQL Server Management Studio.
+@@ -193,6 +196,7 @@ Documentos para el equipo:
+ - `INTEGRACION_FACTURACION_ENTREGA.md`: caja, abonos, entrega y factura PDF detallada; scripts 23 y 24.
+ - `INTEGRACION_ABASTECIMIENTO.md`: repuestos, categorías, proveedores, bodegas y asociaciones; scripts 26 y 27.
+ - `INTEGRACION_COMPRAS.md`: compras pendientes, recepción, anulación y promedio por bodega; scripts 30 y 31.
++- `INTEGRACION_INVENTARIO.md`: existencias, mínimos, valoración y kardex por bodega; scripts 33 y 34.
+ 
+ - `GUIA_TRIGGERS.md`: definición, inserted/deleted, ejemplo reversible y los 16 objetos.
+ - `GUIA_GITHUB.md`: publicación privada con GitHub Desktop y trabajo por ramas.
+diff --git a/backend/src/main/java/com/techcare/backend/inventario/InventarioController.java b/backend/src/main/java/com/techcare/backend/inventario/InventarioController.java
+new file mode 100644
+index 0000000..a2ae690
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/inventario/InventarioController.java
+@@ -0,0 +1,30 @@
++package com.techcare.backend.inventario;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.springframework.security.core.annotation.AuthenticationPrincipal;
++import org.springframework.web.bind.annotation.*;
++import java.time.LocalDate;
++
++@RestController
++@RequestMapping("/api/inventario")
++public class InventarioController {
++    private final InventarioServicio servicio;
++    public InventarioController(InventarioServicio servicio) { this.servicio=servicio; }
++
++    @GetMapping
++    public InventarioServicio.Inventario listar(@AuthenticationPrincipal UsuarioAutenticado usuario,
++            @RequestParam(required=false) String buscar,@RequestParam(required=false) Integer bodegaId,
++            @RequestParam(required=false) Integer categoriaId,@RequestParam(required=false) String estadoStock,
++            @RequestParam(required=false) Boolean activo,@RequestParam(defaultValue="1") int pagina,
++            @RequestParam(defaultValue="25") int tamano) {
++        return servicio.listar(usuario.getUsuarioId(),buscar,bodegaId,categoriaId,estadoStock,activo,pagina,tamano);
++    }
++
++    @GetMapping("/{bodegaId}/{repuestoId}/kardex")
++    public InventarioServicio.Kardex kardex(@AuthenticationPrincipal UsuarioAutenticado usuario,
++            @PathVariable int bodegaId,@PathVariable int repuestoId,@RequestParam(required=false) LocalDate desde,
++            @RequestParam(required=false) LocalDate hasta,@RequestParam(required=false) String tipo,
++            @RequestParam(defaultValue="1") int pagina,@RequestParam(defaultValue="25") int tamano) {
++        return servicio.kardex(usuario.getUsuarioId(),bodegaId,repuestoId,desde,hasta,tipo,pagina,tamano);
++    }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/inventario/InventarioErrores.java b/backend/src/main/java/com/techcare/backend/inventario/InventarioErrores.java
+new file mode 100644
+index 0000000..8719e97
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/inventario/InventarioErrores.java
+@@ -0,0 +1,34 @@
++package com.techcare.backend.inventario;
++
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.springframework.dao.DataAccessException;
++import org.springframework.http.ResponseEntity;
++import org.springframework.web.bind.annotation.ExceptionHandler;
++import org.springframework.web.bind.annotation.RestControllerAdvice;
++import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
++import org.springframework.web.server.ResponseStatusException;
++import java.sql.SQLException;
++import java.util.Map;
++
++@RestControllerAdvice(assignableTypes=InventarioController.class)
++public class InventarioErrores {
++    private static final Logger LOG=LoggerFactory.getLogger(InventarioErrores.class);
++    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
++    ResponseEntity<Map<String,Object>> entrada(Exception e) { return error(400,"Revisá los identificadores, fechas, filtros y paginación."); }
++    @ExceptionHandler(ResponseStatusException.class)
++    ResponseEntity<Map<String,Object>> estado(ResponseStatusException e) { return error(e.getStatusCode().value(),e.getReason()); }
++    @ExceptionHandler(DataAccessException.class)
++    ResponseEntity<Map<String,Object>> sql(DataAccessException e) {
++        for(Throwable c=e;c!=null;c=c.getCause())if(c instanceof SQLException s)
++            for(SQLException x=s;x!=null;x=x.getNextException())switch(x.getErrorCode()) {
++                case 52200: return error(400,"Revisá los identificadores, fechas, filtros y paginación.");
++                case 52202: return error(404,"El repuesto no está asociado a esa bodega.");
++                case 52004: return error(403,"Se requiere un usuario activo de bodega o administración.");
++                case 1205,1222: return error(409,"La consulta coincidió con otra operación. Volvé a actualizar.");
++                default: break;
++            }
++        LOG.error("No se pudo consultar inventario.",e);return error(503,"No se pudo consultar el inventario. Volvé a intentar.");
++    }
++    private static ResponseEntity<Map<String,Object>> error(int estado,String mensaje) { return ResponseEntity.status(estado).body(Map.of("estado",estado,"mensaje",mensaje)); }
++}
+diff --git a/backend/src/main/java/com/techcare/backend/inventario/InventarioServicio.java b/backend/src/main/java/com/techcare/backend/inventario/InventarioServicio.java
+new file mode 100644
+index 0000000..9f00fab
+--- /dev/null
++++ b/backend/src/main/java/com/techcare/backend/inventario/InventarioServicio.java
+@@ -0,0 +1,84 @@
++package com.techcare.backend.inventario;
++
++import org.springframework.http.HttpStatus;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.stereotype.Service;
++import org.springframework.transaction.annotation.Isolation;
++import org.springframework.transaction.annotation.Transactional;
++import org.springframework.web.server.ResponseStatusException;
++import java.math.BigDecimal;
++import java.sql.Timestamp;
++import java.time.*;
++import java.util.List;
++import java.util.Map;
++
++@Service
++public class InventarioServicio {
++    private final JdbcTemplate jdbc;
++    public InventarioServicio(JdbcTemplate jdbc) { this.jdbc=jdbc; }
++
++    @Transactional(readOnly=true,isolation=Isolation.SERIALIZABLE)
++    public Inventario listar(int actor,String buscar,Integer bodega,Integer categoria,String estado,Boolean activo,int pagina,int tamano) {
++        if(buscar!=null&&buscar.length()>150)mal("La búsqueda admite hasta 150 caracteres.");
++        idOpcional(bodega);idOpcional(categoria);paginacion(pagina,tamano);
++        if(estado!=null&&!List.of("","SIN_EXISTENCIA","BAJO","DISPONIBLE").contains(estado))mal("El estado de stock no es válido.");
++        var r=primera(jdbc.queryForList("EXEC dbo.spResumenInventarioApi ?, ?, ?, ?, ?, ?",actor,buscar,bodega,categoria,estado,activo));
++        long total=numero(r,"Total"),paginas=paginas(total,tamano);int actual=(int)Math.min(pagina,paginas);
++        var filas=jdbc.queryForList("EXEC dbo.spListarInventarioApi ?, ?, ?, ?, ?, ?, ?, ?",actor,buscar,bodega,categoria,estado,activo,actual,tamano)
++            .stream().map(InventarioServicio::existencia).toList();
++        return new Inventario(filas,new ResumenInventario(total,numero(r,"SinExistencia"),numero(r,"StockBajo"),decimal(r,"ValorTotal")),actual,tamano,total,paginas);
++    }
++
++    @Transactional(readOnly=true,isolation=Isolation.SERIALIZABLE)
++    public Kardex kardex(int actor,int bodega,int repuesto,LocalDate desde,LocalDate hasta,String tipo,int pagina,int tamano) {
++        id(bodega);id(repuesto);paginacion(pagina,tamano);
++        if(desde!=null&&hasta!=null&&desde.isAfter(hasta))mal("La fecha inicial no puede ser posterior a la final.");
++        if((desde!=null&&(desde.getYear()<1||desde.getYear()>9999))||(hasta!=null&&(hasta.getYear()<1||hasta.getYear()>9999)))mal("La fecha debe estar entre los años 1 y 9999.");
++        if(tipo!=null&&!List.of("","E","S").contains(tipo))mal("El tipo de movimiento no es válido.");
++        var cabecera=existencia(primera(jdbc.queryForList("EXEC dbo.spConsultarInventarioApi ?, ?, ?",actor,bodega,repuesto)));
++        var r=primera(jdbc.queryForList("EXEC dbo.spResumenKardexApi ?, ?, ?, ?, ?, ?",actor,bodega,repuesto,desde,hasta,tipo));
++        long total=numero(r,"Total"),paginas=paginas(total,tamano);int actual=(int)Math.min(pagina,paginas);
++        var filas=jdbc.queryForList("EXEC dbo.spListarKardexApi ?, ?, ?, ?, ?, ?, ?, ?",actor,bodega,repuesto,desde,hasta,tipo,actual,tamano)
++            .stream().map(InventarioServicio::movimiento).toList();
++        return new Kardex(cabecera,new ResumenKardex(texto(r,"SaldoInicial"),texto(r,"Entradas"),texto(r,"Salidas"),texto(r,"SaldoFinal")),filas,actual,tamano,total,paginas);
++    }
++
++    private static Existencia existencia(Map<String,Object> r) {
++        return new Existencia(entero(r,"BodegaID"),texto(r,"CodigoBodega"),texto(r,"Bodega"),bit(r,"BodegaActiva"),
++            entero(r,"RepuestoID"),texto(r,"Codigo"),texto(r,"Repuesto"),bit(r,"RepuestoActivo"),entero(r,"CategoriaID"),texto(r,"Categoria"),
++            texto(r,"Existencia"),entero(r,"StockMinimo"),texto(r,"Faltante"),texto(r,"EstadoStock"),decimal(r,"CostoPromedio"),decimal(r,"ValorExistencia"));
++    }
++    private static Movimiento movimiento(Map<String,Object> r) {
++        return new Movimiento(texto(r,"MovimientoID"),fecha(r,"Fecha"),texto(r,"Tipo"),entero(r,"Cantidad"),texto(r,"ExistenciaAnterior"),texto(r,"ExistenciaResultante"),
++            decimal(r,"CostoUnitario"),decimal(r,"Importe"),decimal(r,"CostoAnterior"),decimal(r,"CostoPosterior"),decimal(r,"ValorExistencia"),
++            r.get("EsMigracion")==null?null:bit(r,"EsMigracion"),entero(r,"CompraID"),entero(r,"LineaCompra"),texto(r,"NumeroCompra"),entero(r,"ProveedorID"),texto(r,"Proveedor"),
++            entero(r,"OrdenID"),texto(r,"NumeroOrden"),entero(r,"ReparacionID"),entero(r,"LineaReparacion"),entero(r,"UsuarioID"),texto(r,"Responsable"),bit(r,"NombreHistorico"));
++    }
++    private static long paginas(long total,int tamano) { return Math.max(1,(total-1)/tamano+1); }
++    private static void paginacion(int pagina,int tamano) { if(pagina<=0||tamano<1||tamano>100)mal("La página debe ser positiva y el tamaño debe estar entre 1 y 100."); }
++    private static void idOpcional(Integer v) { if(v!=null)id(v); }
++    private static void id(int v) { if(v<=0)mal("El identificador debe ser positivo."); }
++    private static void mal(String mensaje) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST,mensaje); }
++    private static Map<String,Object> primera(List<Map<String,Object>> filas) {
++        if(filas.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"El repuesto no está asociado a esa bodega.");return filas.get(0);
++    }
++    private static String texto(Map<String,Object> r,String k) { return r.get(k)==null?null:r.get(k).toString(); }
++    private static Integer entero(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.intValue():null; }
++    private static long numero(Map<String,Object> r,String k) { return r.get(k) instanceof Number n?n.longValue():0; }
++    private static boolean bit(Map<String,Object> r,String k) { return Boolean.TRUE.equals(r.get(k))||r.get(k) instanceof Number n&&n.intValue()!=0; }
++    private static String decimal(Map<String,Object> r,String k) { return r.get(k) instanceof BigDecimal d?d.toPlainString():texto(r,k); }
++    private static OffsetDateTime fecha(Map<String,Object> r,String k) {
++        var v=r.get(k);if(v instanceof Timestamp t)return t.toLocalDateTime().atOffset(ZoneOffset.UTC);
++        if(v instanceof LocalDateTime t)return t.atOffset(ZoneOffset.UTC);return v instanceof OffsetDateTime t?t:null;
++    }
++    // Importes, saldos y MovimientoID se envían como texto para conservar toda su precisión.
++    public record Existencia(Integer bodegaId,String codigoBodega,String bodega,boolean bodegaActiva,Integer repuestoId,String codigo,String repuesto,
++        boolean repuestoActivo,Integer categoriaId,String categoria,String existencia,Integer stockMinimo,String faltante,String estadoStock,String costoPromedio,String valorExistencia) {}
++    public record ResumenInventario(long total,long sinExistencia,long stockBajo,String valorTotal) {}
++    public record Inventario(List<Existencia> filas,ResumenInventario resumen,int pagina,int tamano,long total,long totalPaginas) {}
++    public record ResumenKardex(String saldoInicial,String entradas,String salidas,String saldoFinal) {}
++    public record Movimiento(String movimientoId,OffsetDateTime fecha,String tipo,Integer cantidad,String existenciaAnterior,String existenciaResultante,
++        String costoUnitario,String importe,String costoAnterior,String costoPosterior,String valorExistencia,Boolean esMigracion,Integer compraId,Integer lineaCompra,
++        String numeroCompra,Integer proveedorId,String proveedor,Integer ordenId,String numeroOrden,Integer reparacionId,Integer lineaReparacion,Integer usuarioId,String responsable,boolean nombreHistorico) {}
++    public record Kardex(Existencia inventario,ResumenKardex resumen,List<Movimiento> filas,int pagina,int tamano,long total,long totalPaginas) {}
++}
+diff --git a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+index a7f9bfa..71ab598 100644
+--- a/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
++++ b/backend/src/main/java/com/techcare/backend/seguridad/SeguridadConfig.java
+@@ -53,6 +53,7 @@ public class SeguridadConfig {
+                 .authorizeHttpRequests(a -> a
+                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+                         .requestMatchers(HttpMethod.GET,"/api/auth/csrf").permitAll()
++                        .requestMatchers(HttpMethod.GET,"/api/inventario","/api/inventario/**").hasAnyRole("ADMIN","BODEGA")
+                         .requestMatchers(HttpMethod.GET,"/api/compras","/api/compras/**").hasAnyRole("ADMIN","BODEGA")
+                         .requestMatchers(HttpMethod.POST,"/api/compras","/api/compras/*/recepcion","/api/compras/*/anulacion").hasAnyRole("ADMIN","BODEGA")
+                         .requestMatchers(HttpMethod.POST,"/api/auth/login").permitAll()
+diff --git a/backend/src/test/java/com/techcare/backend/inventario/InventarioApiTests.java b/backend/src/test/java/com/techcare/backend/inventario/InventarioApiTests.java
+new file mode 100644
+index 0000000..217cea7
+--- /dev/null
++++ b/backend/src/test/java/com/techcare/backend/inventario/InventarioApiTests.java
+@@ -0,0 +1,138 @@
++package com.techcare.backend.inventario;
++
++import com.techcare.backend.seguridad.UsuarioAutenticado;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.junit.jupiter.params.provider.ValueSource;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.jdbc.UncategorizedSQLException;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
++import org.springframework.test.context.bean.override.mockito.MockitoBean;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.request.RequestPostProcessor;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.transaction.PlatformTransactionManager;
++import org.springframework.transaction.TransactionDefinition;
++import org.springframework.transaction.support.SimpleTransactionStatus;
++import org.springframework.web.context.WebApplicationContext;
++import java.math.BigDecimal;
++import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.time.LocalDate;
++import java.util.*;
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.hasSize;
++import static org.hamcrest.Matchers.not;
++import static org.mockito.ArgumentMatchers.*;
++import static org.mockito.Mockito.*;
++import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.*;
++import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(properties="spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=TechCare;encrypt=false")
++class InventarioApiTests {
++    @Autowired WebApplicationContext context;
++    @MockitoBean JdbcTemplate jdbc;
++    @MockitoBean PlatformTransactionManager transactions;
++    private MockMvc mvc;
++    private Map<String,Object> fila,movimiento;
++    @BeforeEach void preparar() {
++        reset(jdbc,transactions);when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
++        mvc=MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
++        fila=new HashMap<>();fila.putAll(Map.of("BodegaID",2,"RepuestoID",9,"CodigoBodega","B-2","Bodega","Bodega ñ 漢字","Repuesto","Fuente ñ 漢字","Codigo","REP-9","BodegaActiva",true,"RepuestoActivo",false));
++        fila.putAll(Map.of("CategoriaID",3,"Categoria","Fuentes","Existencia",9007199254740993L,"StockMinimo",4,"Faltante",0L,"EstadoStock","DISPONIBLE","CostoPromedio",new BigDecimal("16.125678"),"ValorExistencia",new BigDecimal("145000000000000000.123456"),"PasswordHash","PRIVADO","LoginSQL","INTERNO"));
++        movimiento=new HashMap<>();movimiento.putAll(Map.of("MovimientoID",9007199254740995L,"Fecha",Timestamp.valueOf("2026-10-23 23:59:59"),"Tipo","E","Cantidad",10,"ExistenciaAnterior",0L,"ExistenciaResultante",10L,"CostoUnitario",new BigDecimal("12.25"),"Importe",new BigDecimal("122.50")));
++        movimiento.putAll(Map.of("CostoAnterior",new BigDecimal("0.000000"),"CostoPosterior",new BigDecimal("12.250000"),"ValorExistencia",new BigDecimal("122.500000"),"EsMigracion",false,"CompraID",7,"LineaCompra",1,"NumeroCompra","CP-7","Responsable","Bodega ñ 漢字","NombreHistorico",true,"UsuarioID",42));
++        movimiento.put("PasswordHash","PRIVADO");
++        when(jdbc.queryForList(anyString(),any(Object[].class))).thenAnswer(i -> {
++            String sql=i.getArgument(0);
++            if(sql.contains("spResumenInventarioApi"))return List.of(Map.of("Total",60L,"SinExistencia",3L,"StockBajo",4L,"ValorTotal",new BigDecimal("145000000000000000.123456")));
++            if(sql.contains("spResumenKardexApi"))return List.of(Map.of("SaldoInicial",5L,"Entradas",10L,"Salidas",2L,"SaldoFinal",13L,"Total",2L));
++            return List.of(sql.contains("spListarKardexApi")?movimiento:fila);
++        });
++    }
++    private RequestPostProcessor actor(String rol) {
++        var u=new UsuarioAutenticado(42,"bodega","Bodega prueba","EMP-42",List.of(rol),true,null);
++        return authentication(UsernamePasswordAuthenticationToken.authenticated(u,null,u.getAuthorities()));
++    }
++    @ParameterizedTest @ValueSource(strings={"TECNICO","RECEPCION","CAJA"})
++    void rolesAjenosNoConsultanInventarioNiKardex(String rol) throws Exception {
++        for(String url:List.of("/api/inventario","/api/inventario/2/9/kardex"))mvc.perform(get(url).with(actor(rol))).andExpect(status().isForbidden());
++        verifyNoInteractions(jdbc);
++    }
++    @Test void consultasExigenSesion() throws Exception {
++        for(String url:List.of("/api/inventario","/api/inventario/2/9/kardex"))mvc.perform(get(url)).andExpect(status().isUnauthorized());verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @ValueSource(strings={"ADMIN","BODEGA"})
++    void inventarioConservaPrecisionUnicodeYResumenDeTodoElFiltro(String rol) throws Exception {
++        mvc.perform(get("/api/inventario").with(actor(rol))).andExpect(status().isOk())
++            .andExpect(jsonPath("$.filas[0].existencia").value("9007199254740993"))
++            .andExpect(jsonPath("$.filas[0].costoPromedio").value("16.125678"))
++            .andExpect(jsonPath("$.filas[0].repuesto").value("Fuente ñ 漢字"))
++            .andExpect(jsonPath("$.filas[0].repuestoActivo").value(false))
++            .andExpect(jsonPath("$.resumen.valorTotal").value("145000000000000000.123456"))
++            .andExpect(jsonPath("$.total").value(60)).andExpect(jsonPath("$.totalPaginas").value(3))
++            .andExpect(content().string(not(containsString("PRIVADO")))).andExpect(content().string(not(containsString("INTERNO"))));
++        verify(transactions).getTransaction(argThat(t->t.isReadOnly()&&t.getIsolationLevel()==TransactionDefinition.ISOLATION_SERIALIZABLE));
++        verify(transactions).commit(any());
++    }
++    @Test void filtrosUsanParametrosYActorDeSesion() throws Exception {
++        mvc.perform(get("/api/inventario").with(actor("BODEGA")).param("usuarioActorId","999").param("buscar","%_' OR 1=1").param("bodegaId","2").param("categoriaId","3").param("estadoStock","BAJO").param("activo","false").param("pagina","2").param("tamano","10")).andExpect(status().isOk());
++        verify(jdbc).queryForList("EXEC dbo.spResumenInventarioApi ?, ?, ?, ?, ?, ?",42,"%_' OR 1=1",2,3,"BAJO",false);
++        verify(jdbc).queryForList("EXEC dbo.spListarInventarioApi ?, ?, ?, ?, ?, ?, ?, ?",42,"%_' OR 1=1",2,3,"BAJO",false,2,10);
++    }
++    @Test void paginaQueYaNoExisteSeAjustaAlUltimoResultado() throws Exception {
++        mvc.perform(get("/api/inventario").with(actor("BODEGA")).param("pagina","2147483647")).andExpect(status().isOk()).andExpect(jsonPath("$.pagina").value(3));
++        verify(jdbc).queryForList("EXEC dbo.spListarInventarioApi ?, ?, ?, ?, ?, ?, ?, ?",42,null,null,null,null,null,3,25);
++    }
++    @Test void inventarioVacioConservaResumenYPrimeraPagina() throws Exception {
++        when(jdbc.queryForList(startsWith("EXEC dbo.spResumenInventarioApi"),any(Object[].class))).thenReturn(List.of(Map.of("Total",0L,"SinExistencia",0L,"StockBajo",0L,"ValorTotal",new BigDecimal("0.000000"))));
++        when(jdbc.queryForList(startsWith("EXEC dbo.spListarInventarioApi"),any(Object[].class))).thenReturn(List.of());
++        mvc.perform(get("/api/inventario").with(actor("ADMIN")).param("pagina","99")).andExpect(status().isOk()).andExpect(jsonPath("$.filas",hasSize(0))).andExpect(jsonPath("$.pagina").value(1)).andExpect(jsonPath("$.total").value(0));
++    }
++    @ParameterizedTest @ValueSource(strings={"bodegaId=0","bodegaId=1.5","categoriaId=-1","estadoStock=INVENTADO","activo=mal","pagina=0","pagina=-1","pagina=1.5","pagina=2147483648","tamano=0","tamano=101"})
++    void filtrosInvalidosNoLleganASql(String query) throws Exception {
++        mvc.perform(get("/api/inventario?"+query).with(actor("BODEGA"))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void busquedaLargaSeRechazaSinTruncarse() throws Exception {
++        mvc.perform(get("/api/inventario").with(actor("ADMIN")).param("buscar","x".repeat(151))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void kardexConservaImportesIDGrandeYFechasUtc() throws Exception {
++        mvc.perform(get("/api/inventario/2/9/kardex").with(actor("BODEGA")).param("desde","2026-10-01").param("hasta","2026-10-23").param("tipo","E"))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.filas[0].movimientoId").value("9007199254740995"))
++            .andExpect(jsonPath("$.filas[0].fecha").value("2026-10-23T23:59:59Z"))
++            .andExpect(jsonPath("$.filas[0].importe").value("122.50")).andExpect(jsonPath("$.filas[0].costoPosterior").value("12.250000"))
++            .andExpect(jsonPath("$.filas[0].nombreHistorico").value(true)).andExpect(jsonPath("$.resumen.salidas").value("2"))
++            .andExpect(jsonPath("$.resumen.saldoFinal").value("13")).andExpect(content().string(not(containsString("PRIVADO"))));
++        verify(jdbc).queryForList("EXEC dbo.spListarKardexApi ?, ?, ?, ?, ?, ?, ?, ?",42,2,9,LocalDate.of(2026,10,1),LocalDate.of(2026,10,23),"E",1,25);
++    }
++    @Test void salidasSinValoracionNoInventanPromedios() throws Exception {
++        movimiento.put("Tipo","S");movimiento.put("CostoAnterior",null);movimiento.put("CostoPosterior",null);movimiento.put("EsMigracion",null);
++        movimiento.put("NombreHistorico",false);movimiento.put("CompraID",null);movimiento.put("OrdenID",11);movimiento.put("NumeroOrden","OS-11");
++        mvc.perform(get("/api/inventario/2/9/kardex").with(actor("ADMIN"))).andExpect(status().isOk()).andExpect(jsonPath("$.filas[0].costoPosterior").doesNotExist())
++            .andExpect(jsonPath("$.filas[0].esMigracion").doesNotExist()).andExpect(jsonPath("$.filas[0].ordenId").value(11)).andExpect(jsonPath("$.filas[0].nombreHistorico").value(false));
++    }
++    @ParameterizedTest @ValueSource(strings={"/0/9/kardex","/2/-1/kardex","/2/9/kardex?desde=2026-10-23&hasta=2026-10-01","/2/9/kardex?desde=2026-02-30","/2/9/kardex?tipo=ENTRADA","/2/9/kardex?tamano=101","/2/9/kardex?desde=0000-01-01"})
++    void kardexInvalidoNoConsultaSql(String url) throws Exception {
++        mvc.perform(get("/api/inventario"+url).with(actor("BODEGA"))).andExpect(status().isBadRequest());verifyNoInteractions(jdbc);
++    }
++    @Test void paresInexistentesResponden404() throws Exception {
++        when(jdbc.queryForList(startsWith("EXEC dbo.spConsultarInventarioApi"),any(Object[].class))).thenReturn(List.of());
++        mvc.perform(get("/api/inventario/2/9/kardex").with(actor("BODEGA"))).andExpect(status().isNotFound());
++        verify(jdbc,never()).queryForList(startsWith("EXEC dbo.spResumenKardexApi"),any(Object[].class));
++    }
++    @Test void noHayEndpointParaEditarExistencia() throws Exception {
++        for(String method:List.of("POST","PUT","DELETE"))mvc.perform(request(org.springframework.http.HttpMethod.valueOf(method),"/api/inventario").with(actor("ADMIN")).with(csrf()).contentType("application/json").content("{\"existencia\":999}"))
++            .andExpect(status().isForbidden());verifyNoInteractions(jdbc);
++    }
++    @ParameterizedTest @CsvSource({"52200,400","52202,404","52004,403","1205,409","1222,409","2812,503"})
++    void erroresSqlNoExponenDetallesInternos(int codigo,int estado) throws Exception {
++        when(jdbc.queryForList(anyString(),any(Object[].class))).thenThrow(new UncategorizedSQLException("inventario","EXEC",new SQLException("INTERNO_SQL","S0001",codigo)));
++        mvc.perform(get("/api/inventario").with(actor("BODEGA"))).andExpect(status().is(estado)).andExpect(content().string(not(containsString("INTERNO_SQL"))));
++    }
++}
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index 2712eff..917be2b 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -10,7 +10,6 @@ import { EquiposPage } from "./features/equipos/EquiposPage";
+ import { OrdenesListPage } from "./features/ordenes/OrdenesListPage";
+ import { OrdenNuevaPage } from "./features/ordenes/OrdenNuevaPage";
+ import { OrdenExpedientePage } from "./features/ordenes/OrdenExpedientePage";
+-import { InventarioPage } from "./features/inventario/InventarioPage";
+ 
+ import { ReportesPage } from "./features/reportes/ReportesPage";
+ import { AdministracionPage } from "./features/administracion/AdministracionPage";
+@@ -18,6 +17,8 @@ import { IntegracionPage } from "./features/integracion/IntegracionPage";
+ import { LoginPage } from "./features/auth/LoginPage";
+ 
+ const ComprasPage = lazy(() => import("./features/compras/ComprasPage").then(m => ({ default: m.ComprasPage })));
++const InventarioPage = lazy(() => import("./features/inventario/InventarioPage").then(m => ({ default: m.InventarioPage })));
++const KardexPage = lazy(() => import("./features/inventario/KardexPage").then(m => ({ default: m.KardexPage })));
+ const CompraDetallePage = lazy(() => import("./features/compras/CompraDetallePage").then(m => ({ default: m.CompraDetallePage })));
+ 
+ const FacturacionPage = lazy(() => import("./features/facturacion/FacturacionPage").then(m => ({ default: m.FacturacionPage })));
+@@ -45,7 +46,8 @@ export default function App() {
+ 
+         <Route path="/equipos" element={<EquiposPage />} />
+ 
+-        <Route path="/inventario" element={<InventarioPage />} />
++        <Route path="/inventario" element={<Suspense fallback={<LoadingState titulo="Cargando inventario…" />}><InventarioPage /></Suspense>} />
++        <Route path="/inventario/:bodegaId/:repuestoId/kardex" element={<Suspense fallback={<LoadingState titulo="Cargando kardex…" />}><KardexPage /></Suspense>} />
+         <Route path="/repuestos" element={<Suspense fallback={<LoadingState titulo="Cargando repuestos…" />}><RepuestosPage /></Suspense>} />
+         <Route path="/bodegas" element={<Suspense fallback={<LoadingState titulo="Cargando bodegas…" />}><BodegasPage /></Suspense>} />
+         <Route path="/compras" element={<Suspense fallback={<LoadingState titulo="Cargando compras…" />}><ComprasPage /></Suspense>} />
+diff --git a/frontend/src/app/capabilities.ts b/frontend/src/app/capabilities.ts
+index c28def4..8d46a5e 100644
+--- a/frontend/src/app/capabilities.ts
++++ b/frontend/src/app/capabilities.ts
+@@ -1,7 +1,7 @@
+ /**
+  * Capacidades conectadas de acceso, servicio, caja y abastecimiento.
+  * Las rutas disponibles requieren sesión y permisos del servidor.
+- * Las compras, el kardex general y los reportes conservan su estado pendiente.
++ * Compras e inventario están conectados; los reportes conservan su estado pendiente.
+  */
+ 
+ export type EstadoCapacidad = "disponible" | "incompleta" | "ausente";
+@@ -394,29 +394,18 @@ export const OPERACIONES: OperacionApi[] = [
+ 
+   // ---- Inventario / repuestos / bodegas ----
+   {
+-    id: "inventario.consultar",
+-    modulo: "Inventario",
+-    operacion: "Existencias por bodega/repuesto",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/inventario)",
+-    entrada: "bodegaId, categoriaId, texto",
+-    respuesta: "existencia, minimo, condicion",
+-    roles: "BODEGA, ADMIN",
+-    estado: "ausente",
+-    procedimiento: "vInventario",
+-    nota: "El stock se obtiene del kardex. No debe existir un campo editable de existencia.",
++    id: "inventario.consultar", modulo: "Inventario", operacion: "Consultar existencias, mínimos y valoración por bodega",
++    metodo: "GET", ruta: "/api/inventario", entrada: "buscar?, bodegaId?, categoriaId?, estadoStock?, activo?, pagina?, tamano?",
++    respuesta: "filas[] + resumen global del filtro + paginación", roles: "BODEGA, ADMIN", estado: "disponible",
++    procedimiento: "spResumenInventarioApi, spListarInventarioApi",
++    nota: "Existencias y costos de consulta; la respuesta conserva seis decimales sin redondeo en JavaScript.",
+   },
+   {
+-    id: "inventario.movimientos",
+-    modulo: "Inventario",
+-    operacion: "Kardex / movimientos",
+-    metodo: "Sin endpoint",
+-    ruta: "(requiere /api/inventario/movimientos)",
+-    entrada: "bodegaId, fechas",
+-    respuesta: "movimientos con origen y existencia resultante",
+-    roles: "BODEGA, ADMIN",
+-    estado: "ausente",
+-    procedimiento: "vMovimientoInventario",
++    id: "inventario.movimientos", modulo: "Inventario", operacion: "Consultar kardex de un repuesto en una bodega",
++    metodo: "GET", ruta: "/api/inventario/{bodegaId}/{repuestoId}/kardex", entrada: "desde?, hasta?, tipo?, pagina?, tamano?",
++    respuesta: "inventario + resumen del período + movimientos[] + paginación", roles: "BODEGA, ADMIN", estado: "disponible",
++    procedimiento: "spConsultarInventarioApi, spResumenKardexApi, spListarKardexApi",
++    nota: "Días UTC incluidos. Saldos independientes del filtro de tipo y de la página. Documentos, actor y costos históricos.",
+   },
+   {
+     id: "repuestos.catalogo",
+diff --git a/frontend/src/app/navigation.ts b/frontend/src/app/navigation.ts
+index 7b247f3..68c4342 100644
+--- a/frontend/src/app/navigation.ts
++++ b/frontend/src/app/navigation.ts
+@@ -78,6 +78,7 @@ export const NAVEGACION: NavGrupo[] = [
+         ruta: "/inventario",
+         icono: Boxes,
+         descripcion: "Existencias por bodega y minimos.",
++        roles: ["BODEGA", "ADMIN"],
+       },
+       {
+         etiqueta: "Repuestos",
+diff --git a/frontend/src/components/ui/DataTable.tsx b/frontend/src/components/ui/DataTable.tsx
+index 0ab1d40..f26834d 100644
+--- a/frontend/src/components/ui/DataTable.tsx
++++ b/frontend/src/components/ui/DataTable.tsx
+@@ -116,7 +116,7 @@ export function Paginacion({
+   return (
+     <div className="tc-row" style={{ justifyContent: "space-between", marginTop: 12 }}>
+       <span className="tc-field__hint">
+-        Pagina {pagina} de {totalPaginas} � {total} registro(s)
++        Página {pagina} de {totalPaginas} · {total} registro(s)
+       </span>
+       <div className="tc-row" style={{ gap: 8 }}>
+         <Button
+diff --git a/frontend/src/features/integracion/IntegracionPage.tsx b/frontend/src/features/integracion/IntegracionPage.tsx
+index 2324d16..78f3203 100644
+--- a/frontend/src/features/integracion/IntegracionPage.tsx
++++ b/frontend/src/features/integracion/IntegracionPage.tsx
+@@ -63,7 +63,7 @@ export function IntegracionPage() {
+ 
+       <div className="tc-stack">
+         <Alert tono="info" titulo="Contrato verificado">
+-          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF, entrega, abastecimiento, compras y recepción tienen rutas bajo <code>{API_BASE_URL}</code>.
++          Acceso, administración, clientes, equipos, órdenes, servicio técnico, caja, factura PDF, entrega, abastecimiento, compras, recepción, inventario y kardex tienen rutas bajo <code>{API_BASE_URL}</code>.
+           Las operaciones requieren sesión, rol y protección CSRF al escribir. El servicio técnico valida además
+           el responsable asignado. Los errores mantienen la forma <code>{"{ estado, mensaje, errores? }"}</code>.
+         </Alert>
+diff --git a/frontend/src/features/inventario/InventarioPage.tsx b/frontend/src/features/inventario/InventarioPage.tsx
+index 6311bee..5d853b5 100644
+--- a/frontend/src/features/inventario/InventarioPage.tsx
++++ b/frontend/src/features/inventario/InventarioPage.tsx
+@@ -1,11 +1,68 @@
+-import { PendingModule } from "../../components/ui/PendingModule";
++import { useEffect, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Link, useSearchParams } from "react-router-dom";
++import { RefreshCw } from "lucide-react";
++import { Card, PageHeader } from "../../components/ui/Card";
++import { Alert } from "../../components/ui/Alert";
++import { Badge } from "../../components/ui/Badge";
++import { Button } from "../../components/ui/Button";
++import { DataTable, Paginacion, type Columna } from "../../components/ui/DataTable";
++import { Field, SelectInput, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { abastecimientoApi } from "../../services/abastecimiento";
++import { inventarioApi, unidades, type Existencia, type FiltrosInventario } from "../../services/inventario";
++import { quetzales } from "../../services/compras";
++import { mensajeDeError } from "../../services/errors";
+ 
++const vacios: FiltrosInventario = { buscar: "", bodegaId: "", categoriaId: "", estadoStock: "", activo: "" };
++export function EstadoStock({ estado }: { estado: Existencia["estadoStock"] }) {
++  return <Badge tono={estado === "SIN_EXISTENCIA" ? "danger" : estado === "BAJO" ? "warn" : "ok"}>
++    {estado === "SIN_EXISTENCIA" ? "Sin existencias" : estado === "BAJO" ? "En mínimo o por debajo" : "Disponible"}</Badge>;
++}
++const columnas: Columna<Existencia>[] = [
++  { clave: "bodega", encabezado: "Bodega", render: r => <>{r.bodega}<div className="tc-field__hint">{r.codigoBodega}{!r.bodegaActiva ? " · Inactiva" : ""}</div></> },
++  { clave: "repuesto", encabezado: "Repuesto", render: r => <><strong>{r.repuesto}</strong><div className="tc-field__hint">{r.codigo} · {r.categoria}{!r.repuestoActivo ? " · Inactivo" : ""}</div></> },
++  { clave: "existencia", encabezado: "Existencias", numerica: true, render: r => unidades(r.existencia) },
++  { clave: "minimo", encabezado: "Mínimo", numerica: true, render: r => unidades(r.stockMinimo) },
++  { clave: "faltante", encabezado: "Faltan para el mínimo", numerica: true, render: r => unidades(r.faltante) },
++  { clave: "estado", encabezado: "Estado", render: r => <EstadoStock estado={r.estadoStock} /> },
++  { clave: "costo", encabezado: "Costo promedio", numerica: true, render: r => quetzales(r.costoPromedio, 6) },
++  { clave: "valor", encabezado: "Valor a costo promedio", numerica: true, render: r => quetzales(r.valorExistencia, 6) },
++  { clave: "accion", encabezado: "Historial", render: r => <Link className="tc-btn tc-btn--sm" to={`/inventario/${r.bodegaId}/${r.repuestoId}/kardex`}>Ver kardex</Link> },
++];
+ export function InventarioPage() {
+-  return (
+-    <PendingModule
+-      modulo="Inventario"
+-      titulo="Inventario por bodega"
+-      descripcion="Existencias por bodega y repuesto, con minimo y alertas de faltante."
+-    />
+-  );
++  const [params, setParams] = useSearchParams();
++  const filtros = Object.fromEntries(Object.keys(vacios).map(k => [k, params.get(k) ?? ""])) as unknown as FiltrosInventario;
++  const raw = params.get("pagina") ?? "1", pagina = /^[1-9]\d*$/.test(raw) && Number(raw) <= 2147483647 ? Number(raw) : 1;
++  const [entrada, setEntrada] = useState(filtros);
++  useEffect(() => { setEntrada(Object.fromEntries(Object.keys(vacios).map(k => [k, params.get(k) ?? ""])) as unknown as FiltrosInventario); }, [params]);
++  const datos = useQuery({ queryKey: ["inventario", "listado", filtros, pagina], queryFn: ({ signal }) => inventarioApi.listar(filtros, pagina, signal) });
++  const bodegas = useQuery({ queryKey: ["abastecimiento", "bodegas", "filtro"], queryFn: ({ signal }) => abastecimientoApi.bodegas("", undefined, signal) });
++  const categorias = useQuery({ queryKey: ["abastecimiento", "categorias"], queryFn: ({ signal }) => abastecimientoApi.categorias(signal) });
++  function aplicar(f: FiltrosInventario, p = 1) { const q = new URLSearchParams(); Object.entries(f).forEach(([k, v]) => { if (v) q.set(k, v); }); if (p > 1) q.set("pagina", String(p)); setParams(q); }
++  const resumen = datos.data?.resumen;
++  return <>
++    <PageHeader eyebrow="Inventario y compras" titulo="Inventario por bodega" descripcion="Consultá existencias, mínimos y costo promedio de cada repuesto."
++      acciones={<Button icono={<RefreshCw size={16} />} disabled={datos.isFetching} onClick={() => datos.refetch()}>Actualizar</Button>} />
++    <div className="tc-stack">
++      <Card><form className="tc-stack" onSubmit={e => { e.preventDefault(); aplicar({ ...entrada, buscar: entrada.buscar.trim() }); }}>
++        <div className="tc-grid tc-grid--2">
++          <Field label="Buscar en inventario" htmlFor="inv-buscar"><TextInput id="inv-buscar" maxLength={150} placeholder="Código, repuesto, categoría o bodega" value={entrada.buscar} onChange={e => setEntrada(v => ({ ...v, buscar: e.target.value }))} /></Field>
++          <Field label="Bodega" htmlFor="inv-bodega"><SelectInput id="inv-bodega" value={entrada.bodegaId} disabled={bodegas.isLoading || bodegas.isError} onChange={e => setEntrada(v => ({ ...v, bodegaId: e.target.value }))}><option value="">Todas</option>{bodegas.data?.map(b => <option key={b.bodegaId} value={b.bodegaId}>{b.nombre}{!b.activo ? " (inactiva)" : ""}</option>)}</SelectInput></Field>
++          <Field label="Categoría" htmlFor="inv-categoria"><SelectInput id="inv-categoria" value={entrada.categoriaId} disabled={categorias.isLoading || categorias.isError} onChange={e => setEntrada(v => ({ ...v, categoriaId: e.target.value }))}><option value="">Todas</option>{categorias.data?.map(c => <option key={c.categoriaId} value={c.categoriaId}>{c.nombre}</option>)}</SelectInput></Field>
++          <Field label="Estado de existencias" htmlFor="inv-estado"><SelectInput id="inv-estado" value={entrada.estadoStock} onChange={e => setEntrada(v => ({ ...v, estadoStock: e.target.value }))}><option value="">Todos</option><option value="SIN_EXISTENCIA">Sin existencias</option><option value="BAJO">En mínimo o por debajo, con existencias</option><option value="DISPONIBLE">Por encima del mínimo</option></SelectInput></Field>
++          <Field label="Actividad de los catálogos" htmlFor="inv-activo"><SelectInput id="inv-activo" value={entrada.activo} onChange={e => setEntrada(v => ({ ...v, activo: e.target.value }))}><option value="">Activos e inactivos</option><option value="true">Bodega y repuesto activos</option><option value="false">Bodega o repuesto inactivo</option></SelectInput></Field>
++        </div><div className="tc-row"><Button type="submit" variante="primario">Buscar</Button><Button type="button" onClick={() => { setEntrada(vacios); aplicar(vacios); }}>Limpiar</Button></div>
++      </form></Card>
++      {bodegas.isError ? <Alert tono="danger" accion={<Button onClick={() => bodegas.refetch()}>Reintentar bodegas</Button>}>{mensajeDeError(bodegas.error)}</Alert> : null}
++      {categorias.isError ? <Alert tono="danger" accion={<Button onClick={() => categorias.refetch()}>Reintentar categorías</Button>}>{mensajeDeError(categorias.error)}</Alert> : null}
++      {datos.isLoading ? <LoadingState titulo="Cargando inventario…" /> : datos.isError ? <Alert tono="danger" accion={<Button onClick={() => datos.refetch()}>Reintentar</Button>}>{mensajeDeError(datos.error)}</Alert> : <>
++        <div className="tc-grid tc-grid--cards">{[["Pares bodega / repuesto", resumen?.total], ["Sin existencias", resumen?.sinExistencia], ["En mínimo o por debajo, con stock", resumen?.stockBajo]].map(([label, value]) => <Card key={label}><div className="tc-metric__label">{label}</div><div className="tc-metric__value">{value}</div></Card>)}
++          <Card><div className="tc-metric__label">Valor a costo promedio</div><strong style={{ overflowWrap: "anywhere" }}>{quetzales(resumen?.valorTotal, 6)}</strong><div className="tc-field__hint">De todos los resultados del filtro.</div></Card></div>
++        <DataTable columnas={columnas} filas={datos.data?.filas ?? []} claveFila={r => `${r.bodegaId}:${r.repuestoId}`} vacio="No hay repuestos asociados para estos filtros." />
++        <Paginacion pagina={datos.data?.pagina ?? 1} totalPaginas={datos.data?.totalPaginas ?? 1} total={datos.data?.total ?? 0} onCambiar={p => aplicar(filtros, p)} />
++        <Alert tono="info">Las entradas se generan al recibir compras y las salidas al consumir repuestos en una reparación. Configurá el mínimo y las asociaciones desde Bodegas.</Alert>
++      </>}
++    </div>
++  </>;
+ }
+diff --git a/frontend/src/features/inventario/KardexPage.tsx b/frontend/src/features/inventario/KardexPage.tsx
+new file mode 100644
+index 0000000..c68c249
+--- /dev/null
++++ b/frontend/src/features/inventario/KardexPage.tsx
+@@ -0,0 +1,80 @@
++import { useEffect, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Link, useParams, useSearchParams } from "react-router-dom";
++import { RefreshCw } from "lucide-react";
++import { Card, PageHeader } from "../../components/ui/Card";
++import { Alert } from "../../components/ui/Alert";
++import { Badge } from "../../components/ui/Badge";
++import { Button } from "../../components/ui/Button";
++import { Dialog } from "../../components/ui/Dialog";
++import { DataTable, Paginacion, type Columna } from "../../components/ui/DataTable";
++import { Field, SelectInput, TextInput } from "../../components/ui/inputs";
++import { LoadingState } from "../../components/ui/StateView";
++import { inventarioApi, unidades, type FiltrosKardex, type Movimiento } from "../../services/inventario";
++import { quetzales } from "../../services/compras";
++import { mensajeDeError } from "../../services/errors";
++import { fechaHora } from "../../utils/format";
++import { useSession } from "../../app/session";
++import { EstadoStock } from "./InventarioPage";
++
++const vacios: FiltrosKardex = { desde: "", hasta: "", tipo: "" };
++export function KardexPage() {
++  const ids = useParams(), bodega = Number(ids.bodegaId), repuesto = Number(ids.repuestoId);
++  const valido = Number.isInteger(bodega) && bodega > 0 && bodega <= 2147483647 && Number.isInteger(repuesto) && repuesto > 0 && repuesto <= 2147483647;
++  const [params, setParams] = useSearchParams(), sesion = useSession();
++  const filtros: FiltrosKardex = { desde: params.get("desde") ?? "", hasta: params.get("hasta") ?? "", tipo: params.get("tipo") ?? "" };
++  const raw = params.get("pagina") ?? "1", pagina = /^[1-9]\d*$/.test(raw) && Number(raw) <= 2147483647 ? Number(raw) : 1;
++  const [entrada, setEntrada] = useState(filtros), [error, setError] = useState(""), [detalle, setDetalle] = useState<Movimiento | null>(null);
++  useEffect(() => { setEntrada({ desde: params.get("desde") ?? "", hasta: params.get("hasta") ?? "", tipo: params.get("tipo") ?? "" }); }, [params]);
++  const datos = useQuery({ queryKey: ["inventario", "kardex", bodega, repuesto, filtros, pagina], queryFn: ({ signal }) => inventarioApi.kardex(bodega, repuesto, filtros, pagina, signal), enabled: valido });
++  function aplicar(f: FiltrosKardex, p = 1) { const q = new URLSearchParams(); Object.entries(f).forEach(([k, v]) => { if (v) q.set(k, v); }); if (p > 1) q.set("pagina", String(p)); setParams(q); }
++  const columnas: Columna<Movimiento>[] = [
++    { clave: "movimiento", encabezado: "Movimiento", render: m => <><strong>#{m.movimientoId}</strong><div className="tc-field__hint">{fechaHora(m.fecha)}</div><Badge tono={m.tipo === "E" ? "ok" : "info"}>{m.tipo === "E" ? "Entrada" : "Salida"}</Badge></> },
++    { clave: "origen", encabezado: "Origen", render: m => m.compraId ? <Link to={`/compras/${m.compraId}`}>{m.numeroCompra}</Link> : sesion.roles.includes("ADMIN") ? <Link to={`/ordenes/${m.ordenId}`}>{m.numeroOrden}</Link> : <span>{m.numeroOrden}</span> },
++    { clave: "responsable", encabezado: "Responsable", render: m => m.responsable },
++    { clave: "entrada", encabezado: "Entradas", numerica: true, render: m => m.tipo === "E" ? unidades(m.cantidad) : "—" },
++    { clave: "salida", encabezado: "Salidas", numerica: true, render: m => m.tipo === "S" ? unidades(m.cantidad) : "—" },
++    { clave: "saldo", encabezado: "Saldo histórico", numerica: true, render: m => unidades(m.existenciaResultante) },
++    { clave: "costo", encabezado: "Costo unitario histórico", numerica: true, render: m => quetzales(m.costoUnitario) },
++    { clave: "promedio", encabezado: "Promedio posterior", numerica: true, render: m => quetzales(m.costoPosterior, 6) },
++    { clave: "detalle", encabezado: "Detalle", render: m => <Button tamano="sm" onClick={() => setDetalle(m)}>Ver movimiento</Button> },
++  ];
++  const i = datos.data?.inventario, r = datos.data?.resumen;
++  return <>
++    <PageHeader eyebrow="Inventario y compras" titulo="Kardex del repuesto" descripcion={i ? `${i.codigo} · ${i.repuesto} · ${i.bodega}` : "Historial de entradas y salidas por bodega."}
++      acciones={<><Link to="/inventario" className="tc-btn">Volver al inventario</Link><Button icono={<RefreshCw size={16} />} disabled={!valido || datos.isFetching} onClick={() => datos.refetch()}>Actualizar</Button></>} />
++    <div className="tc-stack">
++      {!valido ? <Alert tono="danger">La bodega o el repuesto de la dirección no es válido.</Alert> : <>
++        <Card><form className="tc-stack" onSubmit={e => { e.preventDefault(); if (entrada.desde && entrada.hasta && entrada.desde > entrada.hasta) { setError("La fecha inicial no puede ser posterior a la final."); return; } setError(""); aplicar(entrada); }}>
++          <div className="tc-grid tc-grid--2"><Field label="Desde (día UTC)" htmlFor="k-desde"><TextInput id="k-desde" type="date" min="0001-01-01" max="9999-12-31" value={entrada.desde} onChange={e => setEntrada(v => ({ ...v, desde: e.target.value }))} /></Field>
++            <Field label="Hasta (día UTC, incluido)" htmlFor="k-hasta"><TextInput id="k-hasta" type="date" min="0001-01-01" max="9999-12-31" value={entrada.hasta} onChange={e => setEntrada(v => ({ ...v, hasta: e.target.value }))} /></Field>
++            <Field label="Mostrar movimientos" htmlFor="k-tipo"><SelectInput id="k-tipo" value={entrada.tipo} onChange={e => setEntrada(v => ({ ...v, tipo: e.target.value }))}><option value="">Entradas y salidas</option><option value="E">Solo entradas</option><option value="S">Solo salidas</option></SelectInput></Field></div>
++          <div className="tc-row"><Button type="submit" variante="primario">Buscar</Button><Button type="button" onClick={() => { setEntrada(vacios); aplicar(vacios); setError(""); }}>Limpiar</Button></div>
++        </form></Card>
++        {error ? <Alert tono="danger">{error}</Alert> : null}
++        {datos.isLoading ? <LoadingState titulo="Cargando kardex…" /> : datos.isError ? <Alert tono="danger" accion={<Button onClick={() => datos.refetch()}>Reintentar</Button>}>{mensajeDeError(datos.error)}</Alert> : i && r ? <>
++          <Card><div className="tc-row"><EstadoStock estado={i.estadoStock} />{!i.bodegaActiva ? <Badge>Bodega inactiva</Badge> : null}{!i.repuestoActivo ? <Badge>Repuesto inactivo</Badge> : null}</div>
++            <p>Existencias actuales: <strong>{unidades(i.existencia)}</strong> · Mínimo: {unidades(i.stockMinimo)} · Promedio actual: <strong>{quetzales(i.costoPromedio, 6)}</strong></p></Card>
++          <div className="tc-grid tc-grid--cards">{[["Saldo inicial del período", r.saldoInicial], ["Entradas del período", r.entradas], ["Salidas del período", r.salidas], ["Saldo al cierre del período", r.saldoFinal]].map(([label, value]) => <Card key={label}><div className="tc-metric__label">{label}</div><div className="tc-metric__value">{unidades(value)}</div></Card>)}</div>
++          <Alert tono="info">Los saldos y totales del período incluyen entradas y salidas completas, aunque filtres un tipo o cambies de página. Las horas de cada movimiento se muestran en tu zona horaria.</Alert>
++          <DataTable columnas={columnas} filas={datos.data?.filas ?? []} claveFila={m => m.movimientoId} vacio="No hay movimientos para estos filtros." />
++          <Paginacion pagina={datos.data?.pagina ?? 1} totalPaginas={datos.data?.totalPaginas ?? 1} total={datos.data?.total ?? 0} onCambiar={p => aplicar(filtros, p)} />
++        </> : null}
++      </>}
++    </div>
++    {detalle ? <Dialog abierto titulo={`Movimiento #${detalle.movimientoId}`} onCerrar={() => setDetalle(null)}>
++      <div className="tc-stack"><p data-autofocus tabIndex={-1} style={{ margin: 0, outline: "none" }}>{i?.repuesto} · {i?.bodega}</p><dl className="tc-stack">{[
++        ["Tipo y fecha", `${detalle.tipo === "E" ? "Entrada" : "Salida"} · ${fechaHora(detalle.fecha)}`],
++        ["Documento y línea", `${detalle.numeroCompra ?? detalle.numeroOrden} · línea ${detalle.lineaCompra ?? detalle.lineaReparacion}`],
++        ["Proveedor", detalle.proveedor ?? "No corresponde"], ["Responsable", `${detalle.responsable} · usuario #${detalle.usuarioId}`],
++        ["Nombre del responsable", detalle.nombreHistorico ? "Conservado al recibir la compra" : "Nombre actual del empleado; el ID y el movimiento son históricos"],
++        ["Existencias antes / después", `${unidades(detalle.existenciaAnterior)} / ${unidades(detalle.existenciaResultante)}`],
++        ["Cantidad", unidades(detalle.cantidad)], ["Costo unitario histórico", quetzales(detalle.costoUnitario)], ["Importe del movimiento", quetzales(detalle.importe)],
++        ["Promedio antes / después", `${quetzales(detalle.costoAnterior, 6)} / ${quetzales(detalle.costoPosterior, 6)}`],
++        ["Valor de existencias después", quetzales(detalle.valorExistencia, 6)],
++        ["Origen del promedio histórico", detalle.esMigracion === null ? "Sin valoración disponible" : detalle.esMigracion ? "Reconstruido desde los movimientos al instalar costos por bodega" : "Conservado al registrar el movimiento"],
++      ].map(([label, value]) => <div key={label}><dt className="tc-field__hint">{label}</dt><dd style={{ margin: 0, overflowWrap: "anywhere" }}>{value}</dd></div>)}</dl>
++      <Button onClick={() => setDetalle(null)}>Cerrar</Button></div>
++    </Dialog> : null}
++  </>;
++}
+diff --git a/frontend/src/services/inventario.ts b/frontend/src/services/inventario.ts
+new file mode 100644
+index 0000000..84bf08b
+--- /dev/null
++++ b/frontend/src/services/inventario.ts
+@@ -0,0 +1,34 @@
++import { http } from "./http";
++export interface Existencia {
++  bodegaId: number; codigoBodega: string; bodega: string; bodegaActiva: boolean;
++  repuestoId: number; codigo: string; repuesto: string; repuestoActivo: boolean;
++  categoriaId: number; categoria: string; existencia: string; stockMinimo: number; faltante: string;
++  estadoStock: "SIN_EXISTENCIA" | "BAJO" | "DISPONIBLE"; costoPromedio: string; valorExistencia: string;
++}
++export interface ResumenInventario { total: number; sinExistencia: number; stockBajo: number; valorTotal: string }
++export interface Pagina { pagina: number; tamano: number; total: number; totalPaginas: number }
++export interface Inventario extends Pagina { filas: Existencia[]; resumen: ResumenInventario }
++export interface Movimiento {
++  movimientoId: string; fecha: string; tipo: "E" | "S"; cantidad: number;
++  existenciaAnterior: string; existenciaResultante: string; costoUnitario: string; importe: string;
++  costoAnterior: string | null; costoPosterior: string | null; valorExistencia: string | null;
++  esMigracion: boolean | null; compraId: number | null; lineaCompra: number | null; numeroCompra: string | null;
++  proveedorId: number | null; proveedor: string | null; ordenId: number | null; numeroOrden: string | null;
++  reparacionId: number | null; lineaReparacion: number | null; usuarioId: number; responsable: string; nombreHistorico: boolean;
++}
++export interface Kardex extends Pagina {
++  inventario: Existencia; resumen: { saldoInicial: string; entradas: string; salidas: string; saldoFinal: string }; filas: Movimiento[];
++}
++export interface FiltrosInventario { buscar: string; bodegaId: string; categoriaId: string; estadoStock: string; activo: string }
++export interface FiltrosKardex { desde: string; hasta: string; tipo: string }
++function consulta(filtros: FiltrosInventario | FiltrosKardex, pagina: number) {
++  const p = new URLSearchParams({ pagina: String(pagina), tamano: "25" });
++  Object.entries(filtros).forEach(([k, v]) => { if (v !== "") p.set(k, v); });
++  return `?${p}`;
++}
++export const inventarioApi = {
++  listar: (f: FiltrosInventario, pagina: number, signal?: AbortSignal) => http.get<Inventario>(`/inventario${consulta(f, pagina)}`, signal),
++  kardex: (bodega: number, repuesto: number, f: FiltrosKardex, pagina: number, signal?: AbortSignal) =>
++    http.get<Kardex>(`/inventario/${bodega}/${repuesto}/kardex${consulta(f, pagina)}`, signal),
++};
++export function unidades(valor: string | number | null | undefined) { return valor === null || valor === undefined ? "—" : BigInt(valor).toLocaleString("es-GT"); }
